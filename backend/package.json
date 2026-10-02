@@ -1,0 +1,40 @@
+{
+  "name": "delivery-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wassalni backend — Supabase data layer + Express API (sessions, 2FA email)",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "api": "ts-node api/server.ts",
+    "user:create": "ts-node api/scripts/create-user.ts",
+    "db": "ts-node DB/cli.ts",
+    "db:init": "ts-node DB/cli.ts init",
+    "db:reset": "ts-node DB/cli.ts reset",
+    "db:status": "ts-node DB/cli.ts status",
+    "db:tables": "ts-node DB/cli.ts tables",
+    "db:demo": "ts-node DB/cli.ts demo",
+    "test:utils": "ts-node DB/tests/sql-utils.test.ts"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "nodemailer": "^6.9.14",
+    "pg": "^8.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/nodemailer": "^6.4.15",
+    "@types/pg": "^8.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  }
+}

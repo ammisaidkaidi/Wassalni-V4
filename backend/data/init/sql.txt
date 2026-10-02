@@ -1,0 +1,1937 @@
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+--  delivery_domain.sql — PostgreSQL 13+ (Supabase-ready) — v3 (FULL)
+--  Algeria admin hierarchy (Loi 26-06): pays > wilaya > daira > commune
+--
+--  v3 requirements implemented:
+--   * Driver master table (NIN=18 digits, NIF=20 digits, phone/email/address, etc.)
+--   * Vehicle master table (matricule, seats, owner NIF=20 digits)
+--   * Trip references driver table record (trip.driver_id FK)
+--   * DefaultTripPrices (template per trajectory): default_trip_price(from,to,price,...)
+--   * TripPrices (actual per trip): trip_price(from,to,price,...)
+--   * Procedures: sp_set_default_trip_price(...), sp_set_trip_price(...)
+--   * Optional enforcement enabled: cannot reserve unless trip.published_at IS NOT NULL
+--   * Edit locks: once trip is published AND has pending/confirmed reservations,
+--     stops and trip prices are locked; core trip fields are locked.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 0 — SETUP
+-- ───────────────────────────────────────────────────────────────────────────────
+
+do $$ begin
+  create extension if not exists pgcrypto;
+exception
+  when insufficient_privilege then null;
+  when duplicate_object      then null;
+end $$;
+
+create sequence if not exists seq_business_code start 100001;
+
+do $$ begin create type trip_status        as enum ('scheduled','in_progress','completed','cancelled');
+exception when duplicate_object then null; end $$;
+do $$ begin create type reservation_status as enum ('pending','confirmed','completed','cancelled','no_show');
+exception when duplicate_object then null; end $$;
+do $$ begin create type payment_method     as enum ('cash','cib','edahabia','bank_transfer','card');
+exception when duplicate_object then null; end $$;
+do $$ begin create type payment_status     as enum ('pending','paid','failed','refunded','partially_refunded');
+exception when duplicate_object then null; end $$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 1 — ADMINISTRATIVE REGISTRY
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists pays (
+  id        smallint primary key,
+  code_iso  char(2)  not null unique,
+  nom_ar    text     not null,
+  nom_fr    text     not null,
+  nom_en    text     not null
+);
+
+create table if not exists wilaya (
+  id         smallint primary key check (id between 1 and 99),
+  pays_id    smallint not null default 1 references pays(id),
+  code       char(2)  not null unique check (code ~ '^[0-9]{2}$'),
+  nom_ar     text     not null,
+  nom_fr     text     not null check (btrim(nom_fr) <> '') unique,
+  nom_en     text     not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists daira (
+  id         smallint generated always as identity primary key,
+  wilaya_id  smallint not null references wilaya(id) on delete cascade,
+  nom_ar     text     not null,
+  nom_fr     text     not null,
+  nom_en     text     not null,
+  unique (wilaya_id, nom_fr),
+  unique (id, wilaya_id)
+);
+
+create table if not exists commune (
+  id          integer generated always as identity primary key,
+  daira_id    smallint not null,
+  wilaya_id   smallint not null,
+  nom_ar      text     not null,
+  nom_fr      text     not null,
+  nom_en      text     not null,
+  code_postal char(5)  check (code_postal is null or code_postal ~ '^[0-9]{5}$'),
+  foreign key (daira_id, wilaya_id) references daira (id, wilaya_id) on delete cascade,
+  unique (wilaya_id, nom_fr),
+  unique (id, wilaya_id)
+);
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 2 — TRAJECTORY / WPOINT / COMMUNE SET
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists trajectory (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique check (btrim(name) <> ''),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists wpoint (
+  id            uuid primary key default gen_random_uuid(),
+  trajectory_id uuid     not null references trajectory(id) on delete cascade,
+  wilaya_id     smallint not null references wilaya(id),
+  position      integer  not null check (position > 0),
+  created_at    timestamptz not null default now(),
+  unique (trajectory_id, wilaya_id),
+  constraint wpoint_traj_position_uk unique (trajectory_id, position) deferrable initially immediate,
+  unique (id, wilaya_id),
+  unique (id, trajectory_id)
+);
+
+create table if not exists wpoint_commune (
+  wpoint_id  uuid      not null,
+  wilaya_id  smallint  not null,
+  commune_id integer   not null,
+  sort_key   bigint generated always as identity,
+  added_at   timestamptz not null default now(),
+  primary key (wpoint_id, commune_id),
+  foreign key (wpoint_id,  wilaya_id) references wpoint  (id, wilaya_id) on delete cascade,
+  foreign key (commune_id, wilaya_id) references commune (id, wilaya_id) on delete cascade
+);
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 3 — PERSONNEL / VEHICLES / CUSTOMER
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists driver (
+  id         uuid primary key default gen_random_uuid(),
+  full_name  text not null check (btrim(full_name) <> ''),
+  nin        text not null unique check (nin ~ '^[0-9]{18}$'),
+  nif        text check (nif is null or nif ~ '^[0-9]{20}$'),
+  si         text,
+  phone      text not null unique check (phone ~ '^\+?[0-9]{8,15}$'),
+  email      text check (email is null or email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'),
+  address    text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vehicle (
+  id          uuid primary key default gen_random_uuid(),
+  matricule   text not null unique check (btrim(matricule) <> ''),
+  seats       smallint not null check (seats between 1 and 32767),
+  nif_owner   text check (nif_owner is null or nif_owner ~ '^[0-9]{20}$'),
+  make        text,
+  model       text,
+  notes       text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+-- high-frequency updates kept separate
+create table if not exists driver_last_location (
+  driver_id   uuid primary key references driver(id) on delete cascade,
+  gps_lat     numeric(9,6) not null check (gps_lat between -90 and 90),
+  gps_lon     numeric(9,6) not null check (gps_lon between -180 and 180),
+  recorded_at timestamptz not null default now()
+);
+
+create table if not exists vehicle_last_location (
+  vehicle_id  uuid primary key references vehicle(id) on delete cascade,
+  gps_lat     numeric(9,6) not null check (gps_lat between -90 and 90),
+  gps_lon     numeric(9,6) not null check (gps_lon between -180 and 180),
+  recorded_at timestamptz not null default now()
+);
+
+create table if not exists customer (
+  id         uuid primary key default gen_random_uuid(),
+  full_name  text not null check (btrim(full_name) <> ''),
+  phone      text not null unique check (phone ~ '^\+?[0-9]{8,15}$'),
+  email      text check (email is null or email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'),
+
+  nin        text check (nin is null or nin ~ '^[0-9]{18}$'),
+  nif        text check (nif is null or nif ~ '^[0-9]{20}$'),
+  si         text,
+  address    text,
+  home_wilaya_id  smallint,
+  home_commune_id integer,
+  gps_lat    numeric(9,6),
+  gps_lon    numeric(9,6),
+
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+
+  constraint customer_gps_chk check (
+    (gps_lat is null and gps_lon is null)
+    or (gps_lat between -90 and 90 and gps_lon between -180 and 180)
+  )
+);
+
+-- upgrade-safe columns/constraints (no-op for fresh installs)
+alter table customer
+  add column if not exists nin text,
+  add column if not exists nif text,
+  add column if not exists si text,
+  add column if not exists address text,
+  add column if not exists home_wilaya_id smallint,
+  add column if not exists home_commune_id integer,
+  add column if not exists gps_lat numeric(9,6),
+  add column if not exists gps_lon numeric(9,6);
+
+alter table customer drop constraint if exists customer_nin_chk;
+alter table customer drop constraint if exists customer_nif_chk;
+alter table customer
+  add constraint customer_nin_chk check (nin is null or nin ~ '^[0-9]{18}$'),
+  add constraint customer_nif_chk check (nif is null or nif ~ '^[0-9]{20}$');
+
+do $$ begin
+  alter table customer add constraint customer_home_commune_fk
+    foreign key (home_commune_id, home_wilaya_id) references commune (id, wilaya_id);
+exception when duplicate_object then null; end $$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 4 — OPERATIONS TABLES (TRIPS / STOPS / PRICES / RESERVATIONS / PAYMENTS)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists trip (
+  id            uuid primary key default gen_random_uuid(),
+  code          text not null unique,
+  trajectory_id uuid not null references trajectory(id),
+  status        trip_status not null default 'scheduled',
+
+  published_at  timestamptz,
+
+  departure_at  timestamptz not null,
+  arrival_eta   timestamptz,
+  capacity      smallint not null check (capacity > 0),
+  seat_price    numeric(12,2) not null check (seat_price >= 0),  -- fallback base price
+  currency      text not null default 'DZD' check (currency in ('DZD')),
+
+  driver_id     uuid references driver(id),
+  vehicle_id    uuid references vehicle(id),
+
+  notes         text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+
+  constraint trip_eta_after_departure check (arrival_eta is null or arrival_eta >= departure_at),
+  unique (id, trajectory_id)
+);
+
+create table if not exists trip_stop (
+  trip_id       uuid not null,
+  trajectory_id uuid not null,
+  wpoint_id     uuid not null,
+  eta           timestamptz,
+  primary key (trip_id, wpoint_id),
+  foreign key (trip_id,   trajectory_id) references trip   (id, trajectory_id) on delete cascade,
+  foreign key (wpoint_id, trajectory_id) references wpoint (id, trajectory_id) on delete cascade
+);
+
+-- DEFAULT prices template per trajectory: FROM wpoint -> TO wpoint -> price
+create table if not exists default_trip_price (
+  trajectory_id  uuid not null references trajectory(id) on delete cascade,
+  from_wpoint_id uuid not null,
+  to_wpoint_id   uuid not null,
+  currency       text not null default 'DZD' check (currency in ('DZD')),
+  price          numeric(12,2) not null check (price >= 0),
+  min_price      numeric(12,2) check (min_price is null or min_price >= 0),
+  max_price      numeric(12,2) check (max_price is null or max_price >= 0),
+  notes          text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now(),
+  primary key (trajectory_id, from_wpoint_id, to_wpoint_id),
+  foreign key (from_wpoint_id, trajectory_id) references wpoint (id, trajectory_id) on delete cascade,
+  foreign key (to_wpoint_id,   trajectory_id) references wpoint (id, trajectory_id) on delete cascade,
+  constraint default_trip_price_distinct check (from_wpoint_id <> to_wpoint_id),
+  constraint default_trip_price_bounds check (
+    (min_price is null or min_price <= price)
+    and (max_price is null or price <= max_price)
+    and (min_price is null or max_price is null or min_price <= max_price)
+  )
+);
+
+-- Actual prices per trip: FROM stop -> TO stop -> price
+create table if not exists trip_price (
+  trip_id        uuid not null references trip(id) on delete cascade,
+  from_wpoint_id uuid not null,
+  to_wpoint_id   uuid not null,
+  currency       text not null default 'DZD' check (currency in ('DZD')),
+  price          numeric(12,2) not null check (price >= 0),
+  min_price      numeric(12,2) check (min_price is null or min_price >= 0),
+  max_price      numeric(12,2) check (max_price is null or max_price >= 0),
+  notes          text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now(),
+  primary key (trip_id, from_wpoint_id, to_wpoint_id),
+  foreign key (trip_id, from_wpoint_id) references trip_stop(trip_id, wpoint_id) on delete cascade,
+  foreign key (trip_id, to_wpoint_id)   references trip_stop(trip_id, wpoint_id) on delete cascade,
+  constraint trip_price_distinct check (from_wpoint_id <> to_wpoint_id),
+  constraint trip_price_bounds check (
+    (min_price is null or min_price <= price)
+    and (max_price is null or price <= max_price)
+    and (min_price is null or max_price is null or min_price <= max_price)
+  )
+);
+
+create table if not exists reservation (
+  id                uuid primary key default gen_random_uuid(),
+  code              text not null unique,
+  trip_id           uuid not null,
+  trajectory_id     uuid not null,
+  customer_id       uuid not null references customer(id),
+  seats             smallint not null check (seats between 1 and 30),
+  pickup_wpoint_id  uuid,
+  dropoff_wpoint_id uuid,
+  status            reservation_status not null default 'pending',
+  total_price       numeric(12,2) not null check (total_price >= 0),
+  currency          text not null default 'DZD' check (currency in ('DZD')),
+  notes             text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  foreign key (trip_id, trajectory_id)              references trip   (id, trajectory_id),
+  foreign key (pickup_wpoint_id,  trajectory_id)    references wpoint (id, trajectory_id),
+  foreign key (dropoff_wpoint_id, trajectory_id)    references wpoint (id, trajectory_id),
+  constraint reservation_distinct_endpoints
+    check (pickup_wpoint_id is null or dropoff_wpoint_id is null
+           or pickup_wpoint_id <> dropoff_wpoint_id)
+);
+
+create table if not exists payment (
+  id              uuid primary key default gen_random_uuid(),
+  code            text not null unique,
+  reservation_id  uuid not null references reservation(id),
+  amount          numeric(12,2) not null check (amount > 0),
+  refunded_amount numeric(12,2) not null default 0 check (refunded_amount >= 0),
+  currency        text not null default 'DZD' check (currency in ('DZD')),
+  method          payment_method not null,
+  status          payment_status not null default 'pending',
+  reference       text,
+  paid_at         timestamptz,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  constraint payment_refund_consistency check (
+       (status = 'refunded'           and refunded_amount = amount)
+    or (status = 'partially_refunded' and refunded_amount > 0 and refunded_amount < amount)
+    or (status in ('pending','paid','failed') and refunded_amount = 0))
+);
+
+alter table payment add column if not exists refunded_amount numeric(12,2) not null default 0;
+
+create table if not exists import_log (
+  id            bigint generated always as identity primary key,
+  ran_at        timestamptz not null default now(),
+  nb_wilayas    integer not null,
+  nb_dairas     integer not null,
+  nb_communes   integer not null,
+  payload_bytes integer not null
+);
+
+
+-- ─── INDEXES ───
+create index if not exists idx_daira_wilaya             on daira   (wilaya_id);
+create index if not exists idx_commune_daira            on commune (daira_id);
+create index if not exists idx_commune_wilaya           on commune (wilaya_id);
+create index if not exists idx_commune_postal           on commune (code_postal);
+create index if not exists idx_wpoint_traj_pos          on wpoint  (trajectory_id, position);
+create index if not exists idx_wpc_commune              on wpoint_commune (commune_id);
+
+create index if not exists idx_trip_trajectory          on trip    (trajectory_id);
+create index if not exists idx_trip_departure           on trip    (departure_at);
+create index if not exists idx_trip_status              on trip    (status);
+create index if not exists idx_trip_published_at        on trip    (published_at);
+create index if not exists idx_trip_driver              on trip    (driver_id);
+create index if not exists idx_trip_vehicle             on trip    (vehicle_id);
+create index if not exists idx_trip_stop_wpoint         on trip_stop (wpoint_id);
+
+create index if not exists idx_default_trip_price_traj  on default_trip_price (trajectory_id);
+create index if not exists idx_trip_price_trip          on trip_price (trip_id);
+
+create index if not exists idx_reservation_trip         on reservation (trip_id);
+create index if not exists idx_reservation_active       on reservation (trip_id) where status in ('pending','confirmed');
+create index if not exists idx_reservation_status       on reservation (status);
+create index if not exists idx_reservation_customer     on reservation (customer_id);
+
+create index if not exists idx_payment_reservation      on payment (reservation_id, status);
+create index if not exists idx_payment_status           on payment (status);
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 5 — DOMAIN ERROR CATALOGUE (SQLSTATE = 'DZ' + 3 digits)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace view v_domain_errors as
+select * from (values
+  ('DZ001','DOMAIN_ERROR',                  'DomainError',                 'Generic domain rule violation'),
+  ('DZ101','INVALID_TRAJECTORY_NAME',       'InvalidTrajectoryNameError',  'Trajectory name is empty/blank'),
+  ('DZ102','TRAJECTORY_NOT_FOUND',          'DomainError',                 'Unknown trajectory id'),
+  ('DZ103','TRAJECTORY_NAME_IMMUTABLE',     'DomainError',                 'Trajectory identity (name) cannot change'),
+  ('DZ201','INVALID_WILAYA',                'InvalidWilayaError',          'Unknown wilaya name/code'),
+  ('DZ202','INVALID_DAIRA',                 'InvalidDairaError',           'Daira does not belong to the wilaya'),
+  ('DZ203','INVALID_COMMUNE',               'InvalidCommuneError',         'Commune does not belong to the wilaya'),
+  ('DZ204','INVALID_WPOINT_MERGE',          'InvalidWPointMergeError',     'Cannot merge WPoints of different wilayas'),
+  ('DZ205','WPOINT_NOT_FOUND',              'DomainError',                 'Unknown WPoint id'),
+  ('DZ206','WPOINT_IDENTITY_IMMUTABLE',     'DomainError',                 'WPoint wilaya/trajectory cannot change'),
+  ('DZ301','TRIP_NOT_FOUND',                'DomainError',                 'Unknown trip id'),
+  ('DZ302','TRIP_NOT_BOOKABLE',             'DomainError',                 'Trip is not scheduled / not published / already departed'),
+  ('DZ303','INSUFFICIENT_SEATS',            'DomainError',                 'Not enough free seats on the trip'),
+  ('DZ304','INVALID_TRIP_TRANSITION',       'DomainError',                 'Illegal trip status transition'),
+  ('DZ305','CAPACITY_TOO_LOW',              'DomainError',                 'New capacity below already-held seats'),
+  ('DZ306','TRIP_LOCKED',                   'DomainError',                 'Trip is published and has active reservations; core fields locked'),
+  ('DZ307','STOPS_LOCKED',                  'DomainError',                 'Trip stops/prices locked because reservations exist'),
+  ('DZ308','TRIP_PRICE_NOT_DEFINED',        'DomainError',                 'No price defined for the selected FROM/TO stops'),
+  ('DZ401','RESERVATION_NOT_FOUND',         'DomainError',                 'Unknown reservation id'),
+  ('DZ402','INVALID_RESERVATION_TRANSITION','DomainError',                 'Illegal reservation status transition / immutable field'),
+  ('DZ403','RESERVATION_NOT_PAYABLE',       'DomainError',                 'Cancelled reservations cannot be paid'),
+  ('DZ404','CUSTOMER_NOT_FOUND',            'DomainError',                 'Unknown customer id'),
+  ('DZ501','PAYMENT_NOT_FOUND',             'DomainError',                 'Unknown payment id'),
+  ('DZ502','INVALID_PAYMENT_TRANSITION',    'DomainError',                 'Illegal payment status transition / immutable field'),
+  ('DZ503','PAYMENT_EXCEEDS_TOTAL',         'DomainError',                 'Paid amount would exceed reservation total'),
+  ('DZ504','CURRENCY_MISMATCH',             'DomainError',                 'Currency mismatch'),
+  ('DZ505','INVALID_REFUND_AMOUNT',         'DomainError',                 'Refund amount <= 0 or above refundable balance'),
+  ('DZ601','INVALID_STOP',                  'DomainError',                 'WPoint is not a valid stop/endpoint of the trip'),
+  ('DZ602','WPOINT_IN_USE',                 'DomainError',                 'WPoint is referenced by reservations'),
+  ('DZ603','INVALID_ROUTE_ORDER',           'DomainError',                 'Pickup must come before dropoff on the trajectory')
+) as t(sqlstate, code_name, ts_equivalent, description);
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 6 — REGISTRY FUNCTIONS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function resolve_wilaya(p_name text)
+returns smallint language sql stable as
+$$
+  select w.id
+  from wilaya w
+  where btrim(p_name) <> ''
+    and (   lower(w.nom_fr) = lower(btrim(p_name))
+         or lower(w.nom_ar) = lower(btrim(p_name))
+         or lower(w.nom_en) = lower(btrim(p_name))
+         or (btrim(p_name) ~ '^[0-9]{1,2}$' and w.code = lpad(btrim(p_name), 2, '0')))
+  order by (w.nom_fr = btrim(p_name)) desc, w.id
+  limit 1;
+$$;
+
+create or replace function resolve_daira(p_wilaya_id smallint, p_name text)
+returns smallint language sql stable as
+$$
+  select d.id
+  from daira d
+  where d.wilaya_id = p_wilaya_id
+    and btrim(p_name) <> ''
+    and (   lower(d.nom_fr) = lower(btrim(p_name))
+         or lower(d.nom_ar) = lower(btrim(p_name))
+         or lower(d.nom_en) = lower(btrim(p_name)))
+  order by (d.nom_fr = btrim(p_name)) desc, d.id
+  limit 1;
+$$;
+
+create or replace function resolve_commune(p_wilaya_id smallint, p_name text)
+returns integer language sql stable as
+$$
+  select c.id
+  from commune c
+  where c.wilaya_id = p_wilaya_id
+    and btrim(p_name) <> ''
+    and (   lower(c.nom_fr) = lower(btrim(p_name))
+         or lower(c.nom_ar) = lower(btrim(p_name))
+         or lower(c.nom_en) = lower(btrim(p_name)))
+  order by (c.nom_fr = btrim(p_name)) desc, c.id
+  limit 1;
+$$;
+
+create or replace function get_dairas(p_wilaya text)
+returns table (daira_id smallint, nom_fr text, nom_ar text, nom_en text)
+language sql stable as
+$$
+  select d.id, d.nom_fr, d.nom_ar, d.nom_en
+  from daira d
+  where d.wilaya_id = resolve_wilaya(p_wilaya)
+  order by d.nom_fr;
+$$;
+
+create or replace function get_communes(p_wilaya text)
+returns table (commune_id integer, nom_fr text, nom_ar text, code_postal char(5))
+language sql stable as
+$$
+  select c.id, c.nom_fr, c.nom_ar, c.code_postal
+  from commune c
+  where c.wilaya_id = resolve_wilaya(p_wilaya)
+  order by c.nom_fr;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 7 — COMMON TRIGGERS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function trg_touch_updated_at()
+returns trigger language plpgsql as
+$$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+create or replace function trg_trajectory_guard()
+returns trigger language plpgsql as
+$$
+begin
+  new.name := btrim(coalesce(new.name, ''));
+  if new.name = '' then
+    raise exception 'Trajectory name cannot be empty' using errcode = 'DZ101';
+  end if;
+  if tg_op = 'UPDATE' and new.name <> old.name then
+    raise exception 'Trajectory name (identity) is immutable' using errcode = 'DZ103';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function trg_wpoint_guard()
+returns trigger language plpgsql as
+$$
+begin
+  if new.wilaya_id <> old.wilaya_id or new.trajectory_id <> old.trajectory_id then
+    raise exception 'WPoint wilaya/trajectory (identity) is immutable' using errcode = 'DZ206';
+  end if;
+  return new;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 8 — TRAJECTORY / WPOINT FUNCTIONS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function create_trajectory(p_name text)
+returns uuid language plpgsql as
+$$
+declare
+  v_name text := btrim(coalesce(p_name, ''));
+  v_id   uuid;
+begin
+  if v_name = '' then
+    raise exception 'Trajectory name cannot be empty: "%"', p_name using errcode = 'DZ101';
+  end if;
+
+  insert into trajectory (name) values (v_name)
+  on conflict (name) do update set updated_at = now()
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+create or replace function add_wpoint(p_trajectory uuid, p_wilaya text)
+returns uuid language plpgsql as
+$$
+declare
+  v_wilaya_id smallint := resolve_wilaya(p_wilaya);
+  v_wpoint    uuid;
+  v_next_pos  integer;
+begin
+  if v_wilaya_id is null then
+    raise exception 'Invalid Wilaya: %', p_wilaya using errcode = 'DZ201';
+  end if;
+
+  perform 1 from trajectory where id = p_trajectory for update;
+  if not found then
+    raise exception 'Trajectory % not found', p_trajectory using errcode = 'DZ102';
+  end if;
+
+  select id into v_wpoint
+  from wpoint
+  where trajectory_id = p_trajectory and wilaya_id = v_wilaya_id;
+
+  if v_wpoint is not null then
+    return v_wpoint; -- merge
+  end if;
+
+  select coalesce(max(position), 0) + 1 into v_next_pos
+  from wpoint where trajectory_id = p_trajectory;
+
+  insert into wpoint (trajectory_id, wilaya_id, position)
+  values (p_trajectory, v_wilaya_id, v_next_pos)
+  returning id into v_wpoint;
+
+  return v_wpoint;
+end;
+$$;
+
+create or replace function select_commune(p_wpoint uuid, p_commune text)
+returns void language plpgsql as
+$$
+declare
+  v_wilaya_id  smallint;
+  v_commune_id integer;
+begin
+  select wilaya_id into v_wilaya_id from wpoint where id = p_wpoint;
+  if v_wilaya_id is null then
+    raise exception 'WPoint % not found', p_wpoint using errcode = 'DZ205';
+  end if;
+
+  v_commune_id := resolve_commune(v_wilaya_id, p_commune);
+  if v_commune_id is null then
+    raise exception 'Invalid Commune %', p_commune using errcode = 'DZ203';
+  end if;
+
+  insert into wpoint_commune (wpoint_id, wilaya_id, commune_id)
+  values (p_wpoint, v_wilaya_id, v_commune_id)
+  on conflict (wpoint_id, commune_id) do nothing;
+end;
+$$;
+
+create or replace function select_daira(p_wpoint uuid, p_daira text)
+returns integer language plpgsql as
+$$
+declare
+  v_wilaya_id smallint;
+  v_daira_id  smallint;
+  v_added     integer;
+begin
+  select wilaya_id into v_wilaya_id from wpoint where id = p_wpoint;
+  if v_wilaya_id is null then
+    raise exception 'WPoint % not found', p_wpoint using errcode = 'DZ205';
+  end if;
+
+  v_daira_id := resolve_daira(v_wilaya_id, p_daira);
+  if v_daira_id is null then
+    raise exception 'Invalid Daira %', p_daira using errcode = 'DZ202';
+  end if;
+
+  insert into wpoint_commune (wpoint_id, wilaya_id, commune_id)
+  select p_wpoint, v_wilaya_id, c.id
+  from commune c
+  where c.daira_id = v_daira_id
+  on conflict (wpoint_id, commune_id) do nothing;
+
+  get diagnostics v_added = row_count;
+  return v_added;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 9 — JSON RECORD FUNCTIONS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function get_trajectory_id(p_name text)
+returns uuid language sql stable as
+$$
+  select id from trajectory where name = btrim(p_name);
+$$;
+
+create or replace function wpoint_to_record(p_wpoint uuid)
+returns jsonb language sql stable as
+$$
+  select jsonb_build_object(
+    'wilaya',   wy.nom_fr,
+    'communes', coalesce((
+      select jsonb_agg(c.nom_fr order by wc.sort_key)
+      from wpoint_commune wc
+      join commune c on c.id = wc.commune_id
+      where wc.wpoint_id = p_wpoint
+    ), '[]'::jsonb)
+  )
+  from wpoint w
+  join wilaya wy on wy.id = w.wilaya_id
+  where w.id = p_wpoint;
+$$;
+
+create or replace function trajectory_to_record(p_trajectory uuid)
+returns jsonb language sql stable as
+$$
+  select jsonb_build_object(
+    'name', t.name,
+    'wpoints', coalesce((
+      select jsonb_agg(wpoint_to_record(w.id) order by w.position)
+      from wpoint w
+      where w.trajectory_id = t.id
+    ), '[]'::jsonb)
+  )
+  from trajectory t
+  where t.id = p_trajectory;
+$$;
+
+create or replace function trajectory_to_record(p_name text)
+returns jsonb language sql stable as
+$$
+  select trajectory_to_record(get_trajectory_id(p_name));
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 10 — TRIP + PRICING FUNCTIONS/PROCEDURES
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function trip_has_active_reservations(p_trip uuid)
+returns boolean language sql stable as
+$$
+  select exists (
+    select 1 from reservation
+    where trip_id = p_trip and status in ('pending','confirmed')
+  );
+$$;
+
+create or replace function seats_available(p_trip uuid)
+returns integer language sql stable as
+$$
+  select t.capacity - (
+    select coalesce(sum(r.seats), 0)
+    from reservation r
+    where r.trip_id = t.id and r.status in ('pending','confirmed')
+  )::int
+  from trip t
+  where t.id = p_trip;
+$$;
+
+create or replace function create_trip(
+  p_trajectory    uuid,
+  p_departure_at  timestamptz,
+  p_capacity      integer,
+  p_seat_price    numeric,
+  p_arrival_eta   timestamptz default null,
+  p_driver_id     uuid        default null,
+  p_vehicle_id    uuid        default null,
+  p_notes         text        default null
+)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  if p_departure_at is null then
+    raise exception 'departure_at is required' using errcode = 'DZ001';
+  end if;
+  if p_arrival_eta is not null and p_arrival_eta < p_departure_at then
+    raise exception 'arrival_eta must be >= departure_at' using errcode = 'DZ001';
+  end if;
+  if p_capacity is null or p_capacity <= 0 or p_capacity > 32767 then
+    raise exception 'capacity must be between 1 and 32767' using errcode = 'DZ001';
+  end if;
+  if p_seat_price is null or p_seat_price < 0 then
+    raise exception 'seat_price must be >= 0' using errcode = 'DZ001';
+  end if;
+  if not exists (select 1 from trajectory where id = p_trajectory) then
+    raise exception 'Trajectory % not found', p_trajectory using errcode = 'DZ102';
+  end if;
+  if p_driver_id is not null and not exists (select 1 from driver where id = p_driver_id) then
+    raise exception 'Driver % not found', p_driver_id using errcode = 'DZ001';
+  end if;
+  if p_vehicle_id is not null and not exists (select 1 from vehicle where id = p_vehicle_id) then
+    raise exception 'Vehicle % not found', p_vehicle_id using errcode = 'DZ001';
+  end if;
+
+  insert into trip (code, trajectory_id, departure_at, arrival_eta, capacity, seat_price, currency,
+                    driver_id, vehicle_id, notes)
+  values (
+    'TRP-' || to_char(now(), 'YYYYMM') || '-' || lpad(nextval('seq_business_code')::text, 6, '0'),
+    p_trajectory, p_departure_at, p_arrival_eta, p_capacity, p_seat_price, 'DZD',
+    p_driver_id, p_vehicle_id, p_notes
+  )
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+create or replace function add_trip_stop(p_trip uuid, p_wpoint uuid, p_eta timestamptz default null)
+returns void language plpgsql as
+$$
+declare
+  v_trip_traj uuid;
+  v_status    trip_status;
+  v_wp_traj   uuid;
+begin
+  select trajectory_id, status into v_trip_traj, v_status from trip where id = p_trip;
+  if v_trip_traj is null then
+    raise exception 'Trip % not found', p_trip using errcode = 'DZ301';
+  end if;
+  if v_status <> 'scheduled' then
+    raise exception 'Trip % not scheduled; stops frozen', p_trip using errcode = 'DZ302';
+  end if;
+
+  select trajectory_id into v_wp_traj from wpoint where id = p_wpoint;
+  if v_wp_traj is null then
+    raise exception 'WPoint % not found', p_wpoint using errcode = 'DZ205';
+  end if;
+  if v_wp_traj <> v_trip_traj then
+    raise exception 'Invalid stop %', p_wpoint using errcode = 'DZ601';
+  end if;
+
+  insert into trip_stop (trip_id, trajectory_id, wpoint_id, eta)
+  values (p_trip, v_trip_traj, p_wpoint, p_eta)
+  on conflict (trip_id, wpoint_id) do update
+    set eta = coalesce(excluded.eta, trip_stop.eta);
+end;
+$$;
+
+create or replace function populate_trip_stops(p_trip uuid)
+returns integer language plpgsql as
+$$
+declare v_traj uuid; v_n integer;
+begin
+  select trajectory_id into v_traj from trip where id = p_trip;
+  if v_traj is null then
+    raise exception 'Trip % not found', p_trip using errcode = 'DZ301';
+  end if;
+
+  insert into trip_stop (trip_id, trajectory_id, wpoint_id)
+  select p_trip, v_traj, w.id
+  from wpoint w
+  where w.trajectory_id = v_traj
+  on conflict (trip_id, wpoint_id) do nothing;
+
+  get diagnostics v_n = row_count;
+  return v_n;
+end;
+$$;
+
+create or replace procedure sp_publish_trip(p_trip uuid)
+language plpgsql as
+$$
+declare v trip%rowtype;
+begin
+  select * into v from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip % not found', p_trip using errcode = 'DZ301';
+  end if;
+
+  if v.driver_id is null then
+    raise exception 'Trip must have driver_id before publishing' using errcode = 'DZ001';
+  end if;
+
+  update trip
+  set published_at = coalesce(published_at, now())
+  where id = p_trip;
+end;
+$$;
+
+-- Populate trip_price from default_trip_price (template)
+create or replace procedure sp_populate_trip_prices_from_defaults(p_trip uuid, p_overwrite boolean default false)
+language plpgsql as
+$$
+declare v_traj uuid;
+begin
+  select trajectory_id into v_traj from trip where id = p_trip;
+  if v_traj is null then
+    raise exception 'Trip % not found', p_trip using errcode = 'DZ301';
+  end if;
+
+  insert into trip_price (trip_id, from_wpoint_id, to_wpoint_id, currency, price, min_price, max_price)
+  select p_trip, dp.from_wpoint_id, dp.to_wpoint_id, dp.currency, dp.price, dp.min_price, dp.max_price
+  from default_trip_price dp
+  where dp.trajectory_id = v_traj
+    and exists (select 1 from trip_stop ts where ts.trip_id = p_trip and ts.wpoint_id = dp.from_wpoint_id)
+    and exists (select 1 from trip_stop ts where ts.trip_id = p_trip and ts.wpoint_id = dp.to_wpoint_id)
+  on conflict (trip_id, from_wpoint_id, to_wpoint_id) do update
+    set price = excluded.price,
+        min_price = excluded.min_price,
+        max_price = excluded.max_price,
+        updated_at = now()
+  where p_overwrite;
+end;
+$$;
+
+-- REQUIRED procedures (requested)
+create or replace procedure sp_set_default_trip_price(
+  p_trajectory    uuid,
+  p_from_wpoint   uuid,
+  p_to_wpoint     uuid,
+  p_price         numeric,
+  p_min_price     numeric default null,
+  p_max_price     numeric default null,
+  p_currency      text    default 'DZD',
+  p_notes         text    default null
+)
+language plpgsql as
+$$
+declare
+  v_from_pos int;
+  v_to_pos   int;
+begin
+  if p_price is null or p_price < 0 then
+    raise exception 'price must be >= 0' using errcode = 'DZ001';
+  end if;
+  if p_from_wpoint is null or p_to_wpoint is null or p_from_wpoint = p_to_wpoint then
+    raise exception 'from/to wpoint required and must be distinct' using errcode = 'DZ001';
+  end if;
+  if p_currency is null or p_currency <> 'DZD' then
+    raise exception 'Only DZD is supported' using errcode = 'DZ001';
+  end if;
+
+  perform 1 from trajectory where id = p_trajectory for update;
+  if not found then
+    raise exception 'Trajectory % not found', p_trajectory using errcode = 'DZ102';
+  end if;
+
+  select position into v_from_pos
+  from wpoint where id = p_from_wpoint and trajectory_id = p_trajectory;
+
+  select position into v_to_pos
+  from wpoint where id = p_to_wpoint and trajectory_id = p_trajectory;
+
+  if v_from_pos is null or v_to_pos is null then
+    raise exception 'Invalid stop(s) for trajectory %', p_trajectory using errcode = 'DZ601';
+  end if;
+
+  if v_from_pos >= v_to_pos then
+    raise exception 'Invalid route order' using errcode = 'DZ603';
+  end if;
+
+  insert into default_trip_price (
+    trajectory_id, from_wpoint_id, to_wpoint_id, currency, price, min_price, max_price, notes
+  )
+  values (
+    p_trajectory, p_from_wpoint, p_to_wpoint, p_currency, p_price, p_min_price, p_max_price, p_notes
+  )
+  on conflict (trajectory_id, from_wpoint_id, to_wpoint_id) do update
+    set currency   = excluded.currency,
+        price      = excluded.price,
+        min_price  = excluded.min_price,
+        max_price  = excluded.max_price,
+        notes      = excluded.notes,
+        updated_at = now();
+end;
+$$;
+
+create or replace procedure sp_set_trip_price(
+  p_trip          uuid,
+  p_from_wpoint   uuid,
+  p_to_wpoint     uuid,
+  p_price         numeric,
+  p_min_price     numeric default null,
+  p_max_price     numeric default null,
+  p_currency      text    default null, -- null => trip.currency
+  p_notes         text    default null
+)
+language plpgsql as
+$$
+declare
+  v trip%rowtype;
+  v_from_pos int;
+  v_to_pos   int;
+  v_cur      text;
+begin
+  if p_price is null or p_price < 0 then
+    raise exception 'price must be >= 0' using errcode = 'DZ001';
+  end if;
+  if p_from_wpoint is null or p_to_wpoint is null or p_from_wpoint = p_to_wpoint then
+    raise exception 'from/to wpoint required and must be distinct' using errcode = 'DZ001';
+  end if;
+
+  select * into v from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip % not found', p_trip using errcode = 'DZ301';
+  end if;
+
+  if v.published_at is not null and trip_has_active_reservations(p_trip) then
+    raise exception 'Trip prices locked' using errcode = 'DZ307';
+  end if;
+
+  v_cur := coalesce(p_currency, v.currency);
+  if v_cur <> v.currency then
+    raise exception 'Currency mismatch' using errcode = 'DZ504';
+  end if;
+
+  if not exists (select 1 from trip_stop where trip_id = p_trip and wpoint_id = p_from_wpoint)
+     or not exists (select 1 from trip_stop where trip_id = p_trip and wpoint_id = p_to_wpoint) then
+    raise exception 'Invalid stop(s) for trip' using errcode = 'DZ601';
+  end if;
+
+  select position into v_from_pos from wpoint where id = p_from_wpoint and trajectory_id = v.trajectory_id;
+  select position into v_to_pos   from wpoint where id = p_to_wpoint   and trajectory_id = v.trajectory_id;
+
+  if v_from_pos is null or v_to_pos is null or v_from_pos >= v_to_pos then
+    raise exception 'Invalid route order' using errcode = 'DZ603';
+  end if;
+
+  insert into trip_price (
+    trip_id, from_wpoint_id, to_wpoint_id, currency, price, min_price, max_price, notes
+  )
+  values (
+    p_trip, p_from_wpoint, p_to_wpoint, v_cur, p_price, p_min_price, p_max_price, p_notes
+  )
+  on conflict (trip_id, from_wpoint_id, to_wpoint_id) do update
+    set currency   = excluded.currency,
+        price      = excluded.price,
+        min_price  = excluded.min_price,
+        max_price  = excluded.max_price,
+        notes      = excluded.notes,
+        updated_at = now();
+end;
+$$;
+
+create or replace function start_trip(p_trip uuid)
+returns void language plpgsql as
+$$
+begin
+  update trip set status = 'in_progress' where id = p_trip and status = 'scheduled';
+  if not found then
+    if exists (select 1 from trip where id = p_trip) then
+      raise exception 'Invalid trip transition' using errcode = 'DZ304';
+    else
+      raise exception 'Trip not found' using errcode = 'DZ301';
+    end if;
+  end if;
+end;
+$$;
+
+create or replace function complete_trip(p_trip uuid)
+returns void language plpgsql as
+$$
+begin
+  update trip set status = 'completed' where id = p_trip and status = 'in_progress';
+  if not found then
+    if exists (select 1 from trip where id = p_trip) then
+      raise exception 'Invalid trip transition' using errcode = 'DZ304';
+    else
+      raise exception 'Trip not found' using errcode = 'DZ301';
+    end if;
+  end if;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 11 — RESERVATION & PAYMENT FUNCTIONS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function create_customer(p_full_name text, p_phone text, p_email text default null)
+returns uuid language plpgsql as
+$$
+declare
+  v_name  text := btrim(coalesce(p_full_name, ''));
+  v_phone text := regexp_replace(btrim(coalesce(p_phone, '')), '[\s\-\.\(\)]', '', 'g');
+  v_id    uuid;
+begin
+  if v_name = '' or v_phone = '' then
+    raise exception 'full_name and phone are required' using errcode = 'DZ001';
+  end if;
+  if v_phone !~ '^\+?[0-9]{8,15}$' then
+    raise exception 'Invalid phone number' using errcode = 'DZ001';
+  end if;
+
+  insert into customer (full_name, phone, email)
+  values (v_name, v_phone, nullif(btrim(coalesce(p_email, '')), ''))
+  on conflict (phone) do update
+    set full_name = excluded.full_name,
+        email     = coalesce(excluded.email, customer.email)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+-- ENFORCEMENT ENABLED: cannot reserve unless trip.published_at is NOT NULL
+create or replace function reserve(
+  p_trip           uuid,
+  p_customer       uuid,
+  p_seats          integer,
+  p_pickup_wpoint  uuid default null,
+  p_dropoff_wpoint uuid default null,
+  p_notes          text default null
+)
+returns uuid language plpgsql as
+$$
+declare
+  v_trip      trip%rowtype;
+  v_total     numeric(12,2);
+  v_unit      numeric(12,2);
+  v_free      integer;
+  v_id        uuid;
+  v_pick_pos  integer;
+  v_drop_pos  integer;
+  v_has_stops boolean;
+begin
+  if p_seats is null or p_seats < 1 or p_seats > 30 then
+    raise exception 'Seats must be between 1 and 30' using errcode = 'DZ001';
+  end if;
+
+  if not exists (select 1 from customer where id = p_customer) then
+    raise exception 'Customer not found' using errcode = 'DZ404';
+  end if;
+
+  select * into v_trip from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+
+  if v_trip.published_at is null then
+    raise exception 'Trip is not published' using errcode = 'DZ302';
+  end if;
+
+  if v_trip.status <> 'scheduled' or v_trip.departure_at <= now() then
+    raise exception 'Trip is not bookable' using errcode = 'DZ302';
+  end if;
+
+  v_free := seats_available(p_trip);
+  if v_free is null or p_seats > v_free then
+    raise exception 'Insufficient seats' using errcode = 'DZ303';
+  end if;
+
+  v_has_stops := exists (select 1 from trip_stop where trip_id = p_trip);
+
+  if p_pickup_wpoint is not null then
+    select position into v_pick_pos
+    from wpoint
+    where id = p_pickup_wpoint and trajectory_id = v_trip.trajectory_id;
+
+    if v_pick_pos is null
+       or (v_has_stops and not exists (select 1 from trip_stop
+                                       where trip_id = p_trip and wpoint_id = p_pickup_wpoint)) then
+      raise exception 'Invalid pickup stop' using errcode = 'DZ601';
+    end if;
+  end if;
+
+  if p_dropoff_wpoint is not null then
+    select position into v_drop_pos
+    from wpoint
+    where id = p_dropoff_wpoint and trajectory_id = v_trip.trajectory_id;
+
+    if v_drop_pos is null
+       or (v_has_stops and not exists (select 1 from trip_stop
+                                       where trip_id = p_trip and wpoint_id = p_dropoff_wpoint)) then
+      raise exception 'Invalid dropoff stop' using errcode = 'DZ601';
+    end if;
+  end if;
+
+  if v_pick_pos is not null and v_drop_pos is not null and v_pick_pos >= v_drop_pos then
+    raise exception 'Invalid route order' using errcode = 'DZ603';
+  end if;
+
+  -- Pricing: system-defined trip_price (required when endpoints provided)
+  if p_pickup_wpoint is not null and p_dropoff_wpoint is not null then
+    select tp.price into v_unit
+    from trip_price tp
+    where tp.trip_id = p_trip
+      and tp.from_wpoint_id = p_pickup_wpoint
+      and tp.to_wpoint_id   = p_dropoff_wpoint;
+
+    if v_unit is null then
+      raise exception 'Trip price not defined' using errcode = 'DZ308';
+    end if;
+
+    v_total := p_seats * v_unit;
+  else
+    v_total := p_seats * v_trip.seat_price; -- fallback
+  end if;
+
+  insert into reservation (code, trip_id, trajectory_id, customer_id, seats,
+                           pickup_wpoint_id, dropoff_wpoint_id, total_price, currency, notes)
+  values ('RES-' || to_char(now(), 'YYYYMM') || '-' || lpad(nextval('seq_business_code')::text, 6, '0'),
+          p_trip, v_trip.trajectory_id, p_customer, p_seats,
+          p_pickup_wpoint, p_dropoff_wpoint, v_total, v_trip.currency, p_notes)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+create or replace function confirm_reservation(p_reservation uuid)
+returns void language plpgsql as
+$$
+begin
+  update reservation set status = 'confirmed'
+  where id = p_reservation and status = 'pending';
+  if not found then
+    if exists (select 1 from reservation where id = p_reservation) then
+      raise exception 'Invalid reservation transition' using errcode = 'DZ402';
+    else
+      raise exception 'Reservation not found' using errcode = 'DZ401';
+    end if;
+  end if;
+end;
+$$;
+
+create or replace function cancel_reservation(p_reservation uuid)
+returns void language plpgsql as
+$$
+begin
+  update reservation set status = 'cancelled'
+  where id = p_reservation and status in ('pending','confirmed');
+  if not found then
+    if exists (select 1 from reservation where id = p_reservation) then
+      raise exception 'Invalid reservation transition' using errcode = 'DZ402';
+    else
+      raise exception 'Reservation not found' using errcode = 'DZ401';
+    end if;
+  end if;
+end;
+$$;
+
+create or replace function amount_paid(p_reservation uuid)
+returns numeric language sql stable as
+$$
+  select coalesce(sum(amount - refunded_amount), 0)
+  from payment
+  where reservation_id = p_reservation
+    and status in ('paid','partially_refunded');
+$$;
+
+create or replace function record_payment(
+  p_reservation uuid,
+  p_amount      numeric,
+  p_method      payment_method,
+  p_reference   text default null
+)
+returns uuid language plpgsql as
+$$
+declare
+  v_res       reservation%rowtype;
+  v_id        uuid;
+  v_committed numeric;
+begin
+  select * into v_res from reservation where id = p_reservation for update;
+  if not found then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+
+  if v_res.status = 'cancelled' then
+    raise exception 'Cancelled reservation is not payable' using errcode = 'DZ403';
+  end if;
+
+  if p_amount is null or p_amount <= 0 then
+    raise exception 'Payment amount must be > 0' using errcode = 'DZ001';
+  end if;
+
+  select amount_paid(p_reservation)
+       + coalesce((select sum(amount) from payment
+                   where reservation_id = p_reservation and status = 'pending'), 0)
+  into v_committed;
+
+  if v_committed + p_amount > v_res.total_price then
+    raise exception 'Payment exceeds reservation total' using errcode = 'DZ503';
+  end if;
+
+  insert into payment (code, reservation_id, amount, currency, method, status, reference)
+  values ('PAY-' || to_char(now(), 'YYYYMM') || '-' || lpad(nextval('seq_business_code')::text, 6, '0'),
+          p_reservation, p_amount, v_res.currency, p_method, 'pending', p_reference)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+create or replace function settle_payment(p_payment uuid)
+returns void language plpgsql as
+$$
+declare
+  v_res_id uuid;
+  v_status reservation_status;
+begin
+  select reservation_id into v_res_id from payment where id = p_payment;
+  if v_res_id is null then
+    raise exception 'Payment not found' using errcode = 'DZ501';
+  end if;
+
+  select status into v_status from reservation where id = v_res_id for update;
+  if v_status = 'cancelled' then
+    raise exception 'Cancelled reservation is not payable' using errcode = 'DZ403';
+  end if;
+
+  update payment set status = 'paid' where id = p_payment and status = 'pending';
+  if not found then
+    raise exception 'Invalid payment transition' using errcode = 'DZ502';
+  end if;
+end;
+$$;
+
+create or replace function refund_payment(p_payment uuid, p_amount numeric default null)
+returns void language plpgsql as
+$$
+declare
+  v_pay       payment%rowtype;
+  v_remaining numeric;
+  v_amt       numeric;
+begin
+  select * into v_pay from payment where id = p_payment for update;
+  if not found then
+    raise exception 'Payment not found' using errcode = 'DZ501';
+  end if;
+
+  if v_pay.status not in ('paid','partially_refunded') then
+    raise exception 'Invalid payment transition' using errcode = 'DZ502';
+  end if;
+
+  v_remaining := v_pay.amount - v_pay.refunded_amount;
+  v_amt := coalesce(p_amount, v_remaining);
+
+  if v_amt <= 0 or v_amt > v_remaining then
+    raise exception 'Invalid refund amount' using errcode = 'DZ505';
+  end if;
+
+  update payment
+  set refunded_amount = v_pay.refunded_amount + v_amt,
+      status = case when v_pay.refunded_amount + v_amt >= v_pay.amount
+                    then 'refunded'::payment_status
+                    else 'partially_refunded'::payment_status end
+  where id = p_payment;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 12 — GUARD TRIGGERS (TRIP LOCKS / PRICES / PAYMENTS / CAPACITY)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace function trg_trip_status_guard()
+returns trigger language plpgsql as
+$$
+begin
+  if new.status = old.status then return new; end if;
+  if old.status = 'scheduled'   and new.status in ('in_progress','cancelled') then return new; end if;
+  if old.status = 'in_progress' and new.status in ('completed','cancelled')   then return new; end if;
+  raise exception 'Invalid trip transition' using errcode = 'DZ304';
+end;
+$$;
+
+create or replace function trg_trip_cancel_cascade()
+returns trigger language plpgsql as
+$$
+begin
+  if new.status = 'cancelled' and old.status <> 'cancelled' then
+    update reservation
+    set status = 'cancelled'
+    where trip_id = new.id and status in ('pending','confirmed');
+  end if;
+  return null;
+end;
+$$;
+
+-- Published + active reservations => lock core fields
+create or replace function trg_trip_edit_lock()
+returns trigger language plpgsql as
+$$
+begin
+  if old.published_at is not null and new.published_at is distinct from old.published_at then
+    raise exception 'published_at immutable' using errcode = 'DZ306';
+  end if;
+
+  if old.published_at is not null and trip_has_active_reservations(old.id) then
+    if new.departure_at  is distinct from old.departure_at
+    or new.trajectory_id is distinct from old.trajectory_id
+    or new.seat_price    is distinct from old.seat_price
+    or new.currency      is distinct from old.currency
+    or new.driver_id     is distinct from old.driver_id
+    or new.vehicle_id    is distinct from old.vehicle_id
+    then
+      raise exception 'Trip locked' using errcode = 'DZ306';
+    end if;
+
+    if new.capacity < old.capacity then
+      raise exception 'Trip locked (capacity decrease)' using errcode = 'DZ306';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+-- Published + active reservations => lock stops
+create or replace function trg_trip_stop_lock()
+returns trigger language plpgsql as
+$$
+declare v_trip uuid := coalesce(new.trip_id, old.trip_id);
+begin
+  if (select published_at is not null from trip where id = v_trip)
+     and trip_has_active_reservations(v_trip) then
+    raise exception 'Stops locked' using errcode = 'DZ307';
+  end if;
+  return coalesce(new, old);
+end;
+$$;
+
+-- Published + active reservations => lock trip_price
+create or replace function trg_trip_price_lock()
+returns trigger language plpgsql as
+$$
+declare v_trip uuid := coalesce(new.trip_id, old.trip_id);
+begin
+  if (select published_at is not null from trip where id = v_trip)
+     and trip_has_active_reservations(v_trip) then
+    raise exception 'Prices locked' using errcode = 'DZ307';
+  end if;
+  return coalesce(new, old);
+end;
+$$;
+
+-- Ensure trip capacity not below held seats
+create or replace function trg_trip_capacity_guard()
+returns trigger language plpgsql as
+$$
+declare v_held integer;
+begin
+  select coalesce(sum(seats), 0)::int into v_held
+  from reservation
+  where trip_id = new.id and status in ('pending','confirmed');
+
+  if new.capacity < v_held then
+    raise exception 'Capacity too low' using errcode = 'DZ305';
+  end if;
+
+  return null;
+end;
+$$;
+
+-- If vehicle set, capacity <= vehicle.seats
+create or replace function trg_trip_vehicle_capacity_guard()
+returns trigger language plpgsql as
+$$
+declare v_seats smallint;
+begin
+  if new.vehicle_id is null then
+    return new;
+  end if;
+
+  select seats into v_seats from vehicle where id = new.vehicle_id;
+  if v_seats is null then
+    raise exception 'Vehicle not found' using errcode = 'DZ001';
+  end if;
+
+  if new.capacity > v_seats then
+    raise exception 'Trip capacity exceeds vehicle seats' using errcode = 'DZ001';
+  end if;
+
+  return new;
+end;
+$$;
+
+-- Payment guard (currency + overpay)
+create or replace function trg_payment_guard()
+returns trigger language plpgsql as
+$$
+declare
+  v_cur   text;
+  v_total numeric(12,2);
+  v_paid  numeric(12,2);
+begin
+  select currency, total_price into v_cur, v_total
+  from reservation where id = new.reservation_id for update;
+  if v_cur is null then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+
+  if new.currency <> v_cur then
+    raise exception 'Currency mismatch' using errcode = 'DZ504';
+  end if;
+
+  if new.status = 'paid' then
+    select coalesce(sum(amount - refunded_amount), 0) into v_paid
+    from payment
+    where reservation_id = new.reservation_id
+      and status in ('paid','partially_refunded')
+      and id <> new.id;
+
+    if v_paid + new.amount > v_total then
+      raise exception 'Payment exceeds total' using errcode = 'DZ503';
+    end if;
+
+    if new.paid_at is null then new.paid_at := now(); end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function trg_reservation_capacity_guard()
+returns trigger language plpgsql as
+$$
+declare
+  v_capacity smallint;
+  v_held     integer;
+begin
+  if new.status not in ('pending','confirmed') then
+    return null;
+  end if;
+
+  select capacity into v_capacity from trip where id = new.trip_id for update;
+
+  select coalesce(sum(seats), 0)::int into v_held
+  from reservation
+  where trip_id = new.trip_id
+    and status in ('pending','confirmed')
+    and id <> new.id;
+
+  if v_held + new.seats > v_capacity then
+    raise exception 'Insufficient seats' using errcode = 'DZ303';
+  end if;
+
+  return null;
+end;
+$$;
+
+create or replace function trg_reservation_cancel_cascade()
+returns trigger language plpgsql as
+$$
+begin
+  if new.status = 'cancelled' and old.status <> 'cancelled' then
+    update payment set status = 'failed'
+    where reservation_id = new.id and status = 'pending';
+  end if;
+  return null;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13 — ATTACH TRIGGERS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+drop trigger if exists trg_trajectory_guard on trajectory;
+create trigger trg_trajectory_guard
+  before insert or update of name on trajectory
+  for each row execute function trg_trajectory_guard();
+
+drop trigger if exists trg_trajectory_touch on trajectory;
+create trigger trg_trajectory_touch
+  before update on trajectory
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_wpoint_guard on wpoint;
+create trigger trg_wpoint_guard
+  before update of wilaya_id, trajectory_id on wpoint
+  for each row execute function trg_wpoint_guard();
+
+drop trigger if exists trg_driver_touch on driver;
+create trigger trg_driver_touch
+  before update on driver
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_vehicle_touch on vehicle;
+create trigger trg_vehicle_touch
+  before update on vehicle
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_customer_touch on customer;
+create trigger trg_customer_touch
+  before update on customer
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_default_trip_price_touch on default_trip_price;
+create trigger trg_default_trip_price_touch
+  before update on default_trip_price
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_trip_price_touch on trip_price;
+create trigger trg_trip_price_touch
+  before update on trip_price
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_trip_touch on trip;
+create trigger trg_trip_touch
+  before update on trip
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_trip_status_guard on trip;
+create trigger trg_trip_status_guard
+  before update of status on trip
+  for each row execute function trg_trip_status_guard();
+
+drop trigger if exists trg_trip_vehicle_capacity_guard on trip;
+create trigger trg_trip_vehicle_capacity_guard
+  before insert or update of vehicle_id, capacity on trip
+  for each row execute function trg_trip_vehicle_capacity_guard();
+
+drop trigger if exists trg_trip_capacity_guard on trip;
+create trigger trg_trip_capacity_guard
+  after update of capacity on trip
+  for each row execute function trg_trip_capacity_guard();
+
+drop trigger if exists trg_trip_edit_lock on trip;
+create trigger trg_trip_edit_lock
+  before update on trip
+  for each row execute function trg_trip_edit_lock();
+
+drop trigger if exists trg_trip_cancel_cascade on trip;
+create trigger trg_trip_cancel_cascade
+  after update of status on trip
+  for each row execute function trg_trip_cancel_cascade();
+
+drop trigger if exists trg_trip_stop_lock on trip_stop;
+create trigger trg_trip_stop_lock
+  before insert or update or delete on trip_stop
+  for each row execute function trg_trip_stop_lock();
+
+drop trigger if exists trg_trip_price_lock on trip_price;
+create trigger trg_trip_price_lock
+  before insert or update or delete on trip_price
+  for each row execute function trg_trip_price_lock();
+
+drop trigger if exists trg_reservation_capacity_guard on reservation;
+create trigger trg_reservation_capacity_guard
+  after insert or update of seats, status, trip_id on reservation
+  for each row execute function trg_reservation_capacity_guard();
+
+drop trigger if exists trg_reservation_cancel_cascade on reservation;
+create trigger trg_reservation_cancel_cascade
+  after update of status on reservation
+  for each row execute function trg_reservation_cancel_cascade();
+
+drop trigger if exists trg_payment_touch on payment;
+create trigger trg_payment_touch
+  before update on payment
+  for each row execute function trg_touch_updated_at();
+
+drop trigger if exists trg_payment_guard on payment;
+create trigger trg_payment_guard
+  before insert or update on payment
+  for each row execute function trg_payment_guard();
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 14 — PROCEDURES (CANCEL / CLOSE) + IMPORTER
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace procedure sp_cancel_trip(p_trip uuid)
+language plpgsql as
+$$
+declare v_status trip_status;
+begin
+  select status into v_status from trip where id = p_trip for update;
+  if v_status is null then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+  if v_status in ('completed','cancelled') then
+    raise exception 'Invalid trip transition' using errcode = 'DZ304';
+  end if;
+
+  update trip set status = 'cancelled' where id = p_trip;
+end;
+$$;
+
+create or replace procedure sp_close_trip(p_trip uuid)
+language plpgsql as
+$$
+declare v_status trip_status;
+begin
+  select status into v_status from trip where id = p_trip for update;
+  if v_status is null then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+  if v_status <> 'in_progress' then
+    raise exception 'Invalid trip transition' using errcode = 'DZ304';
+  end if;
+
+  update reservation r
+  set status = case when amount_paid(r.id) >= r.total_price
+                    then 'completed'::reservation_status
+                    else 'no_show'::reservation_status end
+  where r.trip_id = p_trip and r.status = 'confirmed';
+
+  update reservation set status = 'cancelled'
+  where trip_id = p_trip and status = 'pending';
+
+  update trip set status = 'completed' where id = p_trip;
+end;
+$$;
+
+create or replace procedure sp_import_algeria_data(p_data jsonb)
+language plpgsql as
+$$
+declare
+  v_w         jsonb;
+  v_d         jsonb;
+  v_c         jsonb;
+  v_wilaya_id smallint;
+  v_daira_id  smallint;
+  n_w integer := 0;
+  n_d integer := 0;
+  n_c integer := 0;
+begin
+  if p_data is null or jsonb_typeof(p_data) <> 'object' then
+    raise exception 'Invalid payload' using errcode = 'DZ001';
+  end if;
+
+  insert into pays (id, code_iso, nom_ar, nom_fr, nom_en)
+  values (1,
+          coalesce(p_data #>> '{pays,code_iso}', 'DZ'),
+          coalesce(p_data #>> '{pays,nom_ar}',   'الجزائر'),
+          coalesce(p_data #>> '{pays,nom_fr}',   'Algérie'),
+          coalesce(p_data #>> '{pays,nom_en}',   'Algeria'))
+  on conflict (id) do update
+    set code_iso = excluded.code_iso,
+        nom_ar = excluded.nom_ar, nom_fr = excluded.nom_fr, nom_en = excluded.nom_en;
+
+  for v_w in select el from jsonb_array_elements(coalesce(p_data -> 'wilayas', '[]'::jsonb)) el
+  loop
+    insert into wilaya (id, code, nom_ar, nom_fr, nom_en)
+    values ((v_w ->> 'wilaya_num')::smallint,
+            v_w ->> 'code',
+            coalesce(v_w ->> 'nom_ar', v_w ->> 'nom_fr'),
+            v_w ->> 'nom_fr',
+            coalesce(v_w ->> 'nom_en', v_w ->> 'nom_fr'))
+    on conflict (id) do update
+      set code   = excluded.code,
+          nom_ar = excluded.nom_ar,
+          nom_fr = excluded.nom_fr,
+          nom_en = excluded.nom_en
+    returning id into v_wilaya_id;
+    n_w := n_w + 1;
+
+    for v_d in select el from jsonb_array_elements(coalesce(v_w -> 'dairas', '[]'::jsonb)) el
+    loop
+      insert into daira (wilaya_id, nom_ar, nom_fr, nom_en)
+      values (v_wilaya_id,
+              coalesce(v_d ->> 'nom_ar', v_d ->> 'nom_fr'),
+              v_d ->> 'nom_fr',
+              coalesce(v_d ->> 'nom_en', v_d ->> 'nom_fr'))
+      on conflict (wilaya_id, nom_fr) do update
+        set nom_ar = excluded.nom_ar,
+            nom_en = excluded.nom_en
+      returning id into v_daira_id;
+      n_d := n_d + 1;
+
+      for v_c in select el from jsonb_array_elements(coalesce(v_d -> 'communes', '[]'::jsonb)) el
+      loop
+        insert into commune (daira_id, wilaya_id, nom_ar, nom_fr, nom_en, code_postal)
+        values (v_daira_id, v_wilaya_id,
+                coalesce(v_c ->> 'nom_ar', v_c ->> 'nom_fr'),
+                v_c ->> 'nom_fr',
+                coalesce(v_c ->> 'nom_en', v_c ->> 'nom_fr'),
+                nullif(v_c ->> 'code_postal', ''))
+        on conflict (wilaya_id, nom_fr) do update
+          set nom_ar      = excluded.nom_ar,
+              nom_en      = excluded.nom_en,
+              code_postal = coalesce(excluded.code_postal, commune.code_postal);
+        n_c := n_c + 1;
+      end loop;
+    end loop;
+  end loop;
+
+  insert into import_log (nb_wilayas, nb_dairas, nb_communes, payload_bytes)
+  values (n_w, n_d, n_c, octet_length(p_data::text));
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 15 — VIEWS
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create or replace view v_administrative_registry as
+select w.code     as wilaya_code,
+       w.id       as wilaya_id,
+       w.nom_fr   as wilaya_fr,
+       w.nom_ar   as wilaya_ar,
+       w.nom_en   as wilaya_en,
+       d.id       as daira_id,
+       d.nom_fr   as daira_fr,
+       d.nom_ar   as daira_ar,
+       c.id       as commune_id,
+       c.nom_fr   as commune_fr,
+       c.nom_ar   as commune_ar,
+       c.nom_en   as commune_en,
+       c.code_postal
+from wilaya w
+join daira   d on d.wilaya_id = w.id
+join commune c on c.daira_id  = d.id;
+
+create or replace view v_wilaya_overview as
+select w.id, w.code, w.nom_fr, w.nom_ar, w.nom_en,
+       count(distinct d.id)            as nb_dairas,
+       count(distinct c.id)            as nb_communes,
+       count(distinct c.code_postal)   as nb_codes_postaux
+from wilaya w
+left join daira   d on d.wilaya_id = w.id
+left join commune c on c.daira_id  = d.id
+group by w.id, w.code, w.nom_fr, w.nom_ar, w.nom_en;
+
+create or replace view v_trip as
+select tr.id,
+       tr.code,
+       tr.status,
+       tr.published_at,
+       tr.departure_at,
+       tr.arrival_eta,
+       tr.capacity,
+       tr.seat_price,
+       tr.currency,
+       tr.driver_id,
+       d.full_name as driver_name,
+       tr.vehicle_id,
+       v.matricule as vehicle_matricule,
+       tj.id       as trajectory_id,
+       tj.name     as trajectory_name,
+       seats_available(tr.id) as seats_available,
+       (select count(*) from reservation r
+        where r.trip_id = tr.id and r.status in ('pending','confirmed')) as nb_active_reservations
+from trip tr
+join trajectory tj on tj.id = tr.trajectory_id
+left join driver d on d.id = tr.driver_id
+left join vehicle v on v.id = tr.vehicle_id;
+
+create or replace view v_reservation as
+select r.id,
+       r.code,
+       r.status,
+       r.seats,
+       r.total_price,
+       r.currency,
+       r.notes,
+       r.created_at,
+       tr.code            as trip_code,
+       tr.departure_at,
+       tj.name            as trajectory_name,
+       cs.full_name       as customer_name,
+       cs.phone           as customer_phone,
+       amount_paid(r.id)  as amount_paid,
+       case when r.status = 'cancelled' then 0
+            else greatest(r.total_price - amount_paid(r.id), 0) end as balance_due
+from reservation r
+join trip tr       on tr.id = r.trip_id
+join trajectory tj on tj.id = r.trajectory_id
+join customer cs   on cs.id = r.customer_id;
+
+create or replace view v_payment as
+select p.id,
+       p.code,
+       p.amount,
+       p.refunded_amount,
+       p.currency,
+       p.method,
+       p.status,
+       p.reference,
+       p.paid_at,
+       p.created_at,
+       r.code       as reservation_code,
+       r.status     as reservation_status,
+       cs.full_name as customer_name,
+       tr.code      as trip_code
+from payment p
+join reservation r on r.id = p.reservation_id
+join customer cs   on cs.id = r.customer_id
+join trip tr       on tr.id = r.trip_id;
+
+create or replace view v_refund_due as
+select r.id as reservation_id, r.code as reservation_code,
+       cs.full_name as customer_name, cs.phone as customer_phone,
+       amount_paid(r.id) as refund_due
+from reservation r
+join customer cs on cs.id = r.customer_id
+where r.status = 'cancelled' and amount_paid(r.id) > 0;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 16 — SEED: pays + 69 wilayas (full dairas/communes via importer)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+insert into pays (id, code_iso, nom_ar, nom_fr, nom_en)
+values (1, 'DZ', 'الجزائر', 'Algérie', 'Algeria')
+on conflict (id) do nothing;
+
+insert into wilaya (id, code, nom_ar, nom_fr, nom_en)
+select v.id, lpad(v.id::text, 2, '0'), v.nom_ar, v.nom_fr, v.nom_fr
+from (values
+  (1,'Adrar','أدرار'),(2,'Chlef','الشلف'),(3,'Laghouat','الأغواط'),
+  (4,'Oum El Bouaghi','أم البواقي'),(5,'Batna','باتنة'),(6,'Bejaia','بجاية'),
+  (7,'Biskra','بسكرة'),(8,'Bechar','بشار'),(9,'Blida','البليدة'),
+  (10,'Bouira','البويرة'),(11,'Tamanrasset','تمنراست'),(12,'Tebessa','تبسة'),
+  (13,'Tlemcen','تلمسان'),(14,'Tiaret','تيارت'),(15,'Tizi Ouzou','تيزي وزو'),
+  (16,'Alger','الجزائر'),(17,'Djelfa','الجلفة'),(18,'Jijel','جيجل'),
+  (19,'Setif','سطيف'),(20,'Saida','سعيدة'),(21,'Skikda','سكيكدة'),
+  (22,'Sidi Bel Abbes','سيدي بلعباس'),(23,'Annaba','عنابة'),(24,'Guelma','قالمة'),
+  (25,'Constantine','قسنطينة'),(26,'Medea','المدية'),(27,'Mostaganem','مستغانم'),
+  (28,'M''Sila','المسيلة'),(29,'Mascara','معسكر'),(30,'Ouargla','ورقلة'),
+  (31,'Oran','وهران'),(32,'El Bayadh','البيض'),(33,'Illizi','إليزي'),
+  (34,'Bordj Bou Arreridj','برج بوعريريج'),(35,'Boumerdes','بومرداس'),(36,'El Tarf','الطارف'),
+  (37,'Tindouf','تندوف'),(38,'Tissemsilt','تيسمسيلت'),(39,'El Oued','الوادي'),
+  (40,'Khenchela','خنشلة'),(41,'Souk Ahras','سوق أهراس'),(42,'Tipaza','تيبازة'),
+  (43,'Mila','ميلة'),(44,'Ain Defla','عين الدفلى'),(45,'Naama','النعامة'),
+  (46,'Ain Temouchent','عين تموشنت'),(47,'Ghardaia','غرداية'),(48,'Relizane','غليزان'),
+  (49,'Timimoun','تيميمون'),(50,'Bordj Badji Mokhtar','برج باجي مختار'),(51,'Ouled Djellal','أولاد جلال'),
+  (52,'Beni Abbes','بني عباس'),(53,'In Salah','عين صالح'),(54,'In Guezzam','عين قزام'),
+  (55,'Touggourt','تقرت'),(56,'Djanet','جانت'),(57,'El M''Ghair','المغير'),
+  (58,'El Meniaa','المنيعة'),(59,'Aflou','أفلو'),(60,'El Abiodh Sidi Cheikh','الأبيض سيدي الشيخ'),
+  (61,'El Aricha','العريشة'),(62,'El Kantara','القنطرة'),(63,'Barika','بريكة'),
+  (64,'Bou Saada','بوسعادة'),(65,'Bir El Ater','بير العاتر'),(66,'Ksar El Boukhari','قصر البخاري'),
+  (67,'Ksar Chellala','قصر الشلالة'),(68,'Ain Oussara','عين وسارة'),(69,'Messaad','مسعد')
+) as v(id, nom_fr, nom_ar)
+on conflict (id) do nothing;
+
+-- Load full dairas/communes with:
+--   call sp_import_algeria_data(<jsonb_payload>);
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 17 — SECURITY (Supabase): RLS enable + read-only registry policies
+-- ───────────────────────────────────────────────────────────────────────────────
+
+do $sec$ declare t text;
+begin
+  foreach t in array array[
+    'pays','wilaya','daira','commune',
+    'trajectory','wpoint','wpoint_commune',
+    'driver','vehicle','driver_last_location','vehicle_last_location',
+    'trip','trip_stop','default_trip_price','trip_price',
+    'customer','reservation','payment','import_log'
+  ]
+  loop
+    execute format('alter table %I enable row level security', t);
+  end loop;
+
+  if exists (select 1 from pg_roles where rolname = 'anon')
+     and exists (select 1 from pg_roles where rolname = 'authenticated') then
+    foreach t in array array['pays','wilaya','daira','commune']
+    loop
+      execute format('drop policy if exists %I on %I', 'p_read_' || t, t);
+      execute format('create policy %I on %I for select to anon, authenticated using (true)',
+                     'p_read_' || t, t);
+    end loop;
+  end if;
+
+  if current_setting('server_version_num')::int >= 150000 then
+    foreach t in array array[
+      'v_administrative_registry','v_wilaya_overview','v_trip','v_reservation','v_payment','v_refund_due','v_domain_errors'
+    ]
+    loop
+      execute format('alter view %I set (security_invoker = true)', t);
+    end loop;
+  end if;
+end
+$sec$;
+
+-- ─── Usage (pricing) ───────────────────────────────────────────────────────────
+-- 1) Define trajectory + wpoints
+--    select create_trajectory('T1');
+--    select add_wpoint(<traj>,'Adrar'); ...
+--
+-- 2) Set default template prices (trajectory level)
+--    call sp_set_default_trip_price(<traj>, <from_wp>, <to_wp>, 1200);
+--
+-- 3) Create trip, add/populate stops, publish
+--    select create_trip(<traj>, now()+interval '1 day', 15, 0, null, <driver_id>, <vehicle_id>);
+--    select populate_trip_stops(<trip>);
+--    call sp_publish_trip(<trip>);
+--
+-- 4) Populate trip prices from defaults (or set explicit trip prices)
+--    call sp_populate_trip_prices_from_defaults(<trip>, false);
+--    call sp_set_trip_price(<trip>, <from_stop>, <to_stop>, 1500);
+--
+-- 5) Reserve (requires published_at not null)
+--    select reserve(<trip>, <customer>, 2, <from_stop>, <to_stop>);
+-- ───────────────────────────────────────────────────────────────────────────────
