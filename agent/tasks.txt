@@ -244,31 +244,31 @@ PHASE 0 — BASELINE AUDIT
 
 TASK 0.1 — Full application audit
 
-[ ] Audit backend
+[x] Audit backend
 
-[ ] Audit frontend
+[x] Audit frontend
 
-[ ] Audit database
+[x] Audit database
 
-[ ] Audit API
+[x] Audit API
 
-[ ] Audit authentication
+[x] Audit authentication
 
-[ ] Audit reservation lifecycle
+[x] Audit reservation lifecycle
 
-[ ] Audit payment lifecycle
+[x] Audit payment lifecycle
 
-[ ] Audit trip lifecycle
+[x] Audit trip lifecycle
 
-[ ] Audit WPoint/trajectory lifecycle
+[x] Audit WPoint/trajectory lifecycle
 
-[ ] Audit GPS functionality
+[x] Audit GPS functionality
 
-[ ] Audit admin functionality
+[x] Audit admin functionality
 
-[ ] Audit driver functionality
+[x] Audit driver functionality
 
-[ ] Audit customer functionality
+[x] Audit customer functionality
 
 TASK 0.2 — Build a feature matrix
 
