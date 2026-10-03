@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'reac
 import { Link } from 'react-router-dom';
 import { api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
+import WpointManager from '../components/WpointManager';
 import type {
   AdminReservationRow,
   CustomerRow,
@@ -259,23 +260,14 @@ function TripsTab() {
 
 // ── Trajectoires ─────────────────────────────────────────────────────────────
 
-interface WpointRecord {
-  wilaya: string;
-  communes: string[];
-}
-
 function TrajectoriesTab() {
   const [rows, setRows] = useState<TrajectoryRow[]>([]);
   const [wilayas, setWilayas] = useState<Wilaya[]>([]);
   const [selected, setSelected] = useState<string>('');
   const [wpoints, setWpoints] = useState<WpointRow[]>([]);
   const [name, setName] = useState('');
-  const [wilayaId, setWilayaId] = useState('');
   const [price, setPrice] = useState({ from: '', to: '', amount: '' });
   const [msg, setMsg] = useState('');
-  const [openWpoint, setOpenWpoint] = useState<string | null>(null);
-  const [records, setRecords] = useState<Record<string, WpointRecord>>({});
-  const [refine, setRefine] = useState({ commune: '', daira: '' });
 
   const load = useCallback(async () => {
     const [t, w] = await Promise.all([
@@ -291,13 +283,6 @@ function TrajectoriesTab() {
   }, [load]);
 
   useEffect(() => {
-    if (!selected) {
-      setWpoints([]);
-      return;
-    }
-    api<{ wpoints: WpointRow[] }>(`/api/admin/trajectories/${selected}/wpoints`)
-      .then((r) => setWpoints(r.wpoints))
-      .catch(() => setWpoints([]));
     setPrice({ from: '', to: '', amount: '' });
   }, [selected]);
 
@@ -309,70 +294,6 @@ function TrajectoriesTab() {
       setName('');
       setMsg('✔ Trajectoire créée');
       await load();
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const addWpoint = async (e: FormEvent): Promise<void> => {
-    e.preventDefault();
-    setMsg('');
-    try {
-      await api(`/api/admin/trajectories/${selected}/wpoints`, { method: 'POST', body: { wilaya_id: Number(wilayaId) } });
-      setMsg('✔ Arrêt ajouté');
-      setWilayaId('');
-      await load();
-      const r = await api<{ wpoints: WpointRow[] }>(`/api/admin/trajectories/${selected}/wpoints`);
-      setWpoints(r.wpoints);
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const toggleWpoint = async (wpointId: string): Promise<void> => {
-    if (openWpoint === wpointId) {
-      setOpenWpoint(null);
-      return;
-    }
-    setOpenWpoint(wpointId);
-    setRefine({ commune: '', daira: '' });
-    try {
-      const r = await api<{ wpoint: WpointRecord }>(`/api/admin/trajectories/${selected}/wpoints/${wpointId}/record`);
-      setRecords((prev) => ({ ...prev, [wpointId]: r.wpoint }));
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const reloadRecord = async (wpointId: string): Promise<void> => {
-    const r = await api<{ wpoint: WpointRecord }>(`/api/admin/trajectories/${selected}/wpoints/${wpointId}/record`);
-    setRecords((prev) => ({ ...prev, [wpointId]: r.wpoint }));
-  };
-
-  const addCommune = async (wpointId: string): Promise<void> => {
-    setMsg('');
-    try {
-      await api(`/api/admin/trajectories/${selected}/wpoints/${wpointId}/commune`, {
-        method: 'POST',
-        body: { commune: refine.commune },
-      });
-      setRefine({ ...refine, commune: '' });
-      await reloadRecord(wpointId);
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const addDaira = async (wpointId: string): Promise<void> => {
-    setMsg('');
-    try {
-      const r = await api<{ added: number }>(`/api/admin/trajectories/${selected}/wpoints/${wpointId}/daira`, {
-        method: 'POST',
-        body: { daira: refine.daira },
-      });
-      setMsg(`✔ ${r.added} commune(s) de la daïra ajoutée(s)`);
-      setRefine({ ...refine, daira: '' });
-      await reloadRecord(wpointId);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     }
@@ -421,62 +342,7 @@ function TrajectoriesTab() {
         <div className="detail-grid">
           <div className="card">
             <h2>Arrêts</h2>
-            <ol className="stops">
-              {wpoints.map((w) => (
-                <li key={w.id} className="wpoint-item">
-                  <span className="dot" />
-                  <div className="wpoint-body">
-                    <div className="wpoint-head">
-                      <strong>{w.nom_fr}</strong> <span className="muted">({w.nom_ar})</span>
-                      <button type="button" className="btn ghost small" onClick={() => void toggleWpoint(w.id)}>
-                        {openWpoint === w.id ? 'Masquer' : 'Affiner (communes)'}
-                      </button>
-                    </div>
-                    {openWpoint === w.id && (
-                      <div className="wpoint-refine">
-                        <p className="muted small">
-                          Communes sélectionnées : {records[w.id]?.communes.length ? records[w.id].communes.join(', ') : 'toute la wilaya (aucune restriction)'}
-                        </p>
-                        <div className="form-inline">
-                          <input
-                            placeholder="Nom de commune"
-                            value={refine.commune}
-                            onChange={(e) => setRefine({ ...refine, commune: e.target.value })}
-                          />
-                          <button type="button" className="btn ghost small" onClick={() => void addCommune(w.id)} disabled={!refine.commune.trim()}>
-                            + Commune
-                          </button>
-                        </div>
-                        <div className="form-inline">
-                          <input
-                            placeholder="Nom de daïra (ajoute toutes ses communes)"
-                            value={refine.daira}
-                            onChange={(e) => setRefine({ ...refine, daira: e.target.value })}
-                          />
-                          <button type="button" className="btn ghost small" onClick={() => void addDaira(w.id)} disabled={!refine.daira.trim()}>
-                            + Daïra
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ol>
-            <form className="form-inline" onSubmit={(e) => void addWpoint(e)}>
-              <label>
-                Ajouter un arrêt
-                <select required value={wilayaId} onChange={(e) => setWilayaId(e.target.value)}>
-                  <option value="">— Wilaya —</option>
-                  {wilayas.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.nom_fr}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button className="btn primary">Ajouter</button>
-            </form>
+            <WpointManager basePath="/api/admin" trajectoryId={selected} wilayas={wilayas} onWpointsChange={setWpoints} />
           </div>
 
           <div className="card">

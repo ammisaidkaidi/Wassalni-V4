@@ -113,5 +113,40 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
     }),
   );
 
+  /**
+   * Permanently delete a cancelled/declined reservation from the customer's
+   * own history. Only allowed once it's actually cancelled (never an
+   * active booking), and only if it never had a payment recorded against it
+   * (financial records are kept for audit — ask support otherwise).
+   */
+  router.delete(
+    '/:id',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const row = await db.selectOne<{ id: string; customer_id: string; status: string }>('reservation', {
+        columns: ['id', 'customer_id', 'status'],
+        where: { id },
+      });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      if (row.status !== 'cancelled') {
+        throw new ApiError(409, 'NOT_DELETABLE', 'Seule une réservation annulée ou refusée peut être supprimée');
+      }
+      const payment = await db.selectOne<{ id: string }>('payment', { columns: ['id'], where: { reservation_id: id } });
+      if (payment) {
+        throw new ApiError(
+          409,
+          'HAS_PAYMENTS',
+          'Cette réservation a un historique de paiement et ne peut pas être supprimée — contactez le support',
+        );
+      }
+      await db.raw('delete from reservation where id = $1', [id]);
+      res.json({ ok: true });
+    }),
+  );
+
   return router;
 }

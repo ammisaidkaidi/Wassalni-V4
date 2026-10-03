@@ -334,6 +334,60 @@ export class DomainRepository {
     return (await this.db.callScalar<number>('select_daira', wpointId, dairaName)) ?? 0;
   }
 
+  /** True if this wpoint is used as a stop by at least one trip (deleting it would cascade and silently break that trip). */
+  async wpointHasTripStops(wpointId: string): Promise<boolean> {
+    const rows = await this.db.raw<{ one: number }>('select 1 as one from trip_stop where wpoint_id = $1 limit 1', [wpointId]);
+    return rows.length > 0;
+  }
+
+  /**
+   * Removes a stop from a trajectory. Callers must first check
+   * `wpointHasTripStops` themselves and refuse the request if it's in use —
+   * the FK from trip_stop to wpoint is ON DELETE CASCADE (so the DB itself
+   * won't block this), which would otherwise silently drop stops/prices from
+   * an existing trip.
+   */
+  async deleteWpoint(trajectoryId: string, wpointId: string): Promise<void> {
+    await this.db.raw('delete from wpoint where id = $1 and trajectory_id = $2', [wpointId, trajectoryId]);
+  }
+
+  /**
+   * Re-ranks every stop of a trajectory to match `orderedIds` (position
+   * 1..N, in that order). Must be given the trajectory's *entire* current
+   * wpoint set — no partial reorder — so the result stays a contiguous,
+   * strictly-positive, gap-free sequence. Implemented as a single UPDATE
+   * statement: `wpoint_traj_position_uk` is DEFERRABLE INITIALLY IMMEDIATE,
+   * which Postgres only (re)checks at the end of the statement, so
+   * intermediate/duplicate positions mid-reorder never trip the constraint.
+   */
+  async reorderWpoints(trajectoryId: string, orderedIds: string[]): Promise<void> {
+    const existing = await this.db.raw<{ id: string }>('select id from wpoint where trajectory_id = $1', [trajectoryId]);
+    const existingIds = new Set(existing.map((r) => r.id));
+    const uniqueOrdered = new Set(orderedIds);
+    if (
+      orderedIds.length === 0 ||
+      uniqueOrdered.size !== orderedIds.length ||
+      uniqueOrdered.size !== existingIds.size ||
+      !orderedIds.every((id) => existingIds.has(id))
+    ) {
+      throw new Error("La liste de réordonnancement doit contenir exactement les arrêts actuels de la trajectoire, sans doublon ni omission");
+    }
+    const params: unknown[] = [trajectoryId];
+    const valueRows = orderedIds.map((id, idx) => {
+      params.push(id);
+      const idParam = params.length;
+      params.push(idx + 1);
+      const posParam = params.length;
+      return `($${idParam}::uuid, $${posParam}::int)`;
+    });
+    await this.db.raw(
+      `update wpoint as w set position = v.pos
+         from (values ${valueRows.join(', ')}) as v(id, pos)
+        where w.id = v.id and w.trajectory_id = $1`,
+      params,
+    );
+  }
+
   async getTrajectoryId(name: string): Promise<string | null> {
     return this.db.callScalar<string | null>('get_trajectory_id', name);
   }

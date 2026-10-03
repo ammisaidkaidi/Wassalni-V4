@@ -262,6 +262,27 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     }),
   );
   router.post(
+    '/trajectories/:id/wpoints/reorder',
+    wrap(async (req, res) => {
+      const trajectoryId = uuidParam(req.params.id);
+      const { ids } = z.object({ ids: z.array(z.string().uuid()).min(1) }).parse(req.body);
+      await repo.reorderWpoints(trajectoryId, ids);
+      res.json({ ok: true });
+    }),
+  );
+  router.delete(
+    '/trajectories/:id/wpoints/:wpointId',
+    wrap(async (req, res) => {
+      const trajectoryId = uuidParam(req.params.id);
+      const wpointId = uuidParam(req.params.wpointId);
+      if (await repo.wpointHasTripStops(wpointId)) {
+        throw new ApiError(409, 'WPOINT_IN_USE', 'Cet arrêt est utilisé par au moins un voyage existant — impossible de le supprimer');
+      }
+      await repo.deleteWpoint(trajectoryId, wpointId);
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
     '/trajectories/:id/prices',
     wrap(async (req, res) => {
       const b = priceSchema.parse(req.body);

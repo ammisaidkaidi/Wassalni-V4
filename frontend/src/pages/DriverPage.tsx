@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
+import WpointManager from '../components/WpointManager';
 import type {
   DriverProfileRow,
   DriverReservationRow,
@@ -643,7 +644,6 @@ function TrajectoiresTab() {
   const [selected, setSelected] = useState<string>('');
   const [wpoints, setWpoints] = useState<WpointRow[]>([]);
   const [name, setName] = useState('');
-  const [wilayaId, setWilayaId] = useState('');
   const [price, setPrice] = useState({ from: '', to: '', amount: '' });
   const [tripForm, setTripForm] = useState({ departure_at: '', capacity: '4', seat_price: '0' });
   const [msg, setMsg] = useState('');
@@ -662,19 +662,9 @@ function TrajectoiresTab() {
     load().catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
   }, [load]);
 
-  const loadWpoints = useCallback(async (trajectoryId: string) => {
-    if (!trajectoryId) {
-      setWpoints([]);
-      return;
-    }
-    const r = await api<{ wpoints: WpointRow[] }>(`/api/driver/trajectories/${trajectoryId}/wpoints`);
-    setWpoints(r.wpoints);
-  }, []);
-
   useEffect(() => {
     setPrice({ from: '', to: '', amount: '' });
-    void loadWpoints(selected);
-  }, [selected, loadWpoints]);
+  }, [selected]);
 
   const create = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
@@ -685,20 +675,6 @@ function TrajectoiresTab() {
       setMsg('✔ Trajectoire créée');
       await load();
       setSelected(r.id);
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const addWpoint = async (e: FormEvent): Promise<void> => {
-    e.preventDefault();
-    setMsg('');
-    try {
-      await api(`/api/driver/trajectories/${selected}/wpoints`, { method: 'POST', body: { wilaya_id: Number(wilayaId) } });
-      setMsg('✔ Arrêt ajouté');
-      setWilayaId('');
-      await load();
-      await loadWpoints(selected);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     }
@@ -781,28 +757,7 @@ function TrajectoiresTab() {
         <div className="detail-grid">
           <div className="card">
             <h2>Arrêts</h2>
-            <ol className="stops">
-              {wpoints.map((w) => (
-                <li key={w.id} className="wpoint-item">
-                  <span className="dot" />
-                  <strong>{w.nom_fr}</strong> <span className="muted">({w.nom_ar})</span>
-                </li>
-              ))}
-            </ol>
-            <form className="form-inline" onSubmit={(e) => void addWpoint(e)}>
-              <label>
-                Ajouter un arrêt
-                <select required value={wilayaId} onChange={(e) => setWilayaId(e.target.value)}>
-                  <option value="">— Wilaya —</option>
-                  {wilayas.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.nom_fr}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button className="btn primary">Ajouter</button>
-            </form>
+            <WpointManager basePath="/api/driver" trajectoryId={selected} wilayas={wilayas} onWpointsChange={setWpoints} />
           </div>
 
           <div className="card">

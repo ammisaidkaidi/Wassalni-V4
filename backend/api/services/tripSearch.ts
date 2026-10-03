@@ -4,8 +4,9 @@ import { ApiError } from '../middleware/errors';
 export interface TripSearchParams {
   fromWilayaId: number;
   toWilayaId: number;
-  /** YYYY-MM-DD (interpreted in Africa/Algiers timezone). */
-  date?: string;
+  /** YYYY-MM-DD (interpreted in Africa/Algiers timezone). Either/both may be set — an open range. */
+  dateFrom?: string;
+  dateTo?: string;
   page: number;
   pageSize: number;
 }
@@ -37,9 +38,15 @@ export interface TripSearchRow {
 export async function searchTrips(db: DBHelper, p: TripSearchParams): Promise<{ trips: TripSearchRow[]; total: number; page: number; page_size: number }> {
   const params: unknown[] = [p.fromWilayaId, p.toWilayaId];
   let dateFilter = '';
-  if (p.date) {
-    params.push(p.date);
-    dateFilter = ` and (tr.departure_at at time zone 'Africa/Algiers')::date = $3::date`;
+  if (p.dateFrom && p.dateTo) {
+    params.push(p.dateFrom, p.dateTo);
+    dateFilter = ` and (tr.departure_at at time zone 'Africa/Algiers')::date between $${params.length - 1}::date and $${params.length}::date`;
+  } else if (p.dateFrom) {
+    params.push(p.dateFrom);
+    dateFilter = ` and (tr.departure_at at time zone 'Africa/Algiers')::date >= $${params.length}::date`;
+  } else if (p.dateTo) {
+    params.push(p.dateTo);
+    dateFilter = ` and (tr.departure_at at time zone 'Africa/Algiers')::date <= $${params.length}::date`;
   }
   params.push(p.pageSize);
   const limitIdx = params.length;

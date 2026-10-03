@@ -183,6 +183,59 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
     }),
   );
 
+  router.get(
+    '/trajectories/:id/wpoints/:wpointId/record',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const record = await repo.wpointToRecord(uuidParam(req.params.wpointId));
+      if (!record) throw new ApiError(404, 'NOT_FOUND', 'WPoint introuvable');
+      res.json({ wpoint: record });
+    }),
+  );
+
+  router.post(
+    '/trajectories/:id/wpoints/:wpointId/commune',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const { commune } = z.object({ commune: z.string().trim().min(1) }).parse(req.body);
+      await repo.selectCommune(uuidParam(req.params.wpointId), commune);
+      res.json({ ok: true });
+    }),
+  );
+
+  router.post(
+    '/trajectories/:id/wpoints/:wpointId/daira',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const { daira } = z.object({ daira: z.string().trim().min(1) }).parse(req.body);
+      const added = await repo.selectDaira(uuidParam(req.params.wpointId), daira);
+      res.json({ added });
+    }),
+  );
+
+  router.post(
+    '/trajectories/:id/wpoints/reorder',
+    wrap(async (req, res) => {
+      const trajectoryId = uuidParam(req.params.id);
+      const { ids } = z.object({ ids: z.array(z.string().uuid()).min(1) }).parse(req.body);
+      await repo.reorderWpoints(trajectoryId, ids);
+      res.json({ ok: true });
+    }),
+  );
+
+  router.delete(
+    '/trajectories/:id/wpoints/:wpointId',
+    wrap(async (req, res) => {
+      const trajectoryId = uuidParam(req.params.id);
+      const wpointId = uuidParam(req.params.wpointId);
+      if (await repo.wpointHasTripStops(wpointId)) {
+        throw new ApiError(409, 'WPOINT_IN_USE', 'Cet arrêt est utilisé par au moins un voyage existant — impossible de le supprimer');
+      }
+      await repo.deleteWpoint(trajectoryId, wpointId);
+      res.json({ ok: true });
+    }),
+  );
+
   router.post(
     '/trajectories/:id/prices',
     wrap(async (req, res) => {

@@ -35,6 +35,19 @@ export default function MyReservationsPage() {
     }
   };
 
+  const remove = async (id: string): Promise<void> => {
+    setMsg('');
+    setError('');
+    if (!window.confirm('Supprimer définitivement cette réservation ? Cette action est irréversible.')) return;
+    try {
+      await api(`/api/reservations/${id}`, { method: 'DELETE' });
+      setMsg('✔ Réservation supprimée');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   if (loading) return <p className="empty">Chargement…</p>;
   if (!user)
     return (
@@ -67,6 +80,11 @@ export default function MyReservationsPage() {
               {(r.status === 'pending' || r.status === 'confirmed') && (
                 <button className="btn danger small" onClick={() => void cancel(r.id)}>
                   Annuler
+                </button>
+              )}
+              {r.status === 'cancelled' && (
+                <button className="btn danger small" onClick={() => void remove(r.id)}>
+                  Supprimer
                 </button>
               )}
             </div>

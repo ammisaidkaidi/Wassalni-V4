@@ -5,7 +5,7 @@ import type { TripSearchRow, Wilaya } from '../types';
 
 export default function HomePage() {
   const [wilayas, setWilayas] = useState<Wilaya[]>([]);
-  const [form, setForm] = useState({ from: '', to: '', date: '' });
+  const [form, setForm] = useState({ from: '', to: '', dateFrom: '', dateTo: '' });
   const [results, setResults] = useState<TripSearchRow[] | null>(null);
   const [total, setTotal] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -23,7 +23,8 @@ export default function HomePage() {
     setBusy(true);
     try {
       const q = new URLSearchParams({ from: form.from, to: form.to });
-      if (form.date) q.set('date', form.date);
+      if (form.dateFrom) q.set('date_from', form.dateFrom);
+      if (form.dateTo) q.set('date_to', form.dateTo);
       const r = await api<{ trips: TripSearchRow[]; total: number }>(`/api/trips?${q.toString()}`);
       setResults(r.trips);
       setTotal(r.total);
@@ -65,8 +66,22 @@ export default function HomePage() {
           </select>
         </label>
         <label>
-          Date
-          <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+          Du
+          <input
+            type="date"
+            value={form.dateFrom}
+            max={form.dateTo || undefined}
+            onChange={(e) => setForm({ ...form, dateFrom: e.target.value })}
+          />
+        </label>
+        <label>
+          Au
+          <input
+            type="date"
+            value={form.dateTo}
+            min={form.dateFrom || undefined}
+            onChange={(e) => setForm({ ...form, dateTo: e.target.value })}
+          />
         </label>
         <button className="btn primary" disabled={busy || !form.from || !form.to || form.from === form.to}>
           {busy ? 'Recherche…' : 'Rechercher'}
