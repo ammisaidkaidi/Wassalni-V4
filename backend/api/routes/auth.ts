@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { ApiConfig } from '../config';
 import type { AuthService } from '../auth/authService';
 import { wrap } from '../middleware/errors';
-import { requireAuth } from '../middleware/session';
+import { requireAuth, SESSION_QUERY_PARAM } from '../middleware/session';
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -49,6 +49,10 @@ export function authRoutes(svc: AuthService, cfg: ApiConfig): Router {
         ip: req.ip,
         userAgent: req.headers['user-agent'],
       });
+      // Cookie kept as a transparent fallback for browsers that support it;
+      // the primary mechanism is the `token` below, which the client stores
+      // itself and sends back as a `?sid=` query parameter on every request
+      // (needed for browsers that don't support cookies).
       res.cookie(cfg.cookieName, token, {
         httpOnly: true,
         sameSite: 'lax',
@@ -56,14 +60,16 @@ export function authRoutes(svc: AuthService, cfg: ApiConfig): Router {
         maxAge: cfg.sessionTtlHours * 3_600_000,
         path: '/',
       });
-      res.json({ user });
+      res.json({ user, token });
     }),
   );
 
   router.post(
     '/logout',
     wrap(async (req, res) => {
-      await svc.logout((req as { cookies?: Record<string, string | undefined> }).cookies?.[cfg.cookieName]);
+      const queryToken = typeof req.query[SESSION_QUERY_PARAM] === 'string' ? (req.query[SESSION_QUERY_PARAM] as string) : undefined;
+      const cookieToken = (req as { cookies?: Record<string, string | undefined> }).cookies?.[cfg.cookieName];
+      await svc.logout(queryToken || cookieToken);
       res.clearCookie(cfg.cookieName, { path: '/' });
       res.json({ ok: true });
     }),

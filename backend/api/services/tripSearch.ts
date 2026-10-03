@@ -79,13 +79,40 @@ export async function searchTrips(db: DBHelper, p: TripSearchParams): Promise<{ 
 /** Public trip detail: v_trip + ordered stops + price matrix. */
 export async function getTripDetail(db: DBHelper, tripId: string): Promise<{
   trip: Record<string, unknown>;
-  stops: Array<{ id: string; position: number; nom_fr: string; nom_ar: string; eta: string | null }>;
+  stops: Array<{ id: string; position: number; nom_fr: string; nom_ar: string; wilaya_id: number; eta: string | null }>;
   prices: Array<{ from_wpoint_id: string; to_wpoint_id: string; price: string; currency: string }>;
 }> {
   const trip = await db.selectOne<Record<string, unknown>>('v_trip', { where: { id: tripId } });
   if (!trip || trip.published_at === null) throw new ApiError(404, 'TRIP_NOT_FOUND', 'Voyage introuvable');
-  const stops = await db.raw<{ id: string; position: number; nom_fr: string; nom_ar: string; eta: string | null }>(
-    `select wp.id, wp.position, w.nom_fr, w.nom_ar, ts.eta
+  return getTripDetailUnrestricted(db, tripId, trip);
+}
+
+/**
+ * Same as getTripDetail but without the "must be published" restriction —
+ * used by the driver UI, which must be able to see its own assigned trip
+ * (stops + fares) even before it's published to customers.
+ */
+export async function getTripDetailForDriver(db: DBHelper, tripId: string): Promise<{
+  trip: Record<string, unknown>;
+  stops: Array<{ id: string; position: number; nom_fr: string; nom_ar: string; wilaya_id: number; eta: string | null }>;
+  prices: Array<{ from_wpoint_id: string; to_wpoint_id: string; price: string; currency: string }>;
+}> {
+  const trip = await db.selectOne<Record<string, unknown>>('v_trip', { where: { id: tripId } });
+  if (!trip) throw new ApiError(404, 'TRIP_NOT_FOUND', 'Voyage introuvable');
+  return getTripDetailUnrestricted(db, tripId, trip);
+}
+
+async function getTripDetailUnrestricted(
+  db: DBHelper,
+  tripId: string,
+  trip: Record<string, unknown>,
+): Promise<{
+  trip: Record<string, unknown>;
+  stops: Array<{ id: string; position: number; nom_fr: string; nom_ar: string; wilaya_id: number; eta: string | null }>;
+  prices: Array<{ from_wpoint_id: string; to_wpoint_id: string; price: string; currency: string }>;
+}> {
+  const stops = await db.raw<{ id: string; position: number; nom_fr: string; nom_ar: string; wilaya_id: number; eta: string | null }>(
+    `select wp.id, wp.position, w.nom_fr, w.nom_ar, w.id as wilaya_id, ts.eta
        from trip_stop ts
        join wpoint wp on wp.id = ts.wpoint_id
        join wilaya w  on w.id = wp.wilaya_id

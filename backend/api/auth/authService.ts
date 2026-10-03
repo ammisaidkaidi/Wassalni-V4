@@ -10,9 +10,10 @@ export interface PublicUser {
   email: string;
   full_name: string;
   phone: string | null;
-  role: 'customer' | 'admin';
+  role: 'customer' | 'admin' | 'driver';
   email_verified: boolean;
   customer_id: string | null;
+  driver_id: string | null;
 }
 
 export interface LoginChallenge {
@@ -23,7 +24,8 @@ export interface LoginChallenge {
   dev_code?: string;
 }
 
-const USER_COLS = 'id, email, full_name, phone, role, email_verified, customer_id';
+const USER_COLS = 'id, email, full_name, phone, role, email_verified, customer_id, driver_id';
+
 
 /**
  * AuthService — accounts + login with 2FA (one-time code by email) + sessions.
@@ -155,7 +157,7 @@ export class AuthService {
 
   async getUserBySession(token: string): Promise<PublicUser | null> {
     const rows = await this.db.raw<PublicUser & { expires_at: string }>(
-      `select u.id, u.email, u.full_name, u.phone, u.role, u.email_verified, u.customer_id, s.expires_at
+      `select u.id, u.email, u.full_name, u.phone, u.role, u.email_verified, u.customer_id, u.driver_id, s.expires_at
          from app_session s join app_user u on u.id = s.user_id
         where s.token_hash = $1`,
       [sha256(token)],
@@ -173,6 +175,7 @@ export class AuthService {
       role: row.role,
       email_verified: row.email_verified,
       customer_id: row.customer_id,
+      driver_id: row.driver_id,
     };
   }
 
@@ -185,7 +188,7 @@ export class AuthService {
     email: string;
     password: string;
     full_name: string;
-    role: 'customer' | 'admin';
+    role: 'customer' | 'admin' | 'driver';
     phone?: string;
   }): Promise<PublicUser> {
     const email = input.email.trim().toLowerCase();
@@ -215,6 +218,54 @@ export class AuthService {
     return rows[0];
   }
 
+  /** The app_user account (if any) already linked to a given driver fleet record. */
+  async getDriverAccount(driverId: string): Promise<PublicUser | null> {
+    const rows = await this.db.raw<PublicUser>(`select ${USER_COLS} from app_user where driver_id = $1`, [driverId]);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Admin action: grant (or reset) a login for an existing `driver` fleet
+   * record so that person can sign in to the driver UI. Unlike customer
+   * registration, the driver record (NIN/phone/etc.) must already exist —
+   * this only attaches/repairs the app_user credentials pointing at it.
+   */
+  async createDriverAccount(input: { driverId: string; email: string; password: string; full_name?: string }): Promise<PublicUser> {
+    const driverRows = await this.db.raw<{ id: string; full_name: string }>(`select id, full_name from driver where id = $1`, [
+      input.driverId,
+    ]);
+    const driver = driverRows[0];
+    if (!driver) throw new ApiError(404, 'NOT_FOUND', 'Chauffeur introuvable');
+
+    const email = input.email.trim().toLowerCase();
+    const fullName = (input.full_name ?? driver.full_name).trim();
+    const passwordHash = await hashPassword(input.password);
+
+    const byDriver = await this.getDriverAccount(input.driverId);
+    const byEmail = await this.db.raw<{ id: string; driver_id: string | null }>(`select id, driver_id from app_user where email = $1`, [
+      email,
+    ]);
+    if (byEmail[0] && byEmail[0].id !== byDriver?.id) {
+      throw new ApiError(409, 'EMAIL_TAKEN', 'Un compte existe déjà avec cet email');
+    }
+
+    if (byDriver) {
+      // Reset credentials on the existing linked account.
+      const rows = await this.db.raw<PublicUser>(
+        `update app_user set email = $1, password_hash = $2, full_name = $3, role = 'driver', failed_attempts = 0, locked_until = null
+          where id = $4 returning ${USER_COLS}`,
+        [email, passwordHash, fullName, byDriver.id],
+      );
+      return rows[0];
+    }
+    const rows = await this.db.raw<PublicUser>(
+      `insert into app_user (email, password_hash, full_name, role, driver_id)
+       values ($1, $2, $3, 'driver', $4) returning ${USER_COLS}`,
+      [email, passwordHash, fullName, input.driverId],
+    );
+    return rows[0];
+  }
+
   private async issueChallenge(userId: string, email: string): Promise<LoginChallenge> {
     const { otpToken, code } = await this.issueOtp(userId);
     await this.mailer.sendMail(email, 'Wassalni — votre code de connexion', otpEmailHtml(code));
@@ -222,7 +273,9 @@ export class AuthService {
       otp_required: true,
       otp_token: otpToken,
       expires_in: this.cfg.otpTtlMinutes * 60,
-      ...(this.cfg.otpDevMode ? { dev_code: code } : {}),
+      // Never leak the OTP in the API response outside local/dev use — even if
+      // otpDevMode is true (no SMTP configured), production must not echo it.
+      ...(this.cfg.otpDevMode && !this.cfg.isProduction ? { dev_code: code } : {}),
     };
   }
 

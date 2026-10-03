@@ -149,6 +149,10 @@ create table if not exists vehicle (
   updated_at  timestamptz not null default now()
 );
 
+-- a driver's own/usual vehicle (self-service driver UI); nullable — fleet
+-- vehicles can still be assigned per-trip independently of this default.
+alter table driver add column if not exists vehicle_id uuid references vehicle(id) on delete set null;
+
 -- high-frequency updates kept separate
 create table if not exists driver_last_location (
   driver_id   uuid primary key references driver(id) on delete cascade,
@@ -318,6 +322,15 @@ create table if not exists reservation (
     check (pickup_wpoint_id is null or dropoff_wpoint_id is null
            or pickup_wpoint_id <> dropoff_wpoint_id)
 );
+
+-- Precise GPS pin the customer may drop on a map when booking, in addition to
+-- the wilaya-level pickup/dropoff wpoint above (which stays the source of
+-- truth for pricing). Nullable: falls back to the wpoint's wilaya centroid
+-- when absent.
+alter table reservation add column if not exists pickup_lat  numeric(9,6) check (pickup_lat  is null or pickup_lat  between -90 and 90);
+alter table reservation add column if not exists pickup_lon  numeric(9,6) check (pickup_lon  is null or pickup_lon  between -180 and 180);
+alter table reservation add column if not exists dropoff_lat numeric(9,6) check (dropoff_lat is null or dropoff_lat between -90 and 90);
+alter table reservation add column if not exists dropoff_lon numeric(9,6) check (dropoff_lon is null or dropoff_lon between -180 and 180);
 
 create table if not exists payment (
   id              uuid primary key default gen_random_uuid(),

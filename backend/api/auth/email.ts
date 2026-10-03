@@ -8,6 +8,17 @@ export interface Mailer {
 
 export function createMailer(cfg: ApiConfig): Mailer {
   if (!cfg.smtp.host) {
+    if (cfg.isProduction) {
+      // Production with no SMTP configured: never print OTP codes/content to
+      // logs. Emails silently "send" nowhere — login will be stuck until
+      // SMTP_* is configured. This is intentional (fail closed, not open).
+      return {
+        mode: 'console',
+        async sendMail(to) {
+          console.error(`✗ [mailer] SMTP not configured — cannot deliver email to ${to} (set SMTP_* in backend/.env)`);
+        },
+      };
+    }
     // Development mode: no SMTP configured → print the email to the console.
     return {
       mode: 'console',

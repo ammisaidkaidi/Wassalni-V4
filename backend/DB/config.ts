@@ -15,8 +15,27 @@ export interface DbConfig {
   algeriaDataPath: string;
 }
 
-/** backend/ root (config.ts lives in backend/DB/). */
-export const BACKEND_ROOT = path.resolve(__dirname, '..');
+/**
+ * backend/ root. config.ts lives in backend/DB/ in source, but once compiled
+ * (tsc) it lives in backend/dist/DB/ — a plain `path.resolve(__dirname, '..')`
+ * would then resolve to backend/dist/ instead of backend/, missing .env and
+ * data/init/*. Walk upward from this file looking for the nearest directory
+ * that holds this package's package.json, which works identically whether
+ * running via ts-node (backend/DB) or the compiled JS (backend/dist/DB).
+ */
+function findBackendRoot(): string {
+  let dir = __dirname;
+  for (let i = 0; i < 6; i++) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback: previous (pre-fix) behaviour.
+  return path.resolve(__dirname, '..');
+}
+
+export const BACKEND_ROOT = findBackendRoot();
 
 /** Never print full secrets in logs — use this. */
 export function maskSecret(secret?: string): string {

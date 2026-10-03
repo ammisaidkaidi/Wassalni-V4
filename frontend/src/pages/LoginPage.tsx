@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { api } from '../api';
+import { api, setSessionToken } from '../api';
 import { useAuth } from '../auth';
 
 interface Challenge {
@@ -44,10 +44,11 @@ export default function LoginPage() {
     setError('');
     setBusy(true);
     try {
-      await api('/api/auth/verify-2fa', {
+      const r = await api<{ user: unknown; token: string }>('/api/auth/verify-2fa', {
         method: 'POST',
         body: { otp_token: challenge?.otp_token, code },
       });
+      setSessionToken(r.token);
       await refresh();
       navigate(next);
     } catch (err) {

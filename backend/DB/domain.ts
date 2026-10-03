@@ -114,6 +114,89 @@ export interface RefundDueRow {
   refund_due: string;
 }
 
+export interface CustomerRow {
+  id: string;
+  full_name: string;
+  phone: string;
+  email: string | null;
+  nin: string | null;
+  home_wilaya_id: number | null;
+  home_commune_id: number | null;
+  created_at: string;
+}
+
+export interface WilayaOverviewRow {
+  id: number;
+  code: string;
+  nom_fr: string;
+  nom_ar: string;
+  nom_en: string;
+  nb_dairas: number;
+  nb_communes: number;
+  nb_codes_postaux: number;
+}
+
+export interface TripManifestRow {
+  id: string;
+  code: string;
+  status: ReservationStatus;
+  seats: number;
+  total_price: string;
+  currency: string;
+  notes: string | null;
+  customer_name: string;
+  customer_phone: string;
+  pickup: string | null;
+  dropoff: string | null;
+  pickup_wilaya_id: number | null;
+  dropoff_wilaya_id: number | null;
+  pickup_lat: string | null;
+  pickup_lon: string | null;
+  dropoff_lat: string | null;
+  dropoff_lon: string | null;
+}
+
+export interface DriverProfileRow {
+  id: string;
+  full_name: string;
+  nin: string;
+  phone: string;
+  email: string | null;
+  address: string | null;
+  vehicle_id: string | null;
+}
+
+export interface DriverReservationRow {
+  id: string;
+  code: string;
+  status: ReservationStatus;
+  seats: number;
+  total_price: string;
+  currency: string;
+  notes: string | null;
+  created_at: string;
+  trip_id: string;
+  trip_code: string;
+  departure_at: string;
+  trajectory_name: string;
+  customer_name: string;
+  customer_phone: string;
+  pickup: string | null;
+  dropoff: string | null;
+  pickup_wilaya_id: number | null;
+  dropoff_wilaya_id: number | null;
+  pickup_lat: string | null;
+  pickup_lon: string | null;
+  dropoff_lat: string | null;
+  dropoff_lon: string | null;
+}
+
+export interface LastLocationRow {
+  gps_lat: string;
+  gps_lon: string;
+  recorded_at: string;
+}
+
 export interface DairaRow {
   daira_id: number;
   nom_fr: string;
@@ -221,6 +304,11 @@ export class DomainRepository {
 
   async getDomainErrors(): Promise<QueryRow[]> {
     return this.db.raw('select * from v_domain_errors order by sqlstate');
+  }
+
+  /** Per-wilaya counts (dairas / communes / distinct postal codes) — v_wilaya_overview. */
+  async wilayaOverview(): Promise<WilayaOverviewRow[]> {
+    return this.db.select<WilayaOverviewRow>('v_wilaya_overview', { orderBy: 'id' });
   }
 
   // ── trajectory / wpoints ───────────────────────────────────────────────────
@@ -377,6 +465,193 @@ export class DomainRepository {
     return id;
   }
 
+  async listCustomers(limit?: number): Promise<CustomerRow[]> {
+    return this.db.select<CustomerRow>('customer', {
+      columns: ['id', 'full_name', 'phone', 'email', 'nin', 'home_wilaya_id', 'home_commune_id', 'created_at'],
+      orderBy: 'created_at desc',
+      limit,
+    });
+  }
+
+  async getCustomer(id: string): Promise<CustomerRow | null> {
+    return this.db.selectOne<CustomerRow>('customer', {
+      columns: ['id', 'full_name', 'phone', 'email', 'nin', 'home_wilaya_id', 'home_commune_id', 'created_at'],
+      where: { id },
+    });
+  }
+
+  // ── driver self-service (driver UI) ─────────────────────────────────────────
+
+  async getDriverProfile(driverId: string): Promise<DriverProfileRow | null> {
+    return this.db.selectOne<DriverProfileRow>('driver', {
+      columns: ['id', 'full_name', 'nin', 'phone', 'email', 'address', 'vehicle_id'],
+      where: { id: driverId },
+    });
+  }
+
+  /** Editable self-service fields only — nin/nif stay admin-managed (identity documents). */
+  async updateDriverProfile(
+    driverId: string,
+    data: { full_name?: string; phone?: string; email?: string | null; address?: string | null },
+  ): Promise<DriverProfileRow | null> {
+    const patch: Record<string, unknown> = {};
+    if (data.full_name !== undefined) patch.full_name = data.full_name;
+    if (data.phone !== undefined) patch.phone = data.phone;
+    if (data.email !== undefined) patch.email = data.email;
+    if (data.address !== undefined) patch.address = data.address;
+    if (Object.keys(patch).length === 0) return this.getDriverProfile(driverId);
+    await this.db.update('driver', patch, { id: driverId });
+    return this.getDriverProfile(driverId);
+  }
+
+  async getVehicle(vehicleId: string): Promise<Record<string, unknown> | null> {
+    return this.db.selectOne('vehicle', {
+      columns: ['id', 'matricule', 'seats', 'make', 'model', 'notes'],
+      where: { id: vehicleId },
+    });
+  }
+
+  /** Creates a new vehicle and sets it as this driver's own/usual vehicle. */
+  async createDriverVehicle(
+    driverId: string,
+    data: { matricule: string; seats: number; make?: string | null; model?: string | null },
+  ): Promise<Record<string, unknown>> {
+    const vehicle = await this.db.insert('vehicle', data as Record<string, unknown>);
+    await this.db.update('driver', { vehicle_id: (vehicle as { id: string }).id }, { id: driverId });
+    return vehicle;
+  }
+
+  async updateVehicle(
+    vehicleId: string,
+    data: { matricule?: string; seats?: number; make?: string | null; model?: string | null },
+  ): Promise<Record<string, unknown> | null> {
+    const patch: Record<string, unknown> = {};
+    if (data.matricule !== undefined) patch.matricule = data.matricule;
+    if (data.seats !== undefined) patch.seats = data.seats;
+    if (data.make !== undefined) patch.make = data.make;
+    if (data.model !== undefined) patch.model = data.model;
+    if (Object.keys(patch).length > 0) await this.db.update('vehicle', patch, { id: vehicleId });
+    return this.getVehicle(vehicleId);
+  }
+
+  async listTrajectories(): Promise<Array<{ id: string; name: string; nb_wpoints: number; created_at: string }>> {
+    return this.db.raw(
+      `select t.id, t.name,
+              (select count(*) from wpoint w where w.trajectory_id = t.id)::int as nb_wpoints,
+              t.created_at
+         from trajectory t order by t.name`,
+    );
+  }
+
+  /** Reservations across every trip assigned to a given driver (optionally filtered by status). */
+  async listReservationsForDriver(driverId: string, status?: string): Promise<DriverReservationRow[]> {
+    const params: unknown[] = [driverId];
+    let statusFilter = '';
+    if (status) {
+      params.push(status);
+      statusFilter = ` and r.status = $2`;
+    }
+    return this.db.raw<DriverReservationRow>(
+      `select r.id, r.code, r.status, r.seats, r.total_price, r.currency, r.notes, r.created_at,
+              tr.id as trip_id, tr.code as trip_code, tr.departure_at, tj.name as trajectory_name,
+              cs.full_name as customer_name, cs.phone as customer_phone,
+              w1.nom_fr as pickup, w2.nom_fr as dropoff,
+              w1.id as pickup_wilaya_id, w2.id as dropoff_wilaya_id,
+              r.pickup_lat, r.pickup_lon, r.dropoff_lat, r.dropoff_lon
+         from reservation r
+         join trip tr        on tr.id = r.trip_id
+         join trajectory tj  on tj.id = r.trajectory_id
+         join customer cs    on cs.id = r.customer_id
+         left join wpoint wp1 on wp1.id = r.pickup_wpoint_id
+         left join wilaya w1  on w1.id = wp1.wilaya_id
+         left join wpoint wp2 on wp2.id = r.dropoff_wpoint_id
+         left join wilaya w2  on w2.id = wp2.wilaya_id
+        where tr.driver_id = $1${statusFilter}
+        order by r.created_at desc`,
+      params,
+    );
+  }
+
+  /** The driver_id of the trip a reservation belongs to (ownership check for confirm/decline). */
+  async getReservationTripDriver(reservationId: string): Promise<string | null> {
+    const rows = await this.db.raw<{ driver_id: string | null }>(
+      `select tr.driver_id from reservation r join trip tr on tr.id = r.trip_id where r.id = $1`,
+      [reservationId],
+    );
+    return rows[0]?.driver_id ?? null;
+  }
+
+  /** Passenger manifest (active + completed reservations) for one trip. */
+  async getTripManifest(tripId: string): Promise<TripManifestRow[]> {
+    return this.db.raw<TripManifestRow>(
+      `select r.id, r.code, r.status, r.seats, r.total_price, r.currency, r.notes,
+              cs.full_name as customer_name, cs.phone as customer_phone,
+              w1.nom_fr as pickup, w2.nom_fr as dropoff,
+              w1.id as pickup_wilaya_id, w2.id as dropoff_wilaya_id,
+              r.pickup_lat, r.pickup_lon, r.dropoff_lat, r.dropoff_lon
+         from reservation r
+         join customer cs on cs.id = r.customer_id
+         left join wpoint wp1 on wp1.id = r.pickup_wpoint_id
+         left join wilaya w1  on w1.id = wp1.wilaya_id
+         left join wpoint wp2 on wp2.id = r.dropoff_wpoint_id
+         left join wilaya w2  on w2.id = wp2.wilaya_id
+        where r.trip_id = $1 and r.status in ('pending','confirmed','completed')
+        order by r.created_at`,
+      [tripId],
+    );
+  }
+
+  // ── GPS tracking (driver / vehicle last known location) ────────────────────
+
+  async setDriverLocation(driverId: string, lat: number, lon: number): Promise<void> {
+    await this.db.upsert(
+      'driver_last_location',
+      { driver_id: driverId, gps_lat: lat, gps_lon: lon, recorded_at: new Date().toISOString() },
+      ['driver_id'],
+    );
+  }
+
+  async getDriverLocation(driverId: string): Promise<LastLocationRow | null> {
+    return this.db.selectOne<LastLocationRow>('driver_last_location', { where: { driver_id: driverId } });
+  }
+
+  async setVehicleLocation(vehicleId: string, lat: number, lon: number): Promise<void> {
+    await this.db.upsert(
+      'vehicle_last_location',
+      { vehicle_id: vehicleId, gps_lat: lat, gps_lon: lon, recorded_at: new Date().toISOString() },
+      ['vehicle_id'],
+    );
+  }
+
+  async getVehicleLocation(vehicleId: string): Promise<LastLocationRow | null> {
+    return this.db.selectOne<LastLocationRow>('vehicle_last_location', { where: { vehicle_id: vehicleId } });
+  }
+
+  /** Latest known position of every driver/vehicle, for a tracking dashboard. */
+  async listTracking(): Promise<
+    Array<{
+      driver_id: string | null;
+      driver_name: string | null;
+      vehicle_id: string | null;
+      vehicle_matricule: string | null;
+      gps_lat: string | null;
+      gps_lon: string | null;
+      recorded_at: string | null;
+      kind: 'driver' | 'vehicle';
+    }>
+  > {
+    return this.db.raw(
+      `select d.id as driver_id, d.full_name as driver_name, null::uuid as vehicle_id, null as vehicle_matricule,
+              dl.gps_lat, dl.gps_lon, dl.recorded_at, 'driver' as kind
+         from driver d join driver_last_location dl on dl.driver_id = d.id
+        union all
+       select null as driver_id, null as driver_name, v.id as vehicle_id, v.matricule as vehicle_matricule,
+              vl.gps_lat, vl.gps_lon, vl.recorded_at, 'vehicle' as kind
+         from vehicle v join vehicle_last_location vl on vl.vehicle_id = v.id
+        order by recorded_at desc`,
+    );
+  }
+
   /** reserve(…) → reservation uuid. Requires a published, scheduled, future trip. */
   async reserve(p: ReserveParams): Promise<string> {
     const id = await this.db.callScalar<string>(
@@ -390,6 +665,24 @@ export class DomainRepository {
     );
     if (!id) throw new Error('reserve returned no id');
     return id;
+  }
+
+  /**
+   * Optional precise pickup/dropoff pin the customer dropped on a map at
+   * booking time — stored separately from the wilaya-level wpoint, which
+   * stays the pricing source of truth. Any field left undefined is untouched.
+   */
+  async setReservationGeo(
+    reservationId: string,
+    geo: { pickupLat?: number | null; pickupLon?: number | null; dropoffLat?: number | null; dropoffLon?: number | null },
+  ): Promise<void> {
+    const patch: Record<string, unknown> = {};
+    if (geo.pickupLat !== undefined) patch.pickup_lat = geo.pickupLat;
+    if (geo.pickupLon !== undefined) patch.pickup_lon = geo.pickupLon;
+    if (geo.dropoffLat !== undefined) patch.dropoff_lat = geo.dropoffLat;
+    if (geo.dropoffLon !== undefined) patch.dropoff_lon = geo.dropoffLon;
+    if (Object.keys(patch).length === 0) return;
+    await this.db.update('reservation', patch, { id: reservationId });
   }
 
   async confirmReservation(reservationId: string): Promise<void> {

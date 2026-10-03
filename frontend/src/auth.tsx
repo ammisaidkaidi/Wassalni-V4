@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
-import { api } from './api';
+import { ApiError, api, getSessionToken, setSessionToken } from './api';
 import type { User } from './types';
 
 interface AuthState {
@@ -19,7 +19,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const r = await api<{ user: User }>('/api/auth/me');
       setUser(r.user);
-    } catch {
+    } catch (err) {
+      // 401 with a stored token means the session expired/was revoked server-side —
+      // drop the dead token so we don't keep sending it on every request.
+      if (err instanceof ApiError && err.status === 401 && getSessionToken()) setSessionToken(null);
       setUser(null);
     } finally {
       setLoading(false);
@@ -32,6 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     await api('/api/auth/logout', { method: 'POST', body: {} }).catch(() => undefined);
+    setSessionToken(null);
     setUser(null);
   }, []);
 

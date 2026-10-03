@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
+import type { AuthService } from '../auth/authService';
 import { ApiError, wrap } from '../middleware/errors';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -43,9 +44,39 @@ const tripCreateSchema = z.object({
   arrival_eta: z.string().nullish(),
   notes: z.string().nullish(),
 });
+const tripUpdateSchema = z.object({
+  capacity: z.number().int().min(1).max(32767).optional(),
+  seat_price: z.number().nonnegative().optional(),
+  driver_id: z.string().uuid().nullish(),
+  vehicle_id: z.string().uuid().nullish(),
+  arrival_eta: z.string().nullish(),
+  notes: z.string().nullish(),
+});
+const customerSchema = z.object({
+  full_name: z.string().trim().min(2),
+  phone: z.string().regex(/^\+?[0-9]{8,15}$/, 'téléphone invalide'),
+  email: z.string().email().optional(),
+});
+const paymentSchema = z.object({
+  reservation_id: z.string().uuid(),
+  amount: z.number().positive(),
+  method: z.enum(['cash', 'cib', 'edahabia', 'bank_transfer', 'card']),
+  reference: z.string().optional(),
+});
+const refundSchema = z.object({ amount: z.number().positive().optional() });
+const locationSchema = z.object({
+  gps_lat: z.number().min(-90).max(90),
+  gps_lon: z.number().min(-180).max(180),
+});
+
+const driverAccountSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8, '8 caractères minimum'),
+  full_name: z.string().trim().min(2).optional(),
+});
 
 /** Admin area (role = admin): fleet, trajectories, prices, trip lifecycle. */
-export function adminRoutes(db: DBHelper, repo: DomainRepository): Router {
+export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthService): Router {
   const router = Router();
 
   // ── drivers ────────────────────────────────────────────────────────────────
@@ -71,6 +102,37 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository): Router {
       res.json({ deleted: rows.length });
     }),
   );
+  router.post(
+    '/drivers/:id/location',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const b = locationSchema.parse(req.body);
+      await repo.setDriverLocation(id, b.gps_lat, b.gps_lon);
+      res.json({ ok: true });
+    }),
+  );
+  router.get(
+    '/drivers/:id/location',
+    wrap(async (req, res) => {
+      res.json({ location: await repo.getDriverLocation(uuidParam(req.params.id)) });
+    }),
+  );
+  // ── driver login accounts (so a driver can use the driver UI) ──────────────
+  router.get(
+    '/drivers/:id/account',
+    wrap(async (req, res) => {
+      res.json({ account: await auth.getDriverAccount(uuidParam(req.params.id)) });
+    }),
+  );
+  router.post(
+    '/drivers/:id/account',
+    wrap(async (req, res) => {
+      const driverId = uuidParam(req.params.id);
+      const b = driverAccountSchema.parse(req.body);
+      const account = await auth.createDriverAccount({ driverId, email: b.email, password: b.password, full_name: b.full_name });
+      res.status(201).json({ account });
+    }),
+  );
 
   // ── vehicles ───────────────────────────────────────────────────────────────
   router.get(
@@ -93,6 +155,29 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository): Router {
     wrap(async (req, res) => {
       const rows = await db.delete('vehicle', { id: uuidParam(req.params.id) });
       res.json({ deleted: rows.length });
+    }),
+  );
+  router.post(
+    '/vehicles/:id/location',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const b = locationSchema.parse(req.body);
+      await repo.setVehicleLocation(id, b.gps_lat, b.gps_lon);
+      res.json({ ok: true });
+    }),
+  );
+  router.get(
+    '/vehicles/:id/location',
+    wrap(async (req, res) => {
+      res.json({ location: await repo.getVehicleLocation(uuidParam(req.params.id)) });
+    }),
+  );
+
+  // ── tracking (latest GPS fix of every driver/vehicle) ───────────────────────
+  router.get(
+    '/tracking',
+    wrap(async (_req, res) => {
+      res.json({ tracking: await repo.listTracking() });
     }),
   );
 
@@ -147,6 +232,33 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository): Router {
       const wilaya = await db.selectOne<{ nom_fr: string }>('wilaya', { columns: ['nom_fr'], where: { id: wilaya_id } });
       if (!wilaya) throw new ApiError(400, 'BAD_WILAYA', 'Wilaya inconnue');
       res.status(201).json({ wpoint_id: await repo.addWpoint(trajectoryId, wilaya.nom_fr) });
+    }),
+  );
+  router.get(
+    '/trajectories/:id/wpoints/:wpointId/record',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const record = await repo.wpointToRecord(uuidParam(req.params.wpointId));
+      if (!record) throw new ApiError(404, 'NOT_FOUND', 'WPoint introuvable');
+      res.json({ wpoint: record });
+    }),
+  );
+  router.post(
+    '/trajectories/:id/wpoints/:wpointId/commune',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const { commune } = z.object({ commune: z.string().trim().min(1) }).parse(req.body);
+      await repo.selectCommune(uuidParam(req.params.wpointId), commune);
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/trajectories/:id/wpoints/:wpointId/daira',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const { daira } = z.object({ daira: z.string().trim().min(1) }).parse(req.body);
+      const added = await repo.selectDaira(uuidParam(req.params.wpointId), daira);
+      res.json({ added });
     }),
   );
   router.post(
@@ -233,6 +345,126 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository): Router {
     wrap(async (req, res) => {
       await repo.cancelTrip(uuidParam(req.params.id));
       res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/trips/:id/start',
+    wrap(async (req, res) => {
+      await repo.startTrip(uuidParam(req.params.id));
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/trips/:id/complete',
+    wrap(async (req, res) => {
+      await repo.completeTrip(uuidParam(req.params.id));
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/trips/:id/close',
+    wrap(async (req, res) => {
+      await repo.closeTrip(uuidParam(req.params.id));
+      res.json({ ok: true });
+    }),
+  );
+  router.patch(
+    '/trips/:id',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const b = tripUpdateSchema.parse(req.body);
+      const data: Record<string, unknown> = {};
+      if (b.capacity !== undefined) data.capacity = b.capacity;
+      if (b.seat_price !== undefined) data.seat_price = b.seat_price;
+      if (b.driver_id !== undefined) data.driver_id = b.driver_id;
+      if (b.vehicle_id !== undefined) data.vehicle_id = b.vehicle_id;
+      if (b.arrival_eta !== undefined) data.arrival_eta = b.arrival_eta ? new Date(b.arrival_eta).toISOString() : null;
+      if (b.notes !== undefined) data.notes = b.notes;
+      if (Object.keys(data).length === 0) throw new ApiError(400, 'BAD_PARAM', 'Aucun champ à modifier');
+      const rows = await db.update('trip', data, { id });
+      if (rows.length === 0) throw new ApiError(404, 'NOT_FOUND', 'Voyage introuvable');
+      res.json({ trip: await repo.getTrip(id) });
+    }),
+  );
+
+  // ── customers ────────────────────────────────────────────────────────────────
+  router.get(
+    '/customers',
+    wrap(async (_req, res) => {
+      res.json({ customers: await repo.listCustomers() });
+    }),
+  );
+  router.post(
+    '/customers',
+    wrap(async (req, res) => {
+      const b = customerSchema.parse(req.body);
+      const id = await repo.createCustomer(b.full_name, b.phone, b.email ?? null);
+      res.status(201).json({ customer: await repo.getCustomer(id) });
+    }),
+  );
+
+  // ── reservations ─────────────────────────────────────────────────────────────
+  router.get(
+    '/reservations',
+    wrap(async (req, res) => {
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      res.json({ reservations: await repo.listReservations(status ? { status } : undefined) });
+    }),
+  );
+  router.post(
+    '/reservations/:id/confirm',
+    wrap(async (req, res) => {
+      await repo.confirmReservation(uuidParam(req.params.id));
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/reservations/:id/cancel',
+    wrap(async (req, res) => {
+      await repo.cancelReservation(uuidParam(req.params.id));
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── payments ───────────────────────────────────────────────────────────────
+  router.get(
+    '/payments',
+    wrap(async (_req, res) => {
+      res.json({ payments: await repo.listPayments() });
+    }),
+  );
+  router.post(
+    '/payments',
+    wrap(async (req, res) => {
+      const b = paymentSchema.parse(req.body);
+      const id = await repo.recordPayment({
+        reservationId: b.reservation_id,
+        amount: b.amount,
+        method: b.method,
+        reference: b.reference ?? null,
+      });
+      res.status(201).json({ id });
+    }),
+  );
+  router.post(
+    '/payments/:id/settle',
+    wrap(async (req, res) => {
+      await repo.settlePayment(uuidParam(req.params.id));
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/payments/:id/refund',
+    wrap(async (req, res) => {
+      const b = refundSchema.parse(req.body ?? {});
+      await repo.refundPayment(uuidParam(req.params.id), b.amount ?? null);
+      res.json({ ok: true });
+    }),
+  );
+  router.get(
+    '/refunds-due',
+    wrap(async (_req, res) => {
+      res.json({ refunds: await repo.refundsDue() });
     }),
   );
 

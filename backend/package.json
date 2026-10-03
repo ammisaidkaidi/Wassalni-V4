@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "api": "ts-node api/server.ts",
+    "start": "node dist/api/server.js",
     "user:create": "ts-node api/scripts/create-user.ts",
     "db": "ts-node DB/cli.ts",
     "db:init": "ts-node DB/cli.ts init",

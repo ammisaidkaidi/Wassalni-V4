@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth';
 import AdminPage from './pages/AdminPage';
+import DriverPage from './pages/DriverPage';
 import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
 import MyReservationsPage from './pages/MyReservationsPage';
@@ -19,7 +20,8 @@ export default function App() {
           <NavLink to="/" end>
             Rechercher
           </NavLink>
-          {user && <NavLink to="/reservations">Mes réservations</NavLink>}
+          {user?.customer_id && <NavLink to="/reservations">Mes réservations</NavLink>}
+          {user?.role === 'driver' && <NavLink to="/driver">Mon espace chauffeur</NavLink>}
           {user?.role === 'admin' && <NavLink to="/admin">Admin</NavLink>}
         </nav>
         <div className="auth">
@@ -50,6 +52,7 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/reservations" element={<MyReservationsPage />} />
+          <Route path="/driver" element={<DriverPage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="*" element={<p className="empty">Page introuvable</p>} />
         </Routes>

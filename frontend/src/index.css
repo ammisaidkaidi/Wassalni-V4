@@ -402,6 +402,52 @@ form .btn {
   color: #6d28d9;
 }
 
+.chip.partially_refunded {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.chip.refunded {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.muted.small,
+.small {
+  font-size: 0.78rem;
+}
+
+.wpoint-item {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.wpoint-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.wpoint-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wpoint-refine {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--bg);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wpoint-refine .form-inline {
+  margin: 0;
+}
+
 /* ── trip detail ─────────────────────────────────────────── */
 .detail-grid {
   display: grid;

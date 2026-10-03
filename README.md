@@ -30,6 +30,37 @@ npm install
 npm run dev                 # http://localhost:5173 (proxy /api → :3000)
 ```
 
+## Mode production
+
+Le frontend et le backend restent deux process séparés (pas de serveur unique
+qui sert les fichiers statiques), mais chacun tourne en mode "build" :
+
+```bash
+# 1) Backend — build TypeScript puis exécution du JS compilé
+cd backend
+npm install
+cp .env.example .env            # renseigner SUPABASE_PROJECT_REF + SUPABASE_ACCESS_TOKEN
+                                 # + NODE_ENV=production (voir commentaires dans .env.example)
+                                 # + SMTP_HOST/PORT/USER/PASS/FROM dès qu'ils sont disponibles
+npm run db:init                 # si pas déjà fait
+npm run build                   # tsc → dist/
+npm run start                   # node dist/api/server.js, API sur :3000
+
+# 2) Frontend (autre terminal) — vrai build Vite, pas le serveur de dev
+cd frontend
+npm install
+npm run build                   # vite build → dist/
+npm run preview                 # vite preview --host 0.0.0.0 (voir vite.config.ts), :5173
+```
+
+Ce que `NODE_ENV=production` change côté backend :
+- **Cookies de session** marqués `Secure` par défaut (nécessite HTTPS — déjà le cas via le proxy e2b.app en aperçu).
+- **CORS** strict par défaut : seules les requêtes same-origin (via le proxy `/api` du frontend) sont acceptées, sauf si `CORS_ORIGIN` est renseigné explicitement.
+- **Aucune fuite du code 2FA** : ni `dev_code` dans la réponse JSON, ni log console — même si `SMTP_HOST` n'est pas encore configuré. Dans ce cas, l'inscription/connexion reste bloquée à l'étape "vérifiez votre email" tant que le SMTP n'est pas renseigné (un avertissement clair est loggué au démarrage de l'API).
+- Le script `npm run start` exécute le JS compilé (`dist/api/server.js`) plutôt que `ts-node`.
+
+Le sélecteur de compte de démonstration a été retiré : l'authentification réelle (mot de passe + code 2FA par email) est le seul chemin de connexion.
+
 ## Authentification (sessions + 2FA email)
 
 1. **Inscription** (`/register`) : email + téléphone + mot de passe → crée `app_user` + `customer`.

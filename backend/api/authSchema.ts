@@ -13,14 +13,19 @@ export const AUTH_SCHEMA_STATEMENTS: string[] = [
      password_hash  text not null,
      full_name      text not null check (btrim(full_name) <> ''),
      phone          text,
-     role           text not null default 'customer' check (role in ('customer','admin')),
+     role           text not null default 'customer' check (role in ('customer','admin','driver')),
      customer_id    uuid references customer(id) on delete set null,
+     driver_id      uuid references driver(id) on delete set null,
      email_verified boolean not null default false,
      failed_attempts int not null default 0,
      locked_until   timestamptz,
      created_at     timestamptz not null default now(),
      updated_at     timestamptz not null default now()
    )`,
+  // Upgrade-safe for installs created before the 'driver' role existed.
+  `alter table app_user add column if not exists driver_id uuid references driver(id) on delete set null`,
+  `alter table app_user drop constraint if exists app_user_role_check`,
+  `alter table app_user add constraint app_user_role_check check (role in ('customer','admin','driver'))`,
   `create table if not exists app_user_otp (
      id          uuid primary key default gen_random_uuid(),
      user_id     uuid not null references app_user(id) on delete cascade,

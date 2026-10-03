@@ -13,6 +13,13 @@ const reserveSchema = z.object({
   pickup_wpoint_id: z.string().uuid().nullish(),
   dropoff_wpoint_id: z.string().uuid().nullish(),
   notes: z.string().max(1000).nullish(),
+  // Optional precise pin the customer dropped on the map — in addition to
+  // (not instead of) the wilaya-level wpoint above, which stays the fare's
+  // source of truth.
+  pickup_lat: z.number().min(-90).max(90).nullish(),
+  pickup_lon: z.number().min(-180).max(180).nullish(),
+  dropoff_lat: z.number().min(-90).max(90).nullish(),
+  dropoff_lon: z.number().min(-180).max(180).nullish(),
 });
 
 interface ReservationRow {
@@ -29,12 +36,17 @@ interface ReservationRow {
   trip_code: string;
   departure_at: string;
   trajectory_name: string;
+  pickup_lat: string | null;
+  pickup_lon: string | null;
+  dropoff_lat: string | null;
+  dropoff_lon: string | null;
 }
 
 function reservationSelect(db: DBHelper, whereSql: string, params: unknown[]): Promise<ReservationRow[]> {
   return db.raw<ReservationRow>(
     `select r.id, r.code, r.status, r.seats, r.total_price, r.currency,
             r.pickup_wpoint_id, r.dropoff_wpoint_id, r.notes, r.created_at,
+            r.pickup_lat, r.pickup_lon, r.dropoff_lat, r.dropoff_lon,
             t.code as trip_code, t.departure_at, tj.name as trajectory_name
        from reservation r
        join trip t       on t.id = r.trip_id
@@ -63,6 +75,14 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
         dropoffWpointId: b.dropoff_wpoint_id ?? null,
         notes: b.notes ?? null,
       });
+      if (b.pickup_lat != null || b.pickup_lon != null || b.dropoff_lat != null || b.dropoff_lon != null) {
+        await repo.setReservationGeo(reservationId, {
+          pickupLat: b.pickup_lat ?? null,
+          pickupLon: b.pickup_lon ?? null,
+          dropoffLat: b.dropoff_lat ?? null,
+          dropoffLon: b.dropoff_lon ?? null,
+        });
+      }
       const rows = await reservationSelect(db, 'r.id = $1', [reservationId]);
       res.status(201).json({ reservation: rows[0] });
     }),

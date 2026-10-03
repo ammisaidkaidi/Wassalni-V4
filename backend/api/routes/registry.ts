@@ -1,9 +1,11 @@
 import { Router, type Request } from 'express';
 import type { DBHelper } from '../../DB/DBHelper';
+import type { DomainRepository } from '../../DB/domain';
+import { WILAYA_CENTROIDS } from '../data/wilayaCentroids';
 import { ApiError, wrap } from '../middleware/errors';
 
 /** Public read-only access to the Algeria administrative registry. */
-export function registryRoutes(db: DBHelper): Router {
+export function registryRoutes(db: DBHelper, repo: DomainRepository): Router {
   const router = Router();
 
   const intParam = (req: Request): number => {
@@ -15,9 +17,34 @@ export function registryRoutes(db: DBHelper): Router {
   router.get(
     '/wilayas',
     wrap(async (_req, res) => {
-      res.json({
-        wilayas: await db.select('wilaya', { columns: ['id', 'code', 'nom_fr', 'nom_ar'], orderBy: 'id' }),
+      const rows = await db.select<{ id: number; code: string; nom_fr: string; nom_ar: string }>('wilaya', {
+        columns: ['id', 'code', 'nom_fr', 'nom_ar'],
+        orderBy: 'id',
       });
+      // Approximate chief-town coordinates, merged in from static reference
+      // data (not stored in the DB) — used to place map markers/route lines.
+      res.json({
+        wilayas: rows.map((w) => ({
+          ...w,
+          lat: WILAYA_CENTROIDS[w.code]?.lat ?? null,
+          lon: WILAYA_CENTROIDS[w.code]?.lon ?? null,
+        })),
+      });
+    }),
+  );
+
+  router.get(
+    '/wilayas/overview',
+    wrap(async (_req, res) => {
+      res.json({ wilayas: await repo.wilayaOverview() });
+    }),
+  );
+
+  /** DZxxx domain error catalogue (v_domain_errors) — handy reference for the admin area. */
+  router.get(
+    '/errors',
+    wrap(async (_req, res) => {
+      res.json({ errors: await repo.getDomainErrors() });
     }),
   );
 
