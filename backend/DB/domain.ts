@@ -120,10 +120,31 @@ export interface CustomerRow {
   phone: string;
   email: string | null;
   nin: string | null;
+  nif: string | null;
+  si: string | null;
+  address: string | null;
   home_wilaya_id: number | null;
   home_commune_id: number | null;
+  gps_lat: string | null;
+  gps_lon: string | null;
   created_at: string;
 }
+
+const CUSTOMER_PROFILE_COLS = [
+  'id',
+  'full_name',
+  'phone',
+  'email',
+  'nin',
+  'nif',
+  'si',
+  'address',
+  'home_wilaya_id',
+  'home_commune_id',
+  'gps_lat',
+  'gps_lon',
+  'created_at',
+];
 
 export interface WilayaOverviewRow {
   id: number;
@@ -579,7 +600,7 @@ export class DomainRepository {
 
   async listCustomers(limit?: number): Promise<CustomerRow[]> {
     return this.db.select<CustomerRow>('customer', {
-      columns: ['id', 'full_name', 'phone', 'email', 'nin', 'home_wilaya_id', 'home_commune_id', 'created_at'],
+      columns: CUSTOMER_PROFILE_COLS,
       orderBy: 'created_at desc',
       limit,
     });
@@ -587,9 +608,71 @@ export class DomainRepository {
 
   async getCustomer(id: string): Promise<CustomerRow | null> {
     return this.db.selectOne<CustomerRow>('customer', {
-      columns: ['id', 'full_name', 'phone', 'email', 'nin', 'home_wilaya_id', 'home_commune_id', 'created_at'],
+      columns: CUSTOMER_PROFILE_COLS,
       where: { id },
     });
+  }
+
+  /**
+   * Self-service profile update (customer editing their own record).
+   * Mirrors updateDriverProfile's partial-patch shape. home_commune_id is
+   * validated against home_wilaya_id the same way setWpointCommunes does —
+   * the DB's (home_commune_id, home_wilaya_id) composite FK would reject a
+   * mismatch anyway, but we check first so the route can surface a clear
+   * 400 instead of a generic FK-violation 409.
+   */
+  async updateCustomerProfile(
+    customerId: string,
+    data: {
+      full_name?: string;
+      phone?: string;
+      email?: string | null;
+      nin?: string | null;
+      nif?: string | null;
+      address?: string | null;
+      home_wilaya_id?: number | null;
+      home_commune_id?: number | null;
+      gps_lat?: number | null;
+      gps_lon?: number | null;
+    },
+  ): Promise<CustomerRow | null> {
+    const patch: Record<string, unknown> = {};
+    for (const key of ['full_name', 'phone', 'email', 'nin', 'nif', 'address'] as const) {
+      if (data[key] !== undefined) patch[key] = data[key];
+    }
+
+    // home_wilaya_id / home_commune_id are only ever meaningful together — if
+    // either is part of this patch, resolve the pair against the current row
+    // first so a partial patch (e.g. only commune changing) still validates.
+    if (data.home_wilaya_id !== undefined || data.home_commune_id !== undefined) {
+      const current = await this.db.selectOne<{ home_wilaya_id: number | null; home_commune_id: number | null }>(
+        'customer',
+        { columns: ['home_wilaya_id', 'home_commune_id'], where: { id: customerId } },
+      );
+      const wilayaId = data.home_wilaya_id !== undefined ? data.home_wilaya_id : current?.home_wilaya_id ?? null;
+      const communeId = data.home_commune_id !== undefined ? data.home_commune_id : current?.home_commune_id ?? null;
+      if (communeId !== null) {
+        if (wilayaId === null) throw new Error('Une commune ne peut être renseignée sans sa wilaya');
+        const check = await this.db.raw<{ n: number }>(
+          'select count(*)::int as n from commune where id = $1 and wilaya_id = $2',
+          [communeId, wilayaId],
+        );
+        if ((check[0]?.n ?? 0) !== 1) {
+          throw new Error('Cette commune ne correspond pas à la wilaya sélectionnée');
+        }
+      }
+      patch.home_wilaya_id = wilayaId;
+      patch.home_commune_id = communeId;
+    }
+
+    if (data.gps_lat !== undefined || data.gps_lon !== undefined) {
+      patch.gps_lat = data.gps_lat ?? null;
+      patch.gps_lon = data.gps_lon ?? null;
+    }
+
+    if (Object.keys(patch).length === 0) return this.getCustomer(customerId);
+    await this.db.update('customer', patch, { id: customerId });
+    return this.getCustomer(customerId);
   }
 
   // ── driver self-service (driver UI) ─────────────────────────────────────────

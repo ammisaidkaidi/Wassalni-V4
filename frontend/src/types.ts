@@ -89,6 +89,22 @@ export interface ReservationRow {
   trajectory_name: string;
 }
 
+export interface CustomerProfileRow {
+  id: string;
+  full_name: string;
+  phone: string;
+  email: string | null;
+  nin: string | null;
+  nif: string | null;
+  si: string | null;
+  address: string | null;
+  home_wilaya_id: number | null;
+  home_commune_id: number | null;
+  gps_lat: string | null;
+  gps_lon: string | null;
+  created_at: string;
+}
+
 export interface DriverRow {
   id: string;
   full_name: string;

@@ -15,6 +15,7 @@ import { authRoutes } from './routes/auth';
 import { driverRoutes } from './routes/driver';
 import { registryRoutes } from './routes/registry';
 import { reservationsRoutes } from './routes/reservations';
+import { customerRoutes } from './routes/customer';
 import { tripsRoutes } from './routes/trips';
 
 async function main(): Promise<void> {
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
   app.use('/api/registry', registryRoutes(db, repo));
   app.use('/api/trips', tripsRoutes(db));
   app.use('/api/reservations', reservationsRoutes(db, repo));
+  app.use('/api/customer', customerRoutes(repo));
   app.use('/api/driver', driverRoutes(db, repo));
   app.use('/api/admin', requireAdmin, adminRoutes(db, repo, auth));
 

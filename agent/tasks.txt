@@ -296,33 +296,33 @@ Implement customer self-service profile.
 
 Fields supported where applicable:
 
-[ ] NIN
+[x] NIN
 
-[ ] NIF
+[x] NIF
 
-[ ] address
+[x] address
 
-[ ] home Wilaya
+[x] home Wilaya
 
-[ ] home Commune
+[x] home Commune
 
-[ ] GPS latitude
+[x] GPS latitude
 
-[ ] GPS longitude
+[x] GPS longitude
 
 Required:
 
-[ ] customer-facing profile page
+[x] customer-facing profile page
 
-[ ] GET current profile
+[x] GET current profile
 
-[ ] PUT/update profile
+[x] PUT/update profile
 
-[ ] authorization
+[x] authorization
 
-[ ] validation
+[x] validation
 
-[ ] server-side ownership enforcement
+[x] server-side ownership enforcement
 
 TASK 1.3 — Customer payment visibility
 
