@@ -332,6 +332,14 @@ alter table reservation add column if not exists pickup_lon  numeric(9,6) check 
 alter table reservation add column if not exists dropoff_lat numeric(9,6) check (dropoff_lat is null or dropoff_lat between -90 and 90);
 alter table reservation add column if not exists dropoff_lon numeric(9,6) check (dropoff_lon is null or dropoff_lon between -180 and 180);
 
+-- Task 4.1 — optional precise Commune (within the pickup/dropoff wpoint's
+-- wilaya) the customer selects at booking time, validated server-side by
+-- set_reservation_communes() below against both the wilaya and — when the
+-- wpoint has a curated subset configured via wpoint_commune — that exact
+-- subset ("pickup/dropoff must belong to the selected trip coverage").
+alter table reservation add column if not exists pickup_commune_id  integer references commune(id);
+alter table reservation add column if not exists dropoff_commune_id integer references commune(id);
+
 create table if not exists payment (
   id              uuid primary key default gen_random_uuid(),
   code            text not null unique,
@@ -426,7 +434,9 @@ select * from (values
   ('DZ505','INVALID_REFUND_AMOUNT',         'DomainError',                 'Refund amount <= 0 or above refundable balance'),
   ('DZ601','INVALID_STOP',                  'DomainError',                 'WPoint is not a valid stop/endpoint of the trip'),
   ('DZ602','WPOINT_IN_USE',                 'DomainError',                 'WPoint is referenced by reservations'),
-  ('DZ603','INVALID_ROUTE_ORDER',           'DomainError',                 'Pickup must come before dropoff on the trajectory')
+  ('DZ603','INVALID_ROUTE_ORDER',           'DomainError',                 'Pickup must come before dropoff on the trajectory'),
+  ('DZ604','COMMUNE_NOT_SERVED',            'DomainError',                 'Commune is not among the ones configured for this stop'),
+  ('DZ605','INVALID_COORDINATES',           'DomainError',                 'GPS coordinates fall outside Algeria')
 ) as t(sqlstate, code_name, ts_equivalent, description);
 
 
@@ -1247,6 +1257,77 @@ begin
   returning id into v_id;
 
   return v_id;
+end;
+$$;
+
+-- Task 4.1 — attach/validate a precise pickup/dropoff Commune for an
+-- existing reservation (mirrors how setReservationGeo() attaches the exact
+-- GPS pin — same "create the reservation, then attach the precise detail"
+-- pattern as reserve()). Both params optional/independent; a null leaves
+-- that side untouched. Validates:
+--   - the commune actually belongs to the wilaya of that side's wpoint
+--     (DZ203, same code already used for the equivalent wilaya/commune
+--     checks elsewhere);
+--   - if the wpoint has a curated subset of communes configured
+--     (wpoint_commune has any row for it), the chosen commune must be in
+--     that exact subset (DZ604) — otherwise (no rows = unrestricted) any
+--     commune of the wilaya is accepted, matching the admin UI's own
+--     "Aucune commune sélectionnée — toute la wilaya reste disponible" rule.
+create or replace function set_reservation_communes(
+  p_reservation      uuid,
+  p_pickup_commune   integer default null,
+  p_dropoff_commune  integer default null
+)
+returns void language plpgsql as
+$$
+declare
+  v_pickup_wpoint   uuid;
+  v_dropoff_wpoint  uuid;
+  v_wpoint_wilaya   smallint;
+  v_commune_wilaya  smallint;
+begin
+  select pickup_wpoint_id, dropoff_wpoint_id into v_pickup_wpoint, v_dropoff_wpoint
+  from reservation where id = p_reservation for update;
+  if not found then
+    raise exception 'Reservation % not found', p_reservation using errcode = 'DZ401';
+  end if;
+
+  if p_pickup_commune is not null then
+    if v_pickup_wpoint is null then
+      raise exception 'Reservation has no pickup WPoint to validate a commune against' using errcode = 'DZ601';
+    end if;
+    select wilaya_id into v_wpoint_wilaya from wpoint where id = v_pickup_wpoint;
+    select wilaya_id into v_commune_wilaya from commune where id = p_pickup_commune;
+    if v_commune_wilaya is null or v_commune_wilaya <> v_wpoint_wilaya then
+      raise exception 'Pickup commune does not belong to the pickup wilaya' using errcode = 'DZ203';
+    end if;
+    if exists (select 1 from wpoint_commune where wpoint_id = v_pickup_wpoint)
+       and not exists (select 1 from wpoint_commune where wpoint_id = v_pickup_wpoint and commune_id = p_pickup_commune)
+    then
+      raise exception 'Pickup commune is not served by this stop' using errcode = 'DZ604';
+    end if;
+  end if;
+
+  if p_dropoff_commune is not null then
+    if v_dropoff_wpoint is null then
+      raise exception 'Reservation has no dropoff WPoint to validate a commune against' using errcode = 'DZ601';
+    end if;
+    select wilaya_id into v_wpoint_wilaya from wpoint where id = v_dropoff_wpoint;
+    select wilaya_id into v_commune_wilaya from commune where id = p_dropoff_commune;
+    if v_commune_wilaya is null or v_commune_wilaya <> v_wpoint_wilaya then
+      raise exception 'Dropoff commune does not belong to the dropoff wilaya' using errcode = 'DZ203';
+    end if;
+    if exists (select 1 from wpoint_commune where wpoint_id = v_dropoff_wpoint)
+       and not exists (select 1 from wpoint_commune where wpoint_id = v_dropoff_wpoint and commune_id = p_dropoff_commune)
+    then
+      raise exception 'Dropoff commune is not served by this stop' using errcode = 'DZ604';
+    end if;
+  end if;
+
+  update reservation
+  set pickup_commune_id  = coalesce(p_pickup_commune,  pickup_commune_id),
+      dropoff_commune_id = coalesce(p_dropoff_commune, dropoff_commune_id)
+  where id = p_reservation;
 end;
 $$;
 

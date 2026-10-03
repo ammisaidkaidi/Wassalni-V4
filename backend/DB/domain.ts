@@ -309,6 +309,8 @@ export const DOMAIN_ERRORS: Readonly<Record<string, string>> = {
   DZ601: 'WPoint is not a valid stop/endpoint of the trip',
   DZ602: 'WPoint is referenced by reservations',
   DZ603: 'Pickup must come before dropoff on the trajectory',
+  DZ604: 'Commune is not among the ones configured for this stop',
+  DZ605: 'GPS coordinates fall outside Algeria',
 };
 
 export interface DomainErrorInfo {
@@ -914,14 +916,35 @@ export class DomainRepository {
   }
 
   /**
+   * Algeria's bounding box (generously padded past the actual border so
+   * legitimate border-area points are never falsely rejected) — the one
+   * authoritative place "is this GPS point even plausibly in Algeria?" is
+   * decided (Task 4.1's "reject invalid geographic coordinates"). Anything
+   * outside this box is almost certainly a client bug (wrong field order,
+   * (0,0), a different country) rather than a real pickup/dropoff point.
+   */
+  private static readonly ALGERIA_BBOX = { minLat: 18.5, maxLat: 38.0, minLon: -9.0, maxLon: 12.5 };
+
+  private assertInAlgeria(lat: number | null | undefined, lon: number | null | undefined, label: string): void {
+    if (lat == null || lon == null) return;
+    const b = DomainRepository.ALGERIA_BBOX;
+    if (lat < b.minLat || lat > b.maxLat || lon < b.minLon || lon > b.maxLon) {
+      throw new DomainValidationError('DZ605', `${label}: coordonnées GPS hors d'Algérie (${lat}, ${lon})`);
+    }
+  }
+
+  /**
    * Optional precise pickup/dropoff pin the customer dropped on a map at
    * booking time — stored separately from the wilaya-level wpoint, which
    * stays the pricing source of truth. Any field left undefined is untouched.
+   * Task 4.1: rejects coordinates outside Algeria before writing them.
    */
   async setReservationGeo(
     reservationId: string,
     geo: { pickupLat?: number | null; pickupLon?: number | null; dropoffLat?: number | null; dropoffLon?: number | null },
   ): Promise<void> {
+    if (geo.pickupLat !== undefined) this.assertInAlgeria(geo.pickupLat, geo.pickupLon, 'Point de montée');
+    if (geo.dropoffLat !== undefined) this.assertInAlgeria(geo.dropoffLat, geo.dropoffLon, 'Point de descente');
     const patch: Record<string, unknown> = {};
     if (geo.pickupLat !== undefined) patch.pickup_lat = geo.pickupLat;
     if (geo.pickupLon !== undefined) patch.pickup_lon = geo.pickupLon;
@@ -929,6 +952,26 @@ export class DomainRepository {
     if (geo.dropoffLon !== undefined) patch.dropoff_lon = geo.dropoffLon;
     if (Object.keys(patch).length === 0) return;
     await this.db.update('reservation', patch, { id: reservationId });
+  }
+
+  /**
+   * Task 4.1 — attach/validate a precise pickup/dropoff Commune for a
+   * reservation. All real validation (wilaya match + wpoint_commune curated
+   * subset, when configured) happens server-side in set_reservation_communes()
+   * — this is a thin pass-through so that validation runs even for calls
+   * that don't go through this particular TS method.
+   */
+  async setReservationCommunes(
+    reservationId: string,
+    communes: { pickupCommuneId?: number | null; dropoffCommuneId?: number | null },
+  ): Promise<void> {
+    if (communes.pickupCommuneId == null && communes.dropoffCommuneId == null) return;
+    await this.db.callScalar(
+      'set_reservation_communes',
+      reservationId,
+      communes.pickupCommuneId ?? null,
+      communes.dropoffCommuneId ?? null,
+    );
   }
 
   async confirmReservation(reservationId: string): Promise<void> {

@@ -48,6 +48,8 @@ const USER_MESSAGES: Readonly<Record<string, string>> = {
   DZ601: 'Ce point n\u2019est pas un arrêt valide pour ce voyage.',
   DZ602: 'Ce WPoint est utilisé par des réservations et ne peut pas être supprimé.',
   DZ603: 'Le point de prise en charge doit précéder le point de dépose sur l\u2019itinéraire.',
+  DZ604: 'Cette commune n\u2019est pas desservie par cet arrêt — choisissez une autre commune.',
+  DZ605: 'Ces coordonnées GPS semblent se situer en dehors de l\u2019Algérie.',
 };
 
 type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;

@@ -28,6 +28,7 @@ import { loadDbConfig } from '../config';
 import { SupabaseConnection } from '../connection';
 import { DBHelper } from '../DBHelper';
 import { DomainRepository, explainDomainError } from '../domain';
+import { searchTrips } from '../../api/services/tripSearch';
 
 let pass = 0;
 let fail = 0;
@@ -225,6 +226,93 @@ async function main(): Promise<void> {
       }
     }
     console.log('\n(No expiration race test: Task 7.3 payment-hold/expiry does not exist yet in this schema.)');
+
+    // ── Task 3.1: commune-level search filter ───────────────────────────────
+    console.log('\n=== Task 3.1: commune-level search filter ===');
+    const communeIdByName = async (wilayaName: string, communeName: string): Promise<number> => {
+      const rows = await db.raw<{ id: number }>(
+        `select c.id from commune c join wilaya w on w.id = c.wilaya_id where w.nom_fr = $1 and c.nom_fr = $2`,
+        [wilayaName, communeName],
+      );
+      if (!rows[0]) throw new Error(`Commune not found: ${communeName}, ${wilayaName}`);
+      return rows[0].id;
+    };
+    const blidaCommuneId = await communeIdByName('Blida', 'Blida');
+    const beniMeredCommuneId = await communeIdByName('Blida', 'Beni Mered');
+    const algerCentreCommuneId = await communeIdByName('Alger', 'Alger Centre');
+
+    // Restrict wpB (Blida wpoint) to only the 'Blida' commune, so the
+    // unrestricted-vs-restricted distinction is actually exercised below.
+    await repo.selectCommune(wpB, 'Blida');
+    const wpBCommuneIds = await repo.wpointCommuneIds(wpB);
+    if (wpBCommuneIds.length === 1 && wpBCommuneIds[0] === blidaCommuneId) {
+      ok('3.1 setup: wpB (Blida) now restricted to exactly the "Blida" commune');
+    } else {
+      bad('3.1 setup', `expected [${blidaCommuneId}], got ${JSON.stringify(wpBCommuneIds)}`);
+    }
+
+    // ── Task 4.1: GPS / commune validation ──────────────────────────────────
+    console.log('\n=== Task 4.1: GPS / commune validation ===');
+    const tripCommune = await mkTrip(5);
+    const resCommune = await expectOk('4.1: fresh reservation Alger->Blida for commune/GPS validation', () =>
+      repo.reserve({ tripId: tripCommune, customerId: custD, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB }),
+    );
+    if (resCommune) {
+      await expectErr(
+        '4.1: dropoff commune "Beni Mered" rejected — not in wpB\'s configured subset ("Blida" only)',
+        () => repo.setReservationCommunes(resCommune, { dropoffCommuneId: beniMeredCommuneId }),
+        'DZ604',
+      );
+      await expectOk('4.1: dropoff commune "Blida" accepted — matches wpB\'s configured subset', () =>
+        repo.setReservationCommunes(resCommune, { dropoffCommuneId: blidaCommuneId }),
+      );
+      await expectErr(
+        '4.1: dropoff commune "Alger Centre" rejected — wrong wilaya entirely for this stop',
+        () => repo.setReservationCommunes(resCommune, { dropoffCommuneId: algerCentreCommuneId }),
+        'DZ203',
+      );
+      await expectErr(
+        '4.1: GPS pin in Paris rejected — outside Algeria bounding box',
+        () => repo.setReservationGeo(resCommune, { pickupLat: 48.8566, pickupLon: 2.3522 }),
+        'DZ605',
+      );
+      await expectOk('4.1: GPS pin in Algiers accepted — inside Algeria', () =>
+        repo.setReservationGeo(resCommune, { pickupLat: 36.75, pickupLon: 3.06 }),
+      );
+    }
+
+    // ── Task 3.1 (continued): the commune filter actually changes search results ──
+    const wilayaIdByName = async (name: string): Promise<number> => {
+      const rows = await db.raw<{ id: number }>(`select id from wilaya where nom_fr = $1`, [name]);
+      if (!rows[0]) throw new Error(`Wilaya not found: ${name}`);
+      return rows[0].id;
+    };
+    const algerWilayaId = await wilayaIdByName('Alger');
+    const blidaWilayaId = await wilayaIdByName('Blida');
+    const foundWithBlida = await searchTrips(db, {
+      fromWilayaId: algerWilayaId,
+      toWilayaId: blidaWilayaId,
+      toCommuneId: blidaCommuneId,
+      page: 1,
+      pageSize: 50,
+    });
+    const foundWithBeniMered = await searchTrips(db, {
+      fromWilayaId: algerWilayaId,
+      toWilayaId: blidaWilayaId,
+      toCommuneId: beniMeredCommuneId,
+      page: 1,
+      pageSize: 50,
+    });
+    if (foundWithBlida.trips.some((t) => t.id === tripCommune)) {
+      ok('3.1: search Alger->Blida filtered to commune "Blida" finds the trip (wpB serves it)');
+    } else {
+      bad('3.1: search filtered to "Blida"', 'trip not found, expected it to match');
+    }
+    if (!foundWithBeniMered.trips.some((t) => t.id === tripCommune)) {
+      ok('3.1: search Alger->Blida filtered to commune "Beni Mered" does NOT find the trip (wpB doesn\'t serve it)');
+    } else {
+      bad('3.1: search filtered to "Beni Mered"', 'trip was found, expected it to be excluded');
+    }
   } finally {
     console.log('\n=== Cleanup ===');
     // NOTE: the management-api transport inlines $n params as scalars/jsonb

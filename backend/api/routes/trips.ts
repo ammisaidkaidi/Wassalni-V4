@@ -24,9 +24,15 @@ export function tripsRoutes(db: DBHelper, repo: DomainRepository): Router {
       if (dateFrom && dateTo && dateFrom > dateTo) {
         throw new ApiError(400, 'BAD_PARAM', 'date_from doit être antérieure ou égale à date_to');
       }
+      // Task 3.1 — optional finer-grained "from-Commune/to-Commune search":
+      // on top of the wilaya match every search already does, further
+      // restrict to trips whose pickup/dropoff WPoint actually serves this
+      // exact commune (or is unrestricted — see searchTrips()'s comment).
+      const fromCommuneId = Number.isInteger(Number(req.query.from_commune_id)) && req.query.from_commune_id !== undefined ? Number(req.query.from_commune_id) : undefined;
+      const toCommuneId = Number.isInteger(Number(req.query.to_commune_id)) && req.query.to_commune_id !== undefined ? Number(req.query.to_commune_id) : undefined;
       const page = Math.max(1, Number(req.query.page) || 1);
       const pageSize = Math.min(50, Math.max(1, Number(req.query.page_size) || 10));
-      res.json(await searchTrips(db, { fromWilayaId: from, toWilayaId: to, dateFrom, dateTo, page, pageSize }));
+      res.json(await searchTrips(db, { fromWilayaId: from, toWilayaId: to, fromCommuneId, toCommuneId, dateFrom, dateTo, page, pageSize }));
     }),
   );
 
@@ -56,6 +62,22 @@ export function tripsRoutes(db: DBHelper, repo: DomainRepository): Router {
       if (toWpointId && !UUID_RE.test(toWpointId)) throw new ApiError(400, 'BAD_PARAM', 'to_wpoint_id invalide');
       const seatsAvailable = await repo.seatsAvailable(id, fromWpointId, toWpointId);
       res.json({ seats_available: seatsAvailable });
+    }),
+  );
+
+  /**
+   * Task 4.1 — the set of Communes a given stop is actually configured to
+   * serve, so the booking form can offer a commune picker scoped to real
+   * coverage instead of the full (potentially huge) wilaya commune list.
+   * Empty array means unrestricted — every commune of that WPoint's wilaya
+   * is acceptable (same convention as the admin WPoint editor).
+   */
+  router.get(
+    '/:id/wpoints/:wpointId/communes',
+    wrap(async (req, res) => {
+      if (!UUID_RE.test(req.params.id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      if (!UUID_RE.test(req.params.wpointId)) throw new ApiError(400, 'BAD_PARAM', 'wpointId invalide');
+      res.json({ commune_ids: await repo.wpointCommuneIds(req.params.wpointId) });
     }),
   );
 

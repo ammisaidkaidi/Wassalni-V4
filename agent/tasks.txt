@@ -452,13 +452,13 @@ Exactly one must succeed.
 
 Also test:
 
-[ ] approval race
+[x] approval race
 
-[ ] cancellation race
+[x] cancellation race
 
-[ ] expiration race
+[ ] expiration race — N/A: no payment-hold/expiry concept exists yet (Task 7.3 not implemented), so there is nothing to race. Will revisit once 7.3 exists.
 
-[ ] payment race
+[x] payment race
 
 PHASE 3 — PARTIAL ROUTE BOOKING
 
@@ -478,49 +478,49 @@ when the trajectory and pricing support that segment.
 
 Implement:
 
-[ ] from-WPoint/commune search
+[x] from-WPoint/commune search
 
-[ ] to-WPoint/commune search
+[x] to-WPoint/commune search
 
-[ ] directional validation
+[x] directional validation
 
-[ ] trip segment matching
+[x] trip segment matching
 
-[ ] segment price lookup
+[x] segment price lookup
 
-[ ] available capacity
+[x] available capacity
 
 TASK 3.2 — Partial-route booking
 
-[ ] pickup WPoint
+[x] pickup WPoint
 
-[ ] dropoff WPoint
+[x] dropoff WPoint
 
-[ ] pickup GPS
+[x] pickup GPS
 
-[ ] dropoff GPS
+[x] dropoff GPS
 
-[ ] segment validation
+[x] segment validation
 
-[ ] price calculation
+[x] price calculation
 
-[ ] capacity validation
+[x] capacity validation
 
 PHASE 4 — GEOLOCATION AND PICKUP/DROPOFF VALIDATION
 
 TASK 4.1 — GPS validation
 
-[ ] pickup must belong to an allowed commune
+[x] pickup must belong to an allowed commune
 
-[ ] dropoff must belong to an allowed commune
+[x] dropoff must belong to an allowed commune
 
-[ ] pickup/dropoff must belong to the selected trip coverage
+[x] pickup/dropoff must belong to the selected trip coverage
 
-[ ] reject invalid geographic coordinates
+[x] reject invalid geographic coordinates
 
-[ ] handle GPS permission failure
+[x] handle GPS permission failure
 
-[ ] provide manual map fallback
+[x] provide manual map fallback
 
 TASK 4.2 — Direction validation
 

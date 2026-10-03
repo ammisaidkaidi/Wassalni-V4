@@ -4,6 +4,14 @@ import { ApiError } from '../middleware/errors';
 export interface TripSearchParams {
   fromWilayaId: number;
   toWilayaId: number;
+  /**
+   * Task 3.1 — optional finer "from-Commune/to-Commune search" on top of the
+   * wilaya match: further restrict to trips whose pickup/dropoff WPoint
+   * either has no curated commune subset configured (unrestricted — any
+   * commune of the wilaya matches) or explicitly serves this commune.
+   */
+  fromCommuneId?: number;
+  toCommuneId?: number;
   /** YYYY-MM-DD (interpreted in Africa/Algiers timezone). Either/both may be set — an open range. */
   dateFrom?: string;
   dateTo?: string;
@@ -48,6 +56,17 @@ export async function searchTrips(db: DBHelper, p: TripSearchParams): Promise<{ 
     params.push(p.dateTo);
     dateFilter = ` and (tr.departure_at at time zone 'Africa/Algiers')::date <= $${params.length}::date`;
   }
+  let communeFilter = '';
+  if (p.fromCommuneId !== undefined) {
+    params.push(p.fromCommuneId);
+    communeFilter += ` and (not exists (select 1 from wpoint_commune wc where wc.wpoint_id = wpf.id)
+                           or exists (select 1 from wpoint_commune wc where wc.wpoint_id = wpf.id and wc.commune_id = $${params.length}))`;
+  }
+  if (p.toCommuneId !== undefined) {
+    params.push(p.toCommuneId);
+    communeFilter += ` and (not exists (select 1 from wpoint_commune wc where wc.wpoint_id = wpt.id)
+                           or exists (select 1 from wpoint_commune wc where wc.wpoint_id = wpt.id and wc.commune_id = $${params.length}))`;
+  }
   params.push(p.pageSize);
   const limitIdx = params.length;
   params.push((p.page - 1) * p.pageSize);
@@ -74,7 +93,7 @@ export async function searchTrips(db: DBHelper, p: TripSearchParams): Promise<{ 
         and tr.status = 'scheduled'
         and tr.departure_at > now()
         and wpf.wilaya_id = $1
-        and wpt.wilaya_id = $2${dateFilter}
+        and wpt.wilaya_id = $2${communeFilter}${dateFilter}
       order by tr.departure_at
       limit $${limitIdx} offset $${offsetIdx}`,
     params,

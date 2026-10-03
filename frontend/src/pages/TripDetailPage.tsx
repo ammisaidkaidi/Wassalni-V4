@@ -3,9 +3,13 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
-import type { TripDetail, Wilaya } from '../types';
+import type { CommuneRow, TripDetail, Wilaya } from '../types';
 
 type PickMode = 'pickup' | 'dropoff';
+
+function stops_wilaya(data: TripDetail | null, wpointId: string): number | undefined {
+  return data?.stops.find((s) => s.id === wpointId)?.wilaya_id;
+}
 
 export default function TripDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -23,10 +27,21 @@ export default function TripDetailPage() {
   const [pickMode, setPickMode] = useState<PickMode>('pickup');
   const [pickupPos, setPickupPos] = useState<{ lat: number; lon: number } | null>(null);
   const [dropoffPos, setDropoffPos] = useState<{ lat: number; lon: number } | null>(null);
+  const [geoMsg, setGeoMsg] = useState('');
   // Remaining capacity for exactly the chosen pickup->dropoff segment (Task
   // 2.3) — the trip's flat seats_available is only a whole-route bottleneck
   // and can understate what's really free on a shorter segment.
   const [segmentSeats, setSegmentSeats] = useState<number | null>(null);
+
+  // Task 4.1 — optional precise Commune within the chosen pickup/dropoff
+  // stop. Scoped to exactly what that stop actually serves (the admin's
+  // curated wpoint_commune subset when one is configured, otherwise every
+  // commune of the stop's wilaya) so the customer can't pick a commune the
+  // server would reject anyway.
+  const [pickupCommuneId, setPickupCommuneId] = useState('');
+  const [dropoffCommuneId, setDropoffCommuneId] = useState('');
+  const [pickupCommunes, setPickupCommunes] = useState<CommuneRow[]>([]);
+  const [dropoffCommunes, setDropoffCommunes] = useState<CommuneRow[]>([]);
 
   useEffect(() => {
     if (!id) return;
@@ -44,6 +59,41 @@ export default function TripDetailPage() {
   // the pin must stay consistent with the chosen wilaya-level stop.
   useEffect(() => setPickupPos(null), [pickup]);
   useEffect(() => setDropoffPos(null), [dropoff]);
+  useEffect(() => setPickupCommuneId(''), [pickup]);
+  useEffect(() => setDropoffCommuneId(''), [dropoff]);
+
+  // Resolve the set of Communes this particular stop actually serves (Task
+  // 4.1): fetch the curated wpoint_commune subset; if it's empty (no
+  // restriction configured — same convention as the admin WPoint editor),
+  // fall back to every commune of the stop's wilaya instead.
+  const loadStopCommunes = (
+    wpointId: string,
+    wilayaId: number | undefined,
+    setCommunes: (c: CommuneRow[]) => void,
+  ): (() => void) => {
+    let cancelled = false;
+    if (!id || !wpointId || !wilayaId) {
+      setCommunes([]);
+      return () => undefined;
+    }
+    Promise.all([
+      api<{ commune_ids: number[] }>(`/api/trips/${id}/wpoints/${wpointId}/communes`),
+      api<{ communes: CommuneRow[] }>(`/api/registry/wilayas/${wilayaId}/communes`),
+    ])
+      .then(([restricted, all]) => {
+        if (cancelled) return;
+        setCommunes(restricted.commune_ids.length > 0 ? all.communes.filter((c) => restricted.commune_ids.includes(c.id)) : all.communes);
+      })
+      .catch(() => {
+        if (!cancelled) setCommunes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  };
+
+  useEffect(() => loadStopCommunes(pickup, stops_wilaya(data, pickup), setPickupCommunes), [id, pickup, data]);
+  useEffect(() => loadStopCommunes(dropoff, stops_wilaya(data, dropoff), setDropoffCommunes), [id, dropoff, data]);
 
   useEffect(() => {
     if (!id || !pickup || !dropoff) {
@@ -106,6 +156,37 @@ export default function TripDetailPage() {
     else setDropoffPos({ lat, lon });
   };
 
+  // Task 4.1 — "use my current position" as the primary way to set an exact
+  // pin, with the existing click-on-map picker (above) as the explicit
+  // manual fallback whenever geolocation is denied, unavailable, or just
+  // not precise enough for the customer's liking.
+  const locateMe = (): void => {
+    setGeoMsg('');
+    if (!('geolocation' in navigator)) {
+      setGeoMsg("Votre navigateur ne permet pas la géolocalisation — placez votre point manuellement sur la carte ci-dessous.");
+      setShowMap(true);
+      return;
+    }
+    setGeoMsg('Localisation en cours…');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        onMapPick(pos.coords.latitude, pos.coords.longitude);
+        setShowMap(true);
+        setGeoMsg('✔ Position détectée — ajustez-la sur la carte si besoin.');
+      },
+      (err) => {
+        const denied = err.code === err.PERMISSION_DENIED;
+        setGeoMsg(
+          denied
+            ? "Accès à la position refusé — placez votre point manuellement sur la carte ci-dessous."
+            : "Impossible de déterminer votre position — placez votre point manuellement sur la carte ci-dessous.",
+        );
+        setShowMap(true);
+      },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  };
+
   const book = async (): Promise<void> => {
     if (!user) {
       navigate(`/login?next=/trips/${id}`);
@@ -124,6 +205,8 @@ export default function TripDetailPage() {
           pickup_lon: pickupPos?.lon ?? null,
           dropoff_lat: dropoffPos?.lat ?? null,
           dropoff_lon: dropoffPos?.lon ?? null,
+          pickup_commune_id: pickupCommuneId ? Number(pickupCommuneId) : null,
+          dropoff_commune_id: dropoffCommuneId ? Number(dropoffCommuneId) : null,
         },
       });
       setDone('✔ Réservation confirmée — retrouvez-la dans « Mes réservations »');
@@ -189,6 +272,28 @@ export default function TripDetailPage() {
             </select>
           </label>
           <label>
+            Commune de montée <span className="muted small">(optionnel)</span>
+            <select value={pickupCommuneId} onChange={(e) => setPickupCommuneId(e.target.value)}>
+              <option value="">Peu importe la commune</option>
+              {pickupCommunes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.nom_fr}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Commune de descente <span className="muted small">(optionnel)</span>
+            <select value={dropoffCommuneId} onChange={(e) => setDropoffCommuneId(e.target.value)}>
+              <option value="">Peu importe la commune</option>
+              {dropoffCommunes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.nom_fr}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             Places
             <input
               type="number"
@@ -199,9 +304,15 @@ export default function TripDetailPage() {
             />
           </label>
 
-          <button type="button" className="btn ghost small" style={{ marginBottom: 12 }} onClick={() => setShowMap((v) => !v)}>
-            {showMap ? 'Masquer la carte' : '📍 Choisir ma position exacte sur la carte (optionnel)'}
-          </button>
+          <div className="form-inline" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" className="btn ghost small" onClick={locateMe}>
+              📍 Utiliser ma position actuelle
+            </button>
+            <button type="button" className="btn ghost small" onClick={() => setShowMap((v) => !v)}>
+              {showMap ? 'Masquer la carte' : 'Choisir ma position sur la carte'}
+            </button>
+          </div>
+          {geoMsg && <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>{geoMsg}</p>}
 
           {showMap && (
             <div style={{ marginBottom: 12 }}>

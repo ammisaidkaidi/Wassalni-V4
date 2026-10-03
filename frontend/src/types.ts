@@ -92,6 +92,10 @@ export interface ReservationRow {
   refunded_amount: string;
   payment_status: 'unpaid' | 'partially_paid' | 'paid' | 'cancelled';
   refund_status: 'none' | 'partial' | 'full';
+  pickup_commune_id?: number | null;
+  pickup_commune_name?: string | null;
+  dropoff_commune_id?: number | null;
+  dropoff_commune_name?: string | null;
 }
 
 export interface CustomerProfileRow {

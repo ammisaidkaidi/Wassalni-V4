@@ -20,6 +20,11 @@ const reserveSchema = z.object({
   pickup_lon: z.number().min(-180).max(180).nullish(),
   dropoff_lat: z.number().min(-90).max(90).nullish(),
   dropoff_lon: z.number().min(-180).max(180).nullish(),
+  // Task 4.1 — optional precise Commune within the pickup/dropoff wpoint's
+  // wilaya; validated server-side (wilaya match + the stop's configured
+  // coverage, if any) by set_reservation_communes().
+  pickup_commune_id: z.number().int().min(1).nullish(),
+  dropoff_commune_id: z.number().int().min(1).nullish(),
 });
 
 interface ReservationRow {
@@ -40,6 +45,10 @@ interface ReservationRow {
   pickup_lon: string | null;
   dropoff_lat: string | null;
   dropoff_lon: string | null;
+  pickup_commune_id: number | null;
+  pickup_commune_name: string | null;
+  dropoff_commune_id: number | null;
+  dropoff_commune_name: string | null;
   // Payment visibility (Task 1.3) — derived straight from the same
   // amount_paid() SQL function / case logic v_reservation already uses, so
   // the "paid so far" math is computed exactly once, in the database.
@@ -55,6 +64,8 @@ function reservationSelect(db: DBHelper, whereSql: string, params: unknown[]): P
     `select r.id, r.code, r.status, r.seats, r.total_price, r.currency,
             r.pickup_wpoint_id, r.dropoff_wpoint_id, r.notes, r.created_at,
             r.pickup_lat, r.pickup_lon, r.dropoff_lat, r.dropoff_lon,
+            r.pickup_commune_id, cpc.nom_fr as pickup_commune_name,
+            r.dropoff_commune_id, cdc.nom_fr as dropoff_commune_name,
             t.code as trip_code, t.departure_at, tj.name as trajectory_name,
             amount_paid(r.id) as amount_paid,
             case when r.status = 'cancelled' then 0
@@ -74,6 +85,8 @@ function reservationSelect(db: DBHelper, whereSql: string, params: unknown[]): P
        from reservation r
        join trip t       on t.id = r.trip_id
        join trajectory tj on tj.id = t.trajectory_id
+       left join commune cpc on cpc.id = r.pickup_commune_id
+       left join commune cdc on cdc.id = r.dropoff_commune_id
        left join lateral (
          select coalesce(sum(p.refunded_amount), 0) as refunded_amount,
                 coalesce(sum(p.amount) filter (where p.status in ('paid', 'partially_refunded', 'refunded')), 0) as gross_paid
@@ -110,6 +123,12 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
           pickupLon: b.pickup_lon ?? null,
           dropoffLat: b.dropoff_lat ?? null,
           dropoffLon: b.dropoff_lon ?? null,
+        });
+      }
+      if (b.pickup_commune_id != null || b.dropoff_commune_id != null) {
+        await repo.setReservationCommunes(reservationId, {
+          pickupCommuneId: b.pickup_commune_id ?? null,
+          dropoffCommuneId: b.dropoff_commune_id ?? null,
         });
       }
       const rows = await reservationSelect(db, 'r.id = $1', [reservationId]);

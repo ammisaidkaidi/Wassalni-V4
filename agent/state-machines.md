@@ -187,7 +187,7 @@ null)`:
 - Reserve Alger→Djelfa: ❌ rejected, `DZ303` — overlaps both held segments.
 - `seats_available(trip, Alger, Blida)` and `seats_available(trip, Blida, Djelfa)` both reported `0` after the two bookings above.
 
-## 4. Concurrency (Task 2.4 — races tested as supporting evidence for 2.3's "atomic reservation protection" sub-item; full Task 2.4 scope deferred to the next batch)
+## 4. Concurrency (Task 2.4 — formally closed out this batch)
 
 All via `Promise.allSettled` on two simultaneous calls against the live DB:
 
@@ -203,3 +203,32 @@ that takes a row-level lock (`for update`, directly or via the unique
 caller blocks until the first's implicit transaction commits, then
 re-evaluates its own precondition against the now-committed row and finds it
 no longer matches.
+
+## 5. Commune & GPS validation (Task 4.1)
+
+Not a state machine either, but added here for the same reason as §3: it's
+server-side reservation validation proven by the same live test run.
+
+`reservation.pickup_commune_id` / `dropoff_commune_id` (nullable, optional)
+are validated by `set_reservation_communes(p_reservation, p_pickup_commune,
+p_dropoff_commune)`:
+1. the commune must belong to the wilaya of that side's wpoint (`DZ203`);
+2. if the wpoint has a curated commune subset configured
+   (`wpoint_commune` has any row for it — set via the admin/driver WPoint
+   editor's commune picker), the chosen commune must be in that exact
+   subset (`DZ604`); if the wpoint has no such rows, it's unrestricted and
+   any commune of the wilaya is accepted — the same "no restriction
+   configured" convention the admin UI already uses
+   ("Aucune commune sélectionnée — toute la wilaya reste disponible").
+
+`DomainRepository.setReservationGeo()` additionally rejects pickup/dropoff
+GPS coordinates outside a generous Algeria bounding box (`DZ605`) before
+writing them — catching obviously-wrong points (wrong field order, `(0,0)`,
+a different country) without needing real commune polygon geometry (none
+exists in this schema; the commune/daira/wilaya tables are plain
+administrative lookup tables, not PostGIS boundaries).
+
+### Test evidence (live, Task 4.1 section of `live-verification.ts`)
+- A wpoint restricted (via `selectCommune`) to only the "Blida" commune: a dropoff commune of "Beni Mered" (same wilaya, different commune) was rejected `DZ604`; "Blida" itself was accepted; a commune from a completely different wilaya ("Alger Centre") was rejected `DZ203`.
+- A GPS pin in Paris (48.8566, 2.3522) was rejected `DZ605`; a pin in Algiers (36.75, 3.06) was accepted.
+- (Task 3.1) Searching Alger→Blida filtered to the "Blida" commune found the trip; filtered to "Beni Mered" (not served by that trip's wpoint) correctly excluded it.
