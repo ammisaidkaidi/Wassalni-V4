@@ -1,0 +1,1720 @@
+Wassalni — Full Feature Execution Agent Prompt
+
+ROLE
+
+You are the implementation agent responsible for completing the Wassalni application from its current state to a production-ready MVP and then implementing the remaining platform capabilities.
+
+Do not assume that a feature is missing merely because it appears in this task list. Before implementing each task:
+
+Inspect the existing code.
+
+Inspect the existing database schema/functions/views/triggers.
+
+Inspect existing API routes and frontend behavior.
+
+Determine what is already implemented.
+
+Reuse existing functionality whenever possible.
+
+Implement only the missing portion.
+
+Preserve existing behavior unless the task explicitly requires changing it.
+
+Never create duplicate implementations of an existing domain concept.
+
+The task list below is the authoritative feature backlog for this execution.
+
+EXECUTION RULES
+
+1. Dependency-first execution
+
+Execute tasks strictly in dependency order.
+
+Do not jump directly to UI work when the required domain/database/API behavior does not exist.
+
+Preferred order:
+
+Audit ↓ Existing bugs / integrity problems ↓ Domain model ↓ Database ↓ Backend/domain services ↓ API/RPC ↓ Frontend ↓ Concurrency/security ↓ Tests ↓ Operational automation ↓ Advanced features 
+
+2. Audit before implementation
+
+Before Task 1:
+
+inspect repository structure
+
+inspect database schema
+
+inspect SQL functions
+
+inspect triggers
+
+inspect views
+
+inspect domain repository
+
+inspect API routes
+
+inspect frontend pages/components
+
+inspect authentication/session handling
+
+inspect payment/reservation logic
+
+inspect trip/trajectory/WPoint logic
+
+inspect existing tests
+
+inspect build configuration
+
+Produce an internal implementation map.
+
+Do not rewrite working functionality simply to match your preferred architecture.
+
+3. Existing functionality takes precedence
+
+For every feature:
+
+Already implemented correctly → verify and mark complete. Partially implemented → complete it. Implemented incorrectly → fix it. Not implemented → implement it. 
+
+Never duplicate:
+
+routes
+
+database functions
+
+domain logic
+
+components
+
+state machines
+
+validation logic
+
+payment logic
+
+notification systems
+
+4. Database safety
+
+Never silently change existing business semantics.
+
+Before modifying the schema:
+
+inspect foreign keys
+
+inspect cascades
+
+inspect unique constraints
+
+inspect triggers
+
+inspect functions/procedures
+
+inspect views
+
+inspect indexes
+
+inspect existing API dependencies
+
+Business-critical operations must be atomic.
+
+Where the database transport requires a single SQL statement:
+
+use writable CTEs
+
+avoid multiple independent writes
+
+do not assume cross-call transactions exist
+
+do not pass JavaScript arrays where the transport converts them to JSONB instead of PostgreSQL arrays
+
+5. Server-side enforcement
+
+Never rely exclusively on frontend validation.
+
+Every important rule must be enforced at the backend/database layer.
+
+Examples:
+
+authorization
+
+ownership
+
+seat capacity
+
+payment state
+
+reservation state transitions
+
+trip status transitions
+
+WPoint validity
+
+commune/Wilaya relationships
+
+pricing
+
+cancellation rules
+
+refunds
+
+driver permissions
+
+6. Concurrency
+
+Business-critical operations must remain correct when two requests happen simultaneously.
+
+Explicitly test:
+
+last-seat race
+
+simultaneous reservation
+
+simultaneous driver approval
+
+payment vs hold expiration
+
+cancellation vs payment
+
+trip cancellation vs booking
+
+duplicate payment webhook
+
+duplicate refund request
+
+Use appropriate database locking, atomic statements, constraints, or transactions.
+
+7. State machines
+
+Do not implement business states as scattered ad-hoc conditionals.
+
+Explicitly define legal transitions for:
+
+Trip
+
+scheduled → in_progress → completed 
+
+and:
+
+scheduled → cancelled 
+
+with appropriate restrictions.
+
+Reservation
+
+Define and document all states required by the existing application, including:
+
+pending
+
+approved/payment-pending
+
+confirmed
+
+cancelled
+
+rejected
+
+completed
+
+no_show
+
+waitlisted
+
+Use the existing schema terminology where possible rather than introducing unnecessary aliases.
+
+Payment
+
+Define:
+
+pending
+
+successful/paid
+
+failed
+
+expired
+
+refunded
+
+partially refunded
+
+Only allow legal transitions.
+
+PHASE 0 — BASELINE AUDIT
+
+TASK 0.1 — Full application audit
+
+[ ] Audit backend
+
+[ ] Audit frontend
+
+[ ] Audit database
+
+[ ] Audit API
+
+[ ] Audit authentication
+
+[ ] Audit reservation lifecycle
+
+[ ] Audit payment lifecycle
+
+[ ] Audit trip lifecycle
+
+[ ] Audit WPoint/trajectory lifecycle
+
+[ ] Audit GPS functionality
+
+[ ] Audit admin functionality
+
+[ ] Audit driver functionality
+
+[ ] Audit customer functionality
+
+TASK 0.2 — Build a feature matrix
+
+For every feature in this document classify:
+
+COMPLETE PARTIAL BROKEN MISSING 
+
+Do not implement yet.
+
+PHASE 1 — EXISTING BUGS AND CHEAP HIGH-VALUE FIXES
+
+TASK 1.1 — Fix driver trip completion
+
+[ ] Driver completion must use the same reservation-resolution semantics as admin trip closure.
+
+[ ] Confirmed reservations must become completed or no_show according to the existing business rules.
+
+[ ] Unresolved/straggler reservations must be handled correctly.
+
+[ ] Verify no reservation remains incorrectly stuck at confirmed.
+
+TASK 1.2 — Customer profile
+
+Implement customer self-service profile.
+
+Fields supported where applicable:
+
+[ ] NIN
+
+[ ] NIF
+
+[ ] address
+
+[ ] home Wilaya
+
+[ ] home Commune
+
+[ ] GPS latitude
+
+[ ] GPS longitude
+
+Required:
+
+[ ] customer-facing profile page
+
+[ ] GET current profile
+
+[ ] PUT/update profile
+
+[ ] authorization
+
+[ ] validation
+
+[ ] server-side ownership enforcement
+
+TASK 1.3 — Customer payment visibility
+
+Expose reservation financial information:
+
+[ ] amount paid
+
+[ ] balance due
+
+[ ] payment status
+
+[ ] refund status where applicable
+
+Use existing database calculations instead of duplicating them in the frontend.
+
+TASK 1.4 — Refund worklist
+
+Improve refund operations:
+
+[ ] dedicated pending-refund view
+
+[ ] badge/count
+
+[ ] clear distinction between refunded and refund-due
+
+[ ] reservation/payment context
+
+[ ] admin action workflow
+
+TASK 1.5 — Contextual domain errors
+
+Replace raw technical messages with understandable UI messages.
+
+Examples:
+
+[ ] published trip is locked
+
+[ ] trip has active reservations
+
+[ ] WPoint cannot be changed
+
+[ ] WPoint cannot be deleted because it is used
+
+[ ] reservation cannot be cancelled
+
+[ ] payment cannot be refunded
+
+Where practical, replace string matching such as:
+
+err.message.includes(...) 
+
+with typed/domain error codes.
+
+PHASE 2 — CORE BOOKING DOMAIN
+
+TASK 2.1 — Formalize reservation state machine
+
+[ ] Define states
+
+[ ] Define transitions
+
+[ ] Define who may perform each transition
+
+[ ] Define transition validation
+
+[ ] Implement server-side transition enforcement
+
+[ ] Test every legal transition
+
+[ ] Test illegal transitions
+
+TASK 2.2 — Formalize trip lifecycle
+
+[ ] scheduled
+
+[ ] in_progress
+
+[ ] completed
+
+[ ] cancelled
+
+Implement:
+
+[ ] legal transition rules
+
+[ ] server-side enforcement
+
+[ ] driver controls
+
+[ ] admin controls
+
+[ ] customer-visible status
+
+TASK 2.3 — Segment-based capacity
+
+Implement capacity by trip segment rather than treating the whole trajectory as one occupied block.
+
+Example:
+
+Alger → Blida Blida → Djelfa 
+
+A passenger traveling Alger → Blida must not consume capacity on Blida → Djelfa.
+
+Implement:
+
+[ ] segment occupancy calculation
+
+[ ] overlapping reservation detection
+
+[ ] requested-seat calculation
+
+[ ] remaining capacity
+
+[ ] server-side enforcement
+
+[ ] atomic reservation protection
+
+TASK 2.4 — Atomic seat reservation
+
+Prevent race conditions.
+
+Test:
+
+capacity = 1 customer A reserves customer B reserves simultaneously 
+
+Exactly one must succeed.
+
+Also test:
+
+[ ] approval race
+
+[ ] cancellation race
+
+[ ] expiration race
+
+[ ] payment race
+
+PHASE 3 — PARTIAL ROUTE BOOKING
+
+TASK 3.1 — Partial-route trip search
+
+Allow customers to search for intermediate trajectory segments.
+
+Example:
+
+Alger → Oran 
+
+must be discoverable as:
+
+Blida → Médéa 
+
+when the trajectory and pricing support that segment.
+
+Implement:
+
+[ ] from-WPoint/commune search
+
+[ ] to-WPoint/commune search
+
+[ ] directional validation
+
+[ ] trip segment matching
+
+[ ] segment price lookup
+
+[ ] available capacity
+
+TASK 3.2 — Partial-route booking
+
+[ ] pickup WPoint
+
+[ ] dropoff WPoint
+
+[ ] pickup GPS
+
+[ ] dropoff GPS
+
+[ ] segment validation
+
+[ ] price calculation
+
+[ ] capacity validation
+
+PHASE 4 — GEOLOCATION AND PICKUP/DROPOFF VALIDATION
+
+TASK 4.1 — GPS validation
+
+[ ] pickup must belong to an allowed commune
+
+[ ] dropoff must belong to an allowed commune
+
+[ ] pickup/dropoff must belong to the selected trip coverage
+
+[ ] reject invalid geographic coordinates
+
+[ ] handle GPS permission failure
+
+[ ] provide manual map fallback
+
+TASK 4.2 — Direction validation
+
+Prevent:
+
+dropoff before pickup 
+
+relative to the driver's trajectory.
+
+TASK 4.3 — Live ETA
+
+Use available driver GPS information.
+
+Implement:
+
+[ ] current driver position
+
+[ ] upcoming stops
+
+[ ] estimated arrival
+
+[ ] update mechanism
+
+[ ] customer display
+
+[ ] driver display
+
+Do not fabricate ETA when insufficient location data exists.
+
+PHASE 5 — DRIVER BOOKING OPERATIONS
+
+TASK 5.1 — Driver approval workflow
+
+[ ] pending requests
+
+[ ] request details
+
+[ ] approve
+
+[ ] reject
+
+[ ] capacity revalidation during approval
+
+[ ] correct reservation transition
+
+TASK 5.2 — Driver manifest
+
+Create a boarding/alighting manifest.
+
+For every stop show:
+
+Boarding passengers Alighting passengers Seat count entering Seat count leaving Remaining capacity 
+
+Use:
+
+pickup WPoint
+
+dropoff WPoint
+
+reservation seat count
+
+TASK 5.3 — No-show system
+
+[ ] customer no-show
+
+[ ] driver no-show
+
+[ ] record occurrence
+
+[ ] count occurrences
+
+[ ] configurable strike threshold
+
+[ ] automatic flagging
+
+[ ] reputation impact
+
+PHASE 6 — DRIVER KYC AND TRUST
+
+TASK 6.1 — Driver KYC
+
+Support upload/review of:
+
+[ ] identity document
+
+[ ] driving license
+
+[ ] vehicle registration
+
+[ ] insurance
+
+Implement:
+
+[ ] submission
+
+[ ] admin review queue
+
+[ ] approve
+
+[ ] reject
+
+[ ] rejection reason
+
+[ ] correction/resubmission
+
+[ ] status tracking
+
+TASK 6.2 — Vehicle inspection
+
+[ ] inspection records
+
+[ ] inspection date
+
+[ ] expiry
+
+[ ] maintenance status
+
+[ ] approval state
+
+[ ] publish eligibility
+
+Trip publication must respect vehicle eligibility.
+
+TASK 6.3 — Ratings and reviews
+
+Two-way system:
+
+Customer → Driver Driver → Customer 
+
+Implement:
+
+[ ] rating
+
+[ ] optional review
+
+[ ] completed-trip eligibility
+
+[ ] one rating per eligible relationship
+
+[ ] reputation score
+
+[ ] moderation
+
+[ ] admin moderation tools
+
+[ ] trust badge
+
+TASK 6.4 — Fraud/anomaly detection
+
+Detect patterns such as:
+
+[ ] duplicate NIN
+
+[ ] duplicate phone
+
+[ ] suspicious account creation
+
+[ ] rapid cancel/rebook
+
+[ ] repeated no-shows
+
+[ ] suspicious payment behavior
+
+Start with deterministic heuristics before adding ML.
+
+PHASE 7 — PAYMENT SYSTEM
+
+TASK 7.1 — Real payment gateway
+
+Integrate the appropriate supported Algerian payment provider.
+
+Architecture must separate:
+
+Reservation Payment intent Gateway transaction Payment confirmation Webhook 
+
+Never trust a client-side "paid" flag.
+
+TASK 7.2 — Payment webhook
+
+[ ] signature verification
+
+[ ] idempotency
+
+[ ] duplicate webhook protection
+
+[ ] reservation state update
+
+[ ] payment state update
+
+[ ] audit information
+
+TASK 7.3 — Payment expiration
+
+Implement:
+
+[ ] 15-minute hold
+
+[ ] expiration detection
+
+[ ] automatic cancellation
+
+[ ] seat release
+
+[ ] payment expiration state
+
+TASK 7.4 — Automated refunds
+
+Implement cancellation-policy-driven refunds.
+
+[ ] determine refund amount
+
+[ ] create refund record
+
+[ ] execute gateway refund
+
+[ ] idempotency
+
+[ ] refund status
+
+[ ] failure/retry handling
+
+[ ] audit trail
+
+PHASE 8 — DRIVER PAYOUTS
+
+TASK 8.1 — Driver payout ledger
+
+Create accounting model for:
+
+customer payment − platform commission − refunds/adjustments = driver payable amount 
+
+Implement:
+
+[ ] payout ledger
+
+[ ] immutable financial records
+
+[ ] reservation/payment linkage
+
+[ ] driver linkage
+
+[ ] admin reconciliation
+
+TASK 8.2 — Driver earnings dashboard
+
+Show:
+
+[ ] gross revenue
+
+[ ] commission
+
+[ ] refunds
+
+[ ] net earnings
+
+[ ] pending payout
+
+[ ] paid-out amount
+
+TASK 8.3 — Payout scheduling/export
+
+[ ] payout batches
+
+[ ] payout status
+
+[ ] export
+
+[ ] reconciliation
+
+PHASE 9 — PRICING AND MONETIZATION
+
+TASK 9.1 — Dynamic pricing
+
+Use existing price bounds where available:
+
+min_price max_price 
+
+Implement configurable rules for:
+
+[ ] peak/off-peak
+
+[ ] early booking
+
+[ ] demand
+
+[ ] trajectory
+
+[ ] occupancy
+
+Never modify historical reservation prices.
+
+TASK 9.2 — Promo codes
+
+[ ] admin-created codes
+
+[ ] expiration
+
+[ ] usage limits
+
+[ ] percentage discount
+
+[ ] fixed discount
+
+[ ] minimum amount
+
+[ ] per-user restrictions
+
+[ ] validation
+
+[ ] audit
+
+TASK 9.3 — Wallet
+
+Implement ledger-based wallet.
+
+Support:
+
+[ ] refund credit
+
+[ ] promotional credit
+
+[ ] referral credit
+
+[ ] debit during booking
+
+[ ] immutable ledger
+
+[ ] balance calculation
+
+Never represent money using floating-point arithmetic.
+
+TASK 9.4 — Referral system
+
+[ ] referral code
+
+[ ] attribution
+
+[ ] eligibility
+
+[ ] reward
+
+[ ] abuse prevention
+
+TASK 9.5 — PDF receipt/invoice
+
+Generate:
+
+[ ] reservation receipt
+
+[ ] payment receipt
+
+[ ] refund receipt where applicable
+
+[ ] invoice data
+
+[ ] downloadable PDF
+
+PHASE 10 — TRIP EXPERIENCE
+
+TASK 10.1 — Seat picker
+
+Replace bare seat-count selection where appropriate.
+
+[ ] visual seat map
+
+[ ] available seats
+
+[ ] occupied/held seats
+
+[ ] selected seats
+
+[ ] accessibility considerations
+
+If actual physical seat identity is not supported by the domain model, do not falsely imply fixed physical seating. In that case implement a visual capacity selector instead.
+
+TASK 10.2 — Waitlist
+
+[ ] join waitlist
+
+[ ] position
+
+[ ] cancellation
+
+[ ] automatic promotion
+
+[ ] notification
+
+[ ] concurrency-safe promotion
+
+TASK 10.3 — Recurring trips
+
+Support templates such as:
+
+Monday / Wednesday / Friday 07:00 Alger → Oran 
+
+Implement:
+
+[ ] recurring template
+
+[ ] recurrence rules
+
+[ ] generated trips
+
+[ ] exceptions
+
+[ ] cancellation
+
+[ ] duplicate prevention
+
+TASK 10.4 — Nearby-date fallback
+
+If exact-date search returns zero:
+
+[ ] search nearby dates
+
+[ ] clearly label fallback dates
+
+[ ] preserve origin/destination criteria
+
+TASK 10.5 — Favorites
+
+Support:
+
+[ ] favorite routes
+
+[ ] favorite drivers
+
+[ ] notification subscription
+
+[ ] unfavorite
+
+TASK 10.6 — Group bookings
+
+[ ] multiple passengers
+
+[ ] total seat count
+
+[ ] fare calculation
+
+[ ] optional fare splitting
+
+[ ] booking owner
+
+[ ] passenger list
+
+TASK 10.7 — Accessibility/service requirements
+
+Support trip and reservation attributes:
+
+[ ] luggage
+
+[ ] pet
+
+[ ] wheelchair accessibility
+
+[ ] other service requirements
+
+Implement matching rules where appropriate.
+
+PHASE 11 — COMMUNICATION
+
+TASK 11.1 — Notifications
+
+Support events:
+
+[ ] booking request
+
+[ ] approval
+
+[ ] rejection
+
+[ ] payment confirmation
+
+[ ] payment expiration
+
+[ ] cancellation
+
+[ ] schedule change
+
+[ ] price change
+
+[ ] T-1h reminder
+
+[ ] trip completion
+
+TASK 11.2 — In-app messaging
+
+Create conversation model scoped appropriately.
+
+Implement:
+
+[ ] driver/customer conversation
+
+[ ] reservation association
+
+[ ] message persistence
+
+[ ] read status
+
+[ ] abuse controls
+
+TASK 11.3 — Masked calling
+
+If technically/legalistically appropriate:
+
+[ ] hide personal phone numbers
+
+[ ] reservation-scoped communication
+
+[ ] logging/audit
+
+TASK 11.4 — Shareable live-trip link
+
+Implement:
+
+[ ] signed share token
+
+[ ] expiration
+
+[ ] read-only public tracking page
+
+[ ] driver location
+
+[ ] trip status
+
+[ ] revoke/invalidate token
+
+Do not expose unnecessary personal information.
+
+TASK 11.5 — SOS
+
+Implement:
+
+[ ] emergency contact
+
+[ ] one-tap SOS
+
+[ ] current location
+
+[ ] reservation/trip association
+
+[ ] admin notification
+
+[ ] emergency event audit
+
+[ ] abuse/rate limiting
+
+PHASE 12 — ADMIN OPERATIONS
+
+TASK 12.1 — Analytics
+
+Dashboard metrics:
+
+[ ] revenue
+
+[ ] occupancy
+
+[ ] bookings
+
+[ ] cancellations
+
+[ ] refunds
+
+[ ] no-shows
+
+[ ] top Wilaya pairs
+
+[ ] top WPoint/commune pairs
+
+[ ] trajectory demand
+
+[ ] driver performance
+
+TASK 12.2 — Demand analytics
+
+Analyze:
+
+[ ] requested pickup communes
+
+[ ] requested dropoff communes
+
+[ ] WPoint pairs
+
+[ ] failed searches if available
+
+[ ] popular trajectories
+
+Use this to identify opportunities for new trajectories/stops.
+
+TASK 12.3 — CSV/PDF exports
+
+Add export capabilities to relevant admin tables:
+
+[ ] drivers
+
+[ ] customers
+
+[ ] trips
+
+[ ] reservations
+
+[ ] payments
+
+[ ] refunds
+
+[ ] payouts
+
+[ ] analytics
+
+TASK 12.4 — Admin audit log
+
+Record privileged actions:
+
+[ ] actor
+
+[ ] action
+
+[ ] target
+
+[ ] timestamp
+
+[ ] relevant before/after information
+
+[ ] reason where applicable
+
+Examples:
+
+delete WPoint refund payment reject driver decline reservation suspend account change configuration 
+
+TASK 12.5 — Import history
+
+Expose historical registry imports:
+
+[ ] timestamp
+
+[ ] Wilaya count
+
+[ ] Daira count
+
+[ ] Commune count
+
+[ ] payload size
+
+[ ] success/failure
+
+[ ] error details
+
+TASK 12.6 — Granular admin roles
+
+Introduce roles such as:
+
+super-admin admin support/read-only finance operations 
+
+Enforce permissions server-side.
+
+PHASE 13 — AUTOMATION
+
+TASK 13.1 — Trip lifecycle scheduler
+
+Automatically transition trips according to configured rules:
+
+scheduled → in_progress → completed 
+
+Handle:
+
+[ ] grace period
+
+[ ] missed departure
+
+[ ] cancellation
+
+[ ] no-show resolution
+
+TASK 13.2 — Payment-hold cleanup
+
+Automatically find expired holds.
+
+For every expired hold:
+
+[ ] release capacity
+
+[ ] update reservation
+
+[ ] update payment state
+
+[ ] notify customer if appropriate
+
+Must be idempotent.
+
+TASK 13.3 — Waitlist promotion
+
+Automatically promote eligible waitlisted customers after capacity becomes available.
+
+TASK 13.4 — Reminder scheduler
+
+Send:
+
+[ ] T-24h
+
+[ ] T-1h
+
+[ ] relevant state-change notifications
+
+Avoid duplicate notifications.
+
+PHASE 14 — SECURITY
+
+TASK 14.1 — Authorization audit
+
+Verify every protected endpoint.
+
+Test:
+
+[ ] customer accessing another customer's reservation
+
+[ ] driver accessing another driver's trip
+
+[ ] driver modifying another driver's trajectory
+
+[ ] customer accessing admin endpoint
+
+[ ] support role attempting privileged operation
+
+TASK 14.2 — Rate limiting
+
+Protect:
+
+[ ] login
+
+[ ] OTP
+
+[ ] search
+
+[ ] booking
+
+[ ] payment
+
+[ ] SOS
+
+[ ] messaging
+
+TASK 14.3 — Fraud protection
+
+Add appropriate controls for:
+
+[ ] account creation abuse
+
+[ ] OTP abuse
+
+[ ] repeated booking/cancellation
+
+[ ] payment retries
+
+[ ] referral abuse
+
+[ ] wallet abuse
+
+PHASE 15 — INTERNATIONALIZATION AND UX
+
+TASK 15.1 — Arabic
+
+Implement:
+
+[ ] Arabic UI
+
+[ ] RTL
+
+[ ] translated validation messages
+
+[ ] translated state labels
+
+[ ] modal/dropdown RTL correctness
+
+TASK 15.2 — English
+
+Implement complete English translation.
+
+Architecture:
+
+French Arabic English 
+
+No hardcoded UI strings where translation keys should exist.
+
+TASK 15.3 — Accessibility
+
+Audit:
+
+[ ] semantic HTML
+
+[ ] labels
+
+[ ] keyboard navigation
+
+[ ] focus management
+
+[ ] modal focus trapping
+
+[ ] screen-reader support
+
+[ ] color contrast
+
+[ ] error announcements
+
+[ ] form accessibility
+
+TASK 15.4 — Dark mode
+
+[ ] theme system
+
+[ ] persistence
+
+[ ] contrast verification
+
+[ ] modal/map/form compatibility
+
+PHASE 16 — PWA / CLIENT PLATFORM
+
+TASK 16.1 — PWA
+
+Implement:
+
+[ ] manifest
+
+[ ] icons
+
+[ ] installability
+
+[ ] offline shell
+
+[ ] service worker
+
+Do not pretend booking/payment functionality works offline if it requires the server.
+
+TASK 16.2 — Web push
+
+Implement:
+
+[ ] permission flow
+
+[ ] subscription storage
+
+[ ] notification dispatch
+
+[ ] unsubscribe
+
+[ ] device management
+
+PHASE 17 — SMS / COMMUNICATION CHANNELS
+
+TASK 17.1 — SMS notifications
+
+Implement provider abstraction rather than coupling the domain to one vendor.
+
+Support:
+
+[ ] booking
+
+[ ] approval
+
+[ ] cancellation
+
+[ ] reminders
+
+[ ] payment events
+
+TASK 17.2 — SMS OTP
+
+Offer SMS as an authentication/2FA alternative where appropriate.
+
+Implement:
+
+[ ] OTP generation
+
+[ ] expiry
+
+[ ] retry limits
+
+[ ] rate limiting
+
+[ ] verification
+
+[ ] abuse prevention
+
+PHASE 18 — BACKUP / RECOVERY
+
+TASK 18.1 — Backup verification
+
+Establish:
+
+[ ] backup policy
+
+[ ] retention
+
+[ ] restore procedure
+
+[ ] verification procedure
+
+TASK 18.2 — Point-in-time recovery
+
+Verify that the production database has an appropriate PITR strategy.
+
+Document:
+
+[ ] recovery procedure
+
+[ ] recovery point objective
+
+[ ] recovery time objective
+
+[ ] restoration verification
+
+PHASE 19 — TESTING
+
+TASK 19.1 — Domain tests
+
+Test:
+
+[ ] WPoint
+
+[ ] trajectory
+
+[ ] commune validation
+
+[ ] pricing
+
+[ ] capacity
+
+[ ] reservation transitions
+
+[ ] trip transitions
+
+TASK 19.2 — API tests
+
+Test:
+
+[ ] authentication
+
+[ ] authorization
+
+[ ] customer
+
+[ ] driver
+
+[ ] admin
+
+[ ] trips
+
+[ ] reservations
+
+[ ] payments
+
+[ ] refunds
+
+[ ] notifications
+
+TASK 19.3 — Concurrency tests
+
+Mandatory:
+
+[ ] last-seat race
+
+[ ] payment/expiration race
+
+[ ] approval race
+
+[ ] cancellation race
+
+[ ] waitlist promotion race
+
+[ ] duplicate webhook
+
+TASK 19.4 — End-to-end booking test
+
+The final E2E scenario must cover:
+
+Customer registration/login ↓ Driver registration ↓ Driver KYC approval ↓ Driver trajectory ↓ Trip creation ↓ Customer search ↓ Partial/full route selection ↓ GPS pickup/dropoff ↓ Booking request ↓ Driver approval ↓ Seat hold ↓ Payment ↓ Confirmation ↓ Trip start ↓ Passenger boarding ↓ Trip completion ↓ Reservation completion/no-show ↓ Driver earnings ↓ Settlement/refund if applicable ↓ Rating 
+
+PHASE 20 — PRODUCTION HARDENING
+
+TASK 20.1 — Error handling
+
+[ ] consistent API errors
+
+[ ] domain error codes
+
+[ ] frontend error mapping
+
+[ ] no raw SQL errors exposed
+
+[ ] no sensitive information leaked
+
+TASK 20.2 — Observability
+
+[ ] structured logging
+
+[ ] request IDs
+
+[ ] error tracking
+
+[ ] payment event logging
+
+[ ] reservation lifecycle logging
+
+[ ] security event logging
+
+TASK 20.3 — Health monitoring
+
+[ ] API health
+
+[ ] database health
+
+[ ] scheduler health
+
+[ ] payment provider health
+
+[ ] notification provider health
+
+TASK 20.4 — Deployment verification
+
+Before production:
+
+[ ] backend build
+
+[ ] frontend build
+
+[ ] database migration verification
+
+[ ] environment verification
+
+[ ] smoke tests
+
+[ ] E2E test
+
+[ ] rollback test
+
+EXECUTION PROTOCOL FOR EVERY TASK
+
+For each [ ] task:
+
+Step 1 — Inspect
+
+Determine:
+
+existing implementation database support backend support frontend support missing dependencies 
+
+Step 2 — Design
+
+Choose the smallest architecture compatible with the existing system.
+
+Do not introduce unnecessary frameworks or dependencies.
+
+Step 3 — Implement
+
+Implement:
+
+DB → domain → API → frontend 
+
+only where required.
+
+Step 4 — Validate
+
+Run:
+
+[ ] typecheck
+
+[ ] build
+
+[ ] relevant unit tests
+
+[ ] integration tests
+
+[ ] database verification
+
+[ ] frontend verification
+
+Step 5 — Regression check
+
+Verify that previously completed functionality still works.
+
+Step 6 — Commit
+
+Create one focused git commit for the completed logical task.
+
+Commit messages must identify the feature clearly.
+
+Example:
+
+feat: implement atomic segment capacity reservation 
+
+Step 7 — Continue
+
+Only proceed to the next task after the current task is verified.
+
+CRITICAL IMPLEMENTATION RULES
+
+Never:
+
+[ ] rewrite the entire application unnecessarily
+
+[ ] replace working architecture without justification
+
+[ ] duplicate domain logic in React
+
+[ ] trust client-side pricing
+
+[ ] trust client-side payment confirmation
+
+[ ] trust client-side seat availability
+
+[ ] bypass authorization
+
+[ ] silently cascade-delete business data
+
+[ ] modify historical financial records
+
+[ ] change reservation prices after confirmation
+
+[ ] create non-atomic financial operations
+
+[ ] create race-prone seat allocation
+
+[ ] expose private customer/driver data through public tracking
+
+[ ] leave debug/test data in the production database
+
+[ ] leave temporary scripts in the repository
+
+[ ] mark a task complete without verification
+
+FINAL ACCEPTANCE CRITERIA
+
+The project is considered complete only when:
+
+[ ] Every task is classified as complete, intentionally deferred, or explicitly blocked.
+
+[ ] All critical booking rules are server-side enforced.
+
+[ ] Segment capacity is concurrency-safe.
+
+[ ] Payment is server-verified.
+
+[ ] Payment expiration is automated.
+
+[ ] Refunds are actually executable.
+
+[ ] Driver payouts are auditable.
+
+[ ] Trip and reservation state machines are enforced.
+
+[ ] KYC is operational.
+
+[ ] No-show/reputation logic works.
+
+[ ] GPS pickup/dropoff validation works.
+
+[ ] Driver manifest works.
+
+[ ] Customer profile works.
+
+[ ] Customer financial visibility works.
+
+[ ] Admin auditability works.
+
+[ ] Notifications work.
+
+[ ] Security/authorization has been tested.
+
+[ ] Arabic/English/RTL support works.
+
+[ ] Accessibility audit is complete.
+
+[ ] Backup/recovery procedure is verified.
+
+[ ] End-to-end booking flow passes.
+
+[ ] Production builds pass.
+
+[ ] No temporary test data remains.
+
+[ ] No debug files remain.
+
+[ ] Git working tree is clean except for intentionally uncommitted user changes.
+
+OPERATING PRINCIPLE
+
+Do not optimize for the number of features implemented.
+
+Optimize for:
+
+Correct domain model + Atomic business operations + Server-side integrity + Concurrency safety + Financial correctness + Clear UX + Testability + Backward compatibility 
+
+When a feature depends on another unfinished feature, implement the dependency first.
+
+When an existing implementation already satisfies a task, verify it instead of rebuilding it.
+
+When a requirement conflicts with the existing database/business rules, stop and identify the conflict rather than silently changing semantics.
+

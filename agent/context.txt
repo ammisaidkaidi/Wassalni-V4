@@ -1,0 +1,480 @@
+Wassalni — Context Handoff for Continuation Agent
+
+This file captures the full discussion, decisions, rules, and implementation
+state from the prior agent session so a new agent can continue work without
+re-deriving context. Repo root: /home/user/wassalni. Git branch: v3
+(local-only, no remote configured). Latest commit at handoff time:
+c976da5 ("Redesign WPoint commune editing as a rule-compliant modal
+picker"). Prior commits on this branch: 158b870, 77fb093, 72c20bf.
+
+Stack: Node/Express + TypeScript backend (backend/) talking to a Supabase
+Postgres project via either a direct pg connection or the Supabase
+Management API (inlined-literal SQL transport — see "Transport quirks"
+below); React + TypeScript + Vite frontend (frontend/), plain CSS (no
+framework), French-language UI throughout. Both processes are normally run
+via the sandbox's start_process/get_process_output tools: the backend
+with npm run start (serves on port 3000, built from npm run build), the
+frontend with npm run preview (serves the vite build output on port
+5173) — NOT npm run dev, because this project is treated as
+production-mode (see prior "production-mode" task, already completed).
+Always npm run build after editing source before restarting/trusting the
+preview, since preview serves static dist/, not live source.
+
+1. Task history in this session (most recent first)
+
+Task C (most recent, COMPLETE): WPoint commune-picker modal redesign
+
+The user pasted a precise specification for how a "WPoint" component must
+behave and asked for a full rewrite of the commune-selection UI to match it
+exactly. Quoted rules (treat as literal acceptance criteria):
+
+WPoint = { wilaya: READ_ONLY, communes: [] }
+
+The Wilaya is displayed as read-only and cannot be changed inside the
+WPoint component.
+
+Only Communes belonging to the WPoint's Wilaya can be selected.
+
+Daira is used only as a grouping/filtering mechanism and is never
+stored in the WPoint model — only resulting Commune ids/names persist.
+
+Open the WPoint component inside a modal/dialog box.
+
+Display Dairas and their Communes using multiselect-style
+dropdowns/lists (implemented as a grouped checklist — see Open Item #1
+below, the user flagged this as a possible deviation worth re-checking).
+
+Selecting a Daira auto-selects all its Communes; deselecting a Daira
+auto-deselects all its Communes.
+
+Selection controls required: Select All, Deselect All, Invert
+Selection.
+
+Selected Communes must be clearly shown, preferably as removable
+chips/tags or a compact list.
+
+Show a live count, e.g. 5 communes selected.
+
+Toggling one Commune must not affect unrelated Dairas.
+
+A Daira must visually indicate: Selected (all its communes selected),
+Partially selected (some selected), Unselected (none selected) —
+this is computed, never stored.
+
+Never allow a Commune outside the WPoint's Wilaya to be selectable or
+selected (enforced both in the UI — the picker only ever loads communes
+of that one wilaya — and server-side).
+
+Confirm and Cancel actions; Cancel discards all changes made
+inside the modal (no partial/implicit saves).
+
+
+Implementation delivered (all committed in c976da5):
+
+frontend/src/components/CommuneSelectorModal.tsx (new file) — the
+modal itself. Loads, on open, three things in parallel: the wilaya's
+dairas (GET /api/registry/wilayas/:id/dairas), the wilaya's communes
+including daira_id (GET /api/registry/wilayas/:id/communes), and the
+wpoint's current commune selection as ids (GET   {basePath}/trajectories/:id/wpoints/:wpointId/communes). All further
+interaction (toggle commune, toggle daira, select all, deselect all,
+invert) is pure local React state (a Set<number> of selected commune
+ids) — no network calls happen until Confirm, which is exactly what
+makes Cancel a no-op on the server. Daira tri-state is computed via a
+useMemo'd communesByDaira: Map<daira_id, CommuneRow[]> and a
+dairaState(dairaId): 'all'|'partial'|'none' function; the native
+checkbox's .indeterminate DOM property is set imperatively in a ref
+callback for the "partial" visual state. Confirm calls PUT   {basePath}/trajectories/:id/wpoints/:wpointId/communes with
+{ commune_ids: number[] } (the full final set, not a diff) and only
+then calls onSaved(count) + closes; any error (e.g. the cross-wilaya
+400) is shown inline in the modal without closing it. Cancel / the ✕
+button / Escape key / backdrop click all just call onClose() directly.
+
+frontend/src/components/WpointManager.tsx (edited) — the old
+free-text "Affiner (communes)" inline panel (type a commune name, type a
+daira name, hit a button, repeated per stop) was removed entirely
+and replaced with a single "Gérer les communes" button per stop that
+opens CommuneSelectorModal. WpointManager now also caches the last
+known commune count per wpoint id (communeCounts state, populated only
+after a save, shown next to the stop name) to avoid an eager N+1 fetch
+on initial render. WpointManager is shared verbatim by both
+AdminPage.tsx's and DriverPage.tsx's trajectory tabs (binding
+constraint from Task B, still honored).
+
+frontend/src/types.ts (edited) — WpointRow gained wilaya_id:   number (so the modal knows which wilaya's dairas/communes to fetch);
+added DairaRow { id, nom_fr, nom_ar } and CommuneRow { id, daira_id,   nom_fr, nom_ar, code_postal }.
+
+frontend/src/index.css (edited) — removed the now-unused
+.wpoint-refine rule; added a generic .modal-backdrop/.modal-box/
+.modal-head/.modal-foot dialog system (reusable by future modals),
+plus WPoint-picker-specific styles: .wpoint-readonly-wilaya,
+.chip-label, .wpoint-controls, .wpoint-count, .wpoint-chips,
+.chip.removable, .wpoint-daira-list, .daira-group (+
+.daira-all/.daira-partial state modifiers), .commune-list (a
+2-column responsive grid of checkboxes, collapsing to 1 column under
+520px).
+
+backend/DB/domain.ts (edited) — added:
+
+wpointCommuneIds(wpointId): Promise<number[]> — select commune_id   from wpoint_commune where wpoint_id=$1 order by sort_key.
+
+setWpointCommunes(wpointId, communeIds: number[]): Promise<number> —
+looks up the wpoint's wilaya_id; if communeIds is empty, just
+delete from wpoint_commune where wpoint_id=$1 and return 0 (this is
+"Deselect All" / empty selection, which is valid — an empty commune
+set means "whole wilaya, no restriction", matching the pre-existing
+wpoint_to_record semantics); otherwise de-dupes ids, validates via a
+select count(*) ... where wilaya_id=$2 and id in (...) that every
+requested id actually belongs to this wilaya (throws a plain Error
+with message containing "wilaya de ce WPoint" if not — this exact
+substring is pattern-matched by the route layer, see below), then runs
+one atomic statement: a writable CTE with keep(commune_id) as   (values ($3::int), ($4::int), ...) , del as (delete from   wpoint_commune where wpoint_id=$1 and commune_id not in (select   commune_id from keep)) insert into wpoint_commune (wpoint_id,   wilaya_id, commune_id) select $1, $2, k.commune_id from keep k on   conflict (wpoint_id, commune_id) do nothing. This is a genuine
+diff/replace (removes newly-unselected, adds newly-selected, leaves
+already-selected rows' sort_key/added_at untouched) in a single
+round trip, safe under both the direct-pg and Management-API
+transports (see "Transport quirks" below for why arrays couldn't be
+passed as a single bound parameter here).
+
+
+backend/api/routes/admin.ts and backend/api/routes/driver.ts
+(both edited identically) — added:
+
+GET /trajectories/:id/wpoints/:wpointId/communes → { commune_ids:   number[] }.
+
+PUT /trajectories/:id/wpoints/:wpointId/communes → body {   commune_ids: number[] } (zod: z.array(z.number().int().min(1))) →
+calls repo.setWpointCommunes; wraps the call in a try/catch that
+pattern-matches err.message.includes('wilaya de ce WPoint') and
+rethrows as new ApiError(400, 'BAD_COMMUNE', err.message) — this
+exact string match is a hidden coupling between domain.ts's error
+message and the route handler; if you ever reword that Error message
+in domain.ts, update both routes' .includes(...) check too, or
+refactor to a dedicated error class/code instead of string matching
+(this was a deliberate shortcut, flagged here so it isn't silently
+broken later).
+
+The existing GET /trajectories/:id/wpoints list query in both files
+was changed to also select wp.wilaya_id (previously only
+wp.id, wp.position, w.nom_fr, w.nom_ar), required by the frontend
+modal.
+
+
+backend/api/routes/registry.ts (edited) — the existing GET   /wilayas/:id/communes endpoint now also selects daira_id (was
+id, nom_fr, nom_ar, code_postal; now id, daira_id, nom_fr, nom_ar,   code_postal), needed by the frontend to group communes under their
+daira. The GET /wilayas/:id/dairas endpoint already existed unchanged
+(id, nom_fr, nom_ar).
+
+
+Verification performed before committing (all against the live
+Supabase project, then cleaned up — no leftover test rows): created a
+scratch trajectory + wpoint, confirmed GET .../communes starts empty,
+PUT with two commune ids of the correct wilaya returns {ok:true,   count:2} and persists, PUT with a commune id from a different
+wilaya correctly returned 400 BAD_COMMUNE (after a first attempt
+surfaced it as a raw 500 — this is the bug the string-match catch block
+above was added to fix; confirmed fixed by retesting), PUT with an empty
+array correctly cleared the selection back to count:0. Then deleted all
+scratch rows and session tokens. tsc --noEmit and npm run build were
+run clean for both backend and frontend after every edit batch.
+
+Open items / things flagged to the user but not yet resolved
+
+1. The user's spec said "Display the Dairas and their Communes using
+multiselect dropdowns/lists." The delivered implementation uses a
+grouped checklist (collapsible <details> per Daira, checkboxes per
+Commune) rather than literal <select multiple> HTML elements, because
+that's what's needed to show the tri-state Daira indicator and the chip
+list simultaneously. This was explicitly flagged to the user as a
+possible deviation at the end of the previous turn — no reply was
+received yet. If the user comes back and insists on literal
+<select multiple> dropdowns, that would require reworking
+CommuneSelectorModal.tsx's rendering (native multi-selects can't show
+per-Daira tri-state checkboxes or nested grouping headers as cleanly —
+would likely need one <select multiple> per Daira plus a separate
+Daira-level control row, or an <optgroup>-based single select with a
+synthetic "select whole group" affordance). Clarify with the user
+before changing this.
+
+
+2. No other known open items from Task C.
+
+
+
+Task B (COMPLETE, prior turn, committed in 158b870 then superseded
+
+in parts by c976da5): delete button / date-range search / WPoint manager
+(first draft)
+
+User's own words: "in client, when a seat canceled or rejected by driver,
+add button delete, and the date of search of trip, (from date, to date),
+also the Trajectory is must add WPoint component to manage it by respect
+the rules" — followed by a full paste of the deployed WPoint SQL schema
+(trajectory/wilaya FK+cascade rules, position>0 check, UNIQUE   (trajectory_id,wilaya_id) merge-by-wilaya semantics on add_wpoint,
+UNIQUE(trajectory_id,position) deferrable, composite FKs
+(id,wilaya_id)/(id,trajectory_id), immutability trigger
+trg_wpoint_guard → error code DZ206 if wilaya_id/trajectory_id is
+ever changed post-insert, add_wpoint/select_commune/select_daira SQL
+functions and their error codes DZ201/DZ102/DZ205/DZ203/DZ202,
+the wpoint_commune child table's own rules, and downstream references
+from trip_stop/trip_price/default_trip_price/reservation).
+
+Scope was locked via an explicit ask_user call; the user's answers are
+binding constraints and still apply to all follow-on work:
+
+1. Deleting a cancelled/declined reservation is a hard delete
+(permanently removed from the DB), never a client-side-only hide.
+
+
+2. The date-range search replaces the old single-date search entirely
+— there is no single-date mode left anywhere in the UI or API.
+
+
+3. The WPoint management UI must be one shared component used
+identically by both the Admin and Driver trajectory tabs — never two
+separate implementations.
+
+
+4. Deleting a WPoint must be blocked with a clear error if it's
+already referenced by an existing trip — never silently
+cascade-delete trip stops/prices, even though the underlying FK
+(trip_stop.wpoint_id → wpoint.id) is ON DELETE CASCADE at the DB
+level and would otherwise do exactly that silently. This makes the
+app-level guard (wpointHasTripStops checked before every delete)
+mandatory, not a nice-to-have.
+
+
+
+Delivered in 158b870 (still live, unaffected by the Task C redesign
+except where noted):
+
+DELETE /api/reservations/:id
+(backend/api/routes/reservations.ts) — ownership check (403 if
+customer_id mismatch), 404 if missing, requires status==='cancelled'
+(409 NOT_DELETABLE otherwise — note driver-decline also sets status to
+'cancelled' via the same cancelReservation() call, so this one status
+check covers both "customer cancelled" and "driver rejected" per the
+user's phrasing), blocks with 409 HAS_PAYMENTS if any payment row
+references the reservation (kept for audit — no override path), then a
+real delete from reservation where id=$1.
+
+frontend/src/pages/MyReservationsPage.tsx — added a "Supprimer"
+button (native window.confirm guard) shown only when
+r.status === 'cancelled', calling the DELETE endpoint above and
+reloading the list on success.
+
+Date range search: backend/api/services/tripSearch.ts
+(TripSearchParams.date → dateFrom?/dateTo?, dynamic SQL — between
+if both set, >=/<= if only one, params indices computed off
+params.length so limit/offset stay correct regardless of how many
+date params were added), backend/api/routes/trips.ts (date_from/
+date_to query params, both optional, YYYY-MM-DD regex-validated,
+400 BAD_PARAM if date_from > date_to), frontend/src/pages/   HomePage.tsx ("Du"/"Au" date inputs replacing the old single "Date"
+input, each constrained via min/max against the other).
+
+WPoint reorder/delete (first draft of the shared manager):
+backend/DB/domain.ts gained wpointHasTripStops(wpointId):   Promise<boolean> (select 1 from trip_stop where wpoint_id=$1 limit   1), deleteWpoint(trajectoryId, wpointId) (plain delete — caller MUST
+check wpointHasTripStops first), and reorderWpoints(trajectoryId,   orderedIds: string[]) — validates orderedIds is exactly the
+trajectory's current full wpoint-id set (no missing/extra/dupes), then
+does one update wpoint as w set position=v.pos from (values   ($2::uuid,$3::int), ...) as v(id,pos) where w.id=v.id and   w.trajectory_id=$1 statement; this works atomically even though
+wpoint_traj_position_uk is UNIQUE(trajectory_id,position) DEFERRABLE   INITIALLY IMMEDIATE, because Postgres only checks deferred-immediate
+constraints at end-of-statement, not per-row, so transient duplicate
+positions mid-reorder never trip it (this was verified live: reordering
+3 stops in one call succeeded). New routes on both admin.ts and
+driver.ts: POST /trajectories/:id/wpoints/reorder (body {ids:   string[]}), DELETE /trajectories/:id/wpoints/:wpointId (checks
+wpointHasTripStops → 409 WPOINT_IN_USE with message "Cet arrêt est
+utilisé par au moins un voyage existant — impossible de le supprimer" if
+true, else deletes). driver.ts also gained 3 routes it was previously
+missing relative to admin.ts: GET .../wpoints/:wpointId/record,
+POST .../commune, POST .../daira (these three — the old per-commune
+/per-daira "record" endpoints — are now effectively superseded by
+the Task C commune-modal endpoints for the picker UI, but were not
+removed; they still exist, are still wired to the still-existing SQL
+functions select_commune/select_daira, and are harmless to leave in
+place. wpointToRecord in domain.ts — which calls the deployed SQL
+function wpoint_to_record — is also still present/unused by the new
+modal but not removed).
+
+frontend/src/components/WpointManager.tsx was created fresh in this
+task (then heavily edited again in Task C, see above) and wired into
+both AdminPage.tsx's and DriverPage.tsx's TrajectoriesTab
+components, replacing their previous separate/simpler inline wpoint UIs
+(parent components now just pass wpoints up via an
+onWpointsChange callback for their own price-selector dropdowns, and
+no longer own any wpoint-editing state themselves).
+
+
+Verification performed (live against Supabase, then cleaned up):
+create trajectory → add 3 wpoints → reorder → list confirms new order →
+delete an unused wpoint succeeds → create a trip that uses a wpoint as a
+stop → attempt to delete that wpoint → confirmed 409 WPOINT_IN_USE →
+date-range search confirmed to include/exclude trips correctly including
+open-ended one-sided ranges and the date_from > date_to 400 guard →
+full reservation lifecycle (reserve → attempt delete while pending →
+409 NOT_DELETABLE → cancel → delete succeeds → confirmed gone from
+GET /reservations/me).
+
+Task A (COMPLETE, older turn, committed in 77fb093): map/geolocation
+
+feature. Binding decisions from that task (still in force, unrelated to
+but compatible with Tasks B/C): exact lat/lon fields were added to
+reservations; the customer map-picker lives on TripDetailPage.tsx;
+Leaflet + OpenStreetMap tiles are used, no API key required; the driver's
+"Current trip" tab falls back to the next upcoming scheduled trip if none
+is in_progress. Full detail not repeated here — this commit is a known
+good rollback point if ever needed, but all later commits build cleanly on
+top of it and should be preferred.
+
+Even older, already-complete background (not touched this session,
+
+listed only for orientation): SPA/account-switcher feature, sql.txt
+schema-driven features, "production-mode" conversion (hence why the
+frontend is run via vite preview against a build, not vite dev), and
+the "driver-v2-self-service" portal (trips/trajectories/reservations/
+settings tabs in DriverPage.tsx).
+
+2. Transport quirks you must know before writing any new SQL here
+
+backend/DB/connection.ts supports two transports selected by config:
+direct (pg pool, real bound parameters, real transactions via
+transaction()) and management-api (Supabase Management API's
+/database/query endpoint, which takes a single opaque SQL string with no
+server-side bind parameters). In management-api mode, DBHelper.raw(sql,   params) → connection.execute() → apiExecute() calls
+inlineParams(sql, params) (in backend/DB/sql-utils.ts), which replaces
+$1, $2, … with escaped literals via sqlLiteral(). Consequences
+that have already bitten this project and must be remembered:
+
+Only ONE statement per db.raw() call is reliable (execute()'s own
+docstring says "Execute a SINGLE SQL statement"). Need multiple
+writes to happen together atomically? Use a single statement with
+writable CTEs (as setWpointCommunes and reorderWpoints both do), not
+multiple db.raw() calls — there is no cross-call transaction in
+management-api mode (transaction() throws if not in direct mode).
+
+JS arrays passed as a param become a jsonb literal, not a Postgres
+array (sqlLiteral does JSON.stringify + ::jsonb for
+arrays/objects). You cannot do commune_id = any($2) with $2 bound to
+a JS array under this transport. The established workaround (used twice
+now) is to build a VALUES (...), (...), ... list with one $n
+placeholder per element, appending to the params array and computing
+each placeholder's index off params.length as you go — see
+reorderWpoints and setWpointCommunes in domain.ts for the exact
+pattern to copy.
+
+Deferrable-immediate unique constraints (e.g.
+wpoint_traj_position_uk) are only checked at end-of-statement, which
+is what makes single-statement multi-row reorders/replacements safe even
+with transient duplicates mid-statement — but this safety only holds
+within one statement; splitting the work across multiple db.raw()
+calls would reintroduce the risk of hitting the constraint on an
+intermediate state.
+
+Error mapping (backend/api/middleware/errors.ts): ApiError thrown
+anywhere → its own status/code; ZodError → 400; Postgres 23505
+(unique violation) → 409 CONFLICT; Postgres 23503 (FK violation) → 409
+IN_USE; anything else (including a plain Error thrown from
+domain.ts) → generic 500. The established convention in this codebase
+is: domain.ts throws plain Errors; routes decide whether/how to
+translate them into a specific ApiError (see the BAD_COMMUNE
+string-matching shim in admin.ts/driver.ts as the current — slightly
+hacky — example; a cleaner follow-up would be a dedicated typed error
+class instead of substring matching, if you ever touch that code).
+
+
+3. Useful file map (only files touched/relevant to Tasks B & C)
+
+Backend:
+
+backend/DB/domain.ts — DomainRepository class; all new wpoint/
+reservation business logic lives here as plain methods.
+
+backend/DB/connection.ts, backend/DB/sql-utils.ts — transport layer,
+see section 2.
+
+backend/api/routes/admin.ts, backend/api/routes/driver.ts — mirror
+each other for trajectory/wpoint endpoints (admin manages any
+trajectory, driver only their own trajectories — enforced upstream of
+these route files, not duplicated here).
+
+backend/api/routes/reservations.ts — customer-facing reservation CRUD
+incl. the new hard-delete.
+
+backend/api/routes/trips.ts, backend/api/services/tripSearch.ts —
+public trip search, now date-range only.
+
+backend/api/routes/registry.ts — public read-only wilaya/daira/commune
+lookups, used by both the search form and the new commune modal.
+
+backend/api/middleware/errors.ts — central error → HTTP mapping.
+
+backend/data/init/sql.txt — the deployed DB schema/function reference
+the user pasted (read-only reference copy kept in-repo; the live schema
+lives in the Supabase project itself, already deployed — this file
+documents it, it does not get executed by the app at runtime beyond
+whatever startup migration logic already existed before this session).
+
+
+Frontend:
+
+frontend/src/components/WpointManager.tsx — shared stop-list editor
+(add/reorder/delete stops, launches the commune modal per stop).
+
+frontend/src/components/CommuneSelectorModal.tsx — the Task C modal.
+
+frontend/src/pages/AdminPage.tsx, frontend/src/pages/DriverPage.tsx
+— both embed WpointManager in their TrajectoriesTab/
+TrajectoiresTab components.
+
+frontend/src/pages/HomePage.tsx — date-range trip search form.
+
+frontend/src/pages/MyReservationsPage.tsx — customer reservation list
+incl. new delete button.
+
+frontend/src/types.ts — shared TS interfaces (WpointRow, DairaRow,
+CommuneRow, etc.).
+
+frontend/src/index.css — all styling, including the new generic modal
+system and the WPoint-picker-specific classes (see Task C list above).
+
+frontend/src/api.ts — the api() fetch helper (ApiError class,
+session token carried as a ?sid= query param, not a cookie).
+
+
+4. Process/runtime notes for whoever continues this
+
+Always run npm run typecheck/npm run build in backend/ and
+npm run build in frontend/ after edits, before restarting/
+trusting any preview — both have been kept green throughout this
+session and should stay that way.
+
+The backend process must be stopped and restarted (start_process)
+after every backend rebuild — it's a long-running Node process that
+does not hot-reload. The frontend's vite preview process does not
+need restarting after a rebuild — it serves dist/ straight off disk
+per-request, so a fresh npm run build is picked up immediately on the
+next page load.
+
+There is no git remote configured; git commit is local-only. The user
+has, in this same session, explicitly asked for silent/no-narration
+commits at least once ("commit to repo, no talk, no show anything, if
+success write SUCCESS ELSE FAIL") — if asked again in a similar way,
+just run the commit and reply with exactly SUCCESS or FAIL, nothing
+else, no tool-result narration, no file previews.
+
+.gitignore excludes dist/ in both backend/ and frontend/ — never
+force-add build output; always git add -A -- ':!*/dist' or equivalent
+if staging everything, to avoid accidentally trying to track build
+artifacts.
+
+Scratch/throwaway verification scripts in this session were always named
+backend/tmp_*.ts, run via npx ts-node, and always deleted
+afterward along with any DB rows/sessions they created — keep doing
+this; never leave debug scripts or test data behind.
+
+
+5. Immediate next step if resuming
+
+As of this handoff, Tasks A, B, and C are all implemented, tested, built,
+and committed — there is no unfinished code. The only open thread is
+Open Item #1 above (confirm with the user whether the grouped-checklist
+UI satisfies their "multiselect dropdowns/lists" wording, or whether they
+want literal native multi-select elements instead). If the user has not
+responded to that yet, surface it before assuming the task is 100% closed
+off; otherwise, await the user's next request.
+, read it and understand , output : nothing
