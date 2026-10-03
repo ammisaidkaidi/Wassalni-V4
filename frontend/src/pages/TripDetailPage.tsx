@@ -23,6 +23,10 @@ export default function TripDetailPage() {
   const [pickMode, setPickMode] = useState<PickMode>('pickup');
   const [pickupPos, setPickupPos] = useState<{ lat: number; lon: number } | null>(null);
   const [dropoffPos, setDropoffPos] = useState<{ lat: number; lon: number } | null>(null);
+  // Remaining capacity for exactly the chosen pickup->dropoff segment (Task
+  // 2.3) — the trip's flat seats_available is only a whole-route bottleneck
+  // and can understate what's really free on a shorter segment.
+  const [segmentSeats, setSegmentSeats] = useState<number | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -41,12 +45,38 @@ export default function TripDetailPage() {
   useEffect(() => setPickupPos(null), [pickup]);
   useEffect(() => setDropoffPos(null), [dropoff]);
 
+  useEffect(() => {
+    if (!id || !pickup || !dropoff) {
+      setSegmentSeats(null);
+      return;
+    }
+    let cancelled = false;
+    api<{ seats_available: number | null }>(
+      `/api/trips/${id}/availability?from_wpoint_id=${pickup}&to_wpoint_id=${dropoff}`,
+    )
+      .then((r) => {
+        if (!cancelled) setSegmentSeats(r.seats_available);
+      })
+      .catch(() => {
+        if (!cancelled) setSegmentSeats(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, pickup, dropoff]);
+
   const pricePair = useMemo(
     () => data?.prices.find((p) => p.from_wpoint_id === pickup && p.to_wpoint_id === dropoff) ?? null,
     [data, pickup, dropoff],
   );
   const total = pricePair ? Number(pricePair.price) * seats : null;
-  const maxSeats = Math.min(30, data?.trip.seats_available ?? 30);
+  const maxSeats = Math.min(30, segmentSeats ?? data?.trip.seats_available ?? 30);
+
+  // Keep the seat-count input in range if the segment's capacity shrinks
+  // below whatever the customer already had selected.
+  useEffect(() => {
+    setSeats((s) => Math.max(1, Math.min(s, Math.max(maxSeats, 1))));
+  }, [maxSeats]);
 
   const wilayaCoords = useMemo(() => {
     const m = new Map<number, { lat: number; lon: number }>();

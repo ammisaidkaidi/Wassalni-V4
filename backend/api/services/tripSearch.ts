@@ -61,7 +61,7 @@ export async function searchTrips(db: DBHelper, p: TripSearchParams): Promise<{ 
             wpt.id as dropoff_wpoint_id,
             wt.nom_fr as to_wilaya, wt.nom_ar as to_wilaya_ar,
             tp.price, tp.currency,
-            seats_available(tr.id) as seats_available,
+            seats_available(tr.id, wpf.id, wpt.id) as seats_available,
             count(*) over() as total_count
        from trip tr
        join trajectory tj  on tj.id = tr.trajectory_id

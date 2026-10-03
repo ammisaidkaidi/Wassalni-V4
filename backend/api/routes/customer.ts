@@ -57,26 +57,22 @@ export function customerRoutes(repo: DomainRepository): Router {
           throw new ApiError(400, 'VALIDATION', 'Latitude et longitude doivent être renseignées ensemble');
         }
       }
-      try {
-        const customer = await repo.updateCustomerProfile(req.user!.customer_id!, {
-          full_name: b.full_name,
-          phone: b.phone,
-          email: b.email === null ? null : b.email,
-          nin: b.nin === null ? null : b.nin,
-          nif: b.nif === null ? null : b.nif,
-          address: b.address === null ? null : b.address,
-          home_wilaya_id: b.home_wilaya_id === null ? null : b.home_wilaya_id,
-          home_commune_id: b.home_commune_id === null ? null : b.home_commune_id,
-          gps_lat: b.gps_lat === null ? null : b.gps_lat,
-          gps_lon: b.gps_lon === null ? null : b.gps_lon,
-        });
-        res.json({ customer });
-      } catch (err) {
-        if (err instanceof Error && (err.message.includes('wilaya sélectionnée') || err.message.includes('sans sa wilaya'))) {
-          throw new ApiError(400, 'BAD_COMMUNE', err.message);
-        }
-        throw err;
-      }
+      // updateCustomerProfile throws a typed DomainValidationError on a
+      // commune/wilaya mismatch — errorHandler maps it to a 400 directly,
+      // no string-matching needed here (Task 1.5).
+      const customer = await repo.updateCustomerProfile(req.user!.customer_id!, {
+        full_name: b.full_name,
+        phone: b.phone,
+        email: b.email === null ? null : b.email,
+        nin: b.nin === null ? null : b.nin,
+        nif: b.nif === null ? null : b.nif,
+        address: b.address === null ? null : b.address,
+        home_wilaya_id: b.home_wilaya_id === null ? null : b.home_wilaya_id,
+        home_commune_id: b.home_commune_id === null ? null : b.home_commune_id,
+        gps_lat: b.gps_lat === null ? null : b.gps_lat,
+        gps_lon: b.gps_lon === null ? null : b.gps_lon,
+      });
+      res.json({ customer });
     }),
   );
 

@@ -9,7 +9,7 @@ import type {
   DomainErrorRow,
   DriverRow,
   PaymentRow,
-  RefundDueRow,
+  RefundWorklistRow,
   TrackingRow,
   TrajectoryRow,
   VehicleRow,
@@ -34,6 +34,18 @@ const TABS: Array<{ id: Tab; label: string }> = [
 export default function AdminPage() {
   const { user, loading } = useAuth();
   const [tab, setTab] = useState<Tab>('trips');
+  // Pending-refund count shown as a badge on the "Paiements" tab, so admins
+  // notice outstanding refunds without having to open the tab first.
+  const [pendingRefunds, setPendingRefunds] = useState(0);
+
+  useEffect(() => {
+    if (user?.role !== 'admin') return;
+    api<{ worklist: RefundWorklistRow[] }>('/api/admin/refunds-worklist')
+      .then((r) => setPendingRefunds(r.worklist.length))
+      .catch(() => {
+        /* badge is a convenience — silently skip if it fails to load */
+      });
+  }, [user]);
 
   if (loading) return <p className="empty">Chargement…</p>;
   if (user?.role !== 'admin')
@@ -50,6 +62,7 @@ export default function AdminPage() {
         {TABS.map((t) => (
           <button key={t.id} className={`tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
+            {t.id === 'payments' && pendingRefunds > 0 && <span className="tab-badge">{pendingRefunds}</span>}
           </button>
         ))}
       </div>
@@ -838,19 +851,19 @@ function ReservationsTab() {
 
 function PaymentsTab() {
   const [rows, setRows] = useState<PaymentRow[]>([]);
-  const [refunds, setRefunds] = useState<RefundDueRow[]>([]);
+  const [worklist, setWorklist] = useState<RefundWorklistRow[]>([]);
   const [reservations, setReservations] = useState<AdminReservationRow[]>([]);
   const [form, setForm] = useState({ reservation_id: '', amount: '', method: 'cash', reference: '' });
   const [msg, setMsg] = useState('');
 
   const load = useCallback(async () => {
-    const [p, rf, res] = await Promise.all([
+    const [p, wl, res] = await Promise.all([
       api<{ payments: PaymentRow[] }>('/api/admin/payments'),
-      api<{ refunds: RefundDueRow[] }>('/api/admin/refunds-due'),
+      api<{ worklist: RefundWorklistRow[] }>('/api/admin/refunds-worklist'),
       api<{ reservations: AdminReservationRow[] }>('/api/admin/reservations'),
     ]);
     setRows(p.payments);
-    setRefunds(rf.refunds);
+    setWorklist(wl.worklist);
     setReservations(res.reservations);
   }, []);
 
@@ -992,29 +1005,55 @@ function PaymentsTab() {
         </table>
       </div>
 
-      <h2>Remboursements dus</h2>
+      <h2>
+        Remboursements en attente
+        {worklist.length > 0 && <span className="tab-badge">{worklist.length}</span>}
+      </h2>
+      <p className="muted small">
+        Réservations annulées dont au moins un paiement n'a pas encore été intégralement remboursé — distinct des
+        paiements déjà remboursés (colonne « Remboursé » ci-dessus). Chaque ligne agit directement sur le paiement
+        concerné.
+      </p>
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
+              <th>Paiement</th>
               <th>Réservation</th>
+              <th>Voyage</th>
               <th>Client</th>
               <th>Téléphone</th>
-              <th>Montant dû</th>
+              <th>Payé</th>
+              <th>Déjà remboursé</th>
+              <th>Reste à rembourser</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {refunds.map((r) => (
-              <tr key={r.reservation_id}>
-                <td>{r.reservation_code}</td>
-                <td>{r.customer_name}</td>
-                <td>{r.customer_phone}</td>
-                <td>{Number(r.refund_due).toLocaleString('fr-DZ')} DZD</td>
+            {worklist.map((w) => (
+              <tr key={w.payment_id}>
+                <td>{w.payment_code}</td>
+                <td>{w.reservation_code}</td>
+                <td>
+                  {w.trip_code} — {fmtDateTime(w.departure_at)}
+                </td>
+                <td>{w.customer_name}</td>
+                <td>{w.customer_phone}</td>
+                <td>{Number(w.amount).toLocaleString('fr-DZ')} DZD</td>
+                <td>{Number(w.refunded_amount).toLocaleString('fr-DZ')} DZD</td>
+                <td>
+                  <strong>{Number(w.refund_due).toLocaleString('fr-DZ')} DZD</strong>
+                </td>
+                <td className="actions">
+                  <button className="btn primary small" onClick={() => void refund(w.payment_id)}>
+                    Rembourser
+                  </button>
+                </td>
               </tr>
             ))}
-            {refunds.length === 0 && (
+            {worklist.length === 0 && (
               <tr>
-                <td colSpan={4} className="empty">
+                <td colSpan={9} className="empty">
                   Aucun remboursement en attente.
                 </td>
               </tr>

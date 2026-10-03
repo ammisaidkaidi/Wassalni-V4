@@ -711,16 +711,95 @@ $$
   );
 $$;
 
-create or replace function seats_available(p_trip uuid)
-returns integer language sql stable as
+-- create or replace function cannot change an existing function's parameter
+-- list — without this explicit drop, the old 1-arg seats_available(uuid)
+-- would stay installed as a separate overload (and Postgres' overload
+-- resolution would keep preferring it for every existing 1-arg call site,
+-- silently leaving the whole-trip-only behavior in place everywhere).
+-- `cascade` drops the v_trip view that depends on it on an already-installed
+-- database — safe because v_trip is recreated later in this same script,
+-- at which point it picks up the new 3-arg function automatically.
+drop function if exists seats_available(uuid) cascade;
+
+-- Segment-based capacity (Task 2.3): a reservation only occupies the seats
+-- between its pickup and dropoff wpoint positions along the trajectory, not
+-- the whole trip. Two reservations overlap only if their [pos_from, pos_to)
+-- ranges actually intersect — e.g. Alger(1)->Blida(2) and Blida(2)->Djelfa(3)
+-- do NOT overlap and must each get the full vehicle capacity, independently.
+--
+-- seats_available(trip)                       -> tightest bottleneck across
+--                                                 every elementary (adjacent-
+--                                                 stop) segment of the route;
+--                                                 used for trip-level overview
+--                                                 displays with no particular
+--                                                 passenger segment in mind.
+-- seats_available(trip, from_wpoint, to_wpoint) -> remaining capacity for
+--                                                 that exact requested segment
+--                                                 (what search/booking use).
+create or replace function seats_available(
+  p_trip        uuid,
+  p_from_wpoint uuid default null,
+  p_to_wpoint   uuid default null
+)
+returns integer language plpgsql stable as
 $$
-  select t.capacity - (
-    select coalesce(sum(r.seats), 0)
-    from reservation r
-    where r.trip_id = t.id and r.status in ('pending','confirmed')
-  )::int
-  from trip t
-  where t.id = p_trip;
+declare
+  v_capacity   smallint;
+  v_trajectory uuid;
+  v_min_pos    integer;
+  v_max_pos    integer;
+  v_pos_from   integer;
+  v_pos_to     integer;
+  v_result     integer;
+begin
+  select capacity, trajectory_id into v_capacity, v_trajectory from trip where id = p_trip;
+  if v_capacity is null then
+    return null;
+  end if;
+
+  select min(position), max(position) into v_min_pos, v_max_pos
+  from wpoint where trajectory_id = v_trajectory;
+
+  if p_from_wpoint is not null or p_to_wpoint is not null then
+    v_pos_from := coalesce((select position from wpoint where id = p_from_wpoint and trajectory_id = v_trajectory), v_min_pos);
+    v_pos_to   := coalesce((select position from wpoint where id = p_to_wpoint   and trajectory_id = v_trajectory), v_max_pos);
+
+    select v_capacity - coalesce(sum(r.seats), 0)::int into v_result
+      from reservation r
+      left join wpoint wf on wf.id = r.pickup_wpoint_id
+      left join wpoint wt on wt.id = r.dropoff_wpoint_id
+     where r.trip_id = p_trip
+       and r.status in ('pending','confirmed')
+       and coalesce(wf.position, v_min_pos) < v_pos_to
+       and coalesce(wt.position,   v_max_pos) > v_pos_from;
+
+    return v_result;
+  end if;
+
+  -- No segment given: report the worst-case bottleneck across every
+  -- elementary adjacent-stop segment of the route.
+  return (
+    with stops as (
+      select position, lead(position) over (order by position) as next_position
+      from wpoint where trajectory_id = v_trajectory
+    ),
+    segments as (
+      select position, next_position from stops where next_position is not null
+    ),
+    occ as (
+      select s.position, s.next_position,
+             coalesce((
+               select sum(r.seats) from reservation r
+               where r.trip_id = p_trip
+                 and r.status in ('pending','confirmed')
+                 and coalesce((select position from wpoint where id = r.pickup_wpoint_id),  v_min_pos) < s.next_position
+                 and coalesce((select position from wpoint where id = r.dropoff_wpoint_id), v_max_pos) > s.position
+             ), 0)::int as held
+        from segments s
+    )
+    select coalesce(min(v_capacity - held), v_capacity) from occ
+  );
+end;
 $$;
 
 create or replace function create_trip(
@@ -1102,7 +1181,13 @@ begin
     raise exception 'Trip is not bookable' using errcode = 'DZ302';
   end if;
 
-  v_free := seats_available(p_trip);
+  -- Pre-flight check against the REQUESTED segment, not the whole route —
+  -- otherwise a fully-booked segment elsewhere on the trajectory would
+  -- wrongly reject a booking on a completely different, still-free segment
+  -- (Task 2.3). trg_reservation_capacity_guard performs the authoritative,
+  -- race-safe check at insert time regardless; this only gives a clean
+  -- DZ303 error before attempting the insert.
+  v_free := seats_available(p_trip, p_pickup_wpoint, p_dropoff_wpoint);
   if v_free is null or p_seats > v_free then
     raise exception 'Insufficient seats' using errcode = 'DZ303';
   end if;
@@ -1471,24 +1556,48 @@ begin
 end;
 $$;
 
+-- Segment-aware capacity guard (Task 2.3) — same overlap rule as
+-- seats_available() above: only reservations whose [pickup, dropoff)
+-- position range actually overlaps the new/changed reservation's range
+-- compete for the same seats. pickup/dropoff wpoint ids are immutable once a
+-- reservation is created (set once by reserve(), never updated afterwards),
+-- so it's safe to resolve them fresh from NEW on every fire of this trigger.
+-- The `for update` lock on the trip row serializes concurrent inserts for
+-- the same trip, giving atomic seat accounting (Task 2.4) without needing a
+-- finer-grained per-segment lock.
 create or replace function trg_reservation_capacity_guard()
 returns trigger language plpgsql as
 $$
 declare
-  v_capacity smallint;
-  v_held     integer;
+  v_capacity   smallint;
+  v_trajectory uuid;
+  v_min_pos    integer;
+  v_max_pos    integer;
+  v_pos_from   integer;
+  v_pos_to     integer;
+  v_held       integer;
 begin
   if new.status not in ('pending','confirmed') then
     return null;
   end if;
 
-  select capacity into v_capacity from trip where id = new.trip_id for update;
+  select capacity, trajectory_id into v_capacity, v_trajectory from trip where id = new.trip_id for update;
 
-  select coalesce(sum(seats), 0)::int into v_held
-  from reservation
-  where trip_id = new.trip_id
-    and status in ('pending','confirmed')
-    and id <> new.id;
+  select min(position), max(position) into v_min_pos, v_max_pos
+  from wpoint where trajectory_id = v_trajectory;
+
+  v_pos_from := coalesce((select position from wpoint where id = new.pickup_wpoint_id),  v_min_pos);
+  v_pos_to   := coalesce((select position from wpoint where id = new.dropoff_wpoint_id), v_max_pos);
+
+  select coalesce(sum(r.seats), 0)::int into v_held
+    from reservation r
+    left join wpoint wf on wf.id = r.pickup_wpoint_id
+    left join wpoint wt on wt.id = r.dropoff_wpoint_id
+   where r.trip_id = new.trip_id
+     and r.status in ('pending','confirmed')
+     and r.id <> new.id
+     and coalesce(wf.position, v_min_pos) < v_pos_to
+     and coalesce(wt.position,   v_max_pos) > v_pos_from;
 
   if v_held + new.seats > v_capacity then
     raise exception 'Insufficient seats' using errcode = 'DZ303';

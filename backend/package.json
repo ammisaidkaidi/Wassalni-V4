@@ -18,7 +18,8 @@
     "db:status": "ts-node DB/cli.ts status",
     "db:tables": "ts-node DB/cli.ts tables",
     "db:demo": "ts-node DB/cli.ts demo",
-    "test:utils": "ts-node DB/tests/sql-utils.test.ts"
+    "test:utils": "ts-node DB/tests/sql-utils.test.ts",
+    "test:live": "ts-node DB/tests/live-verification.ts"
   },
   "dependencies": {
     "cookie-parser": "^1.4.6",

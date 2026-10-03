@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import type { DBHelper } from '../../DB/DBHelper';
+import type { DomainRepository } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
 import { getTripDetail, searchTrips } from '../services/tripSearch';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /** Public trip search + detail (published, scheduled, future trips only). */
-export function tripsRoutes(db: DBHelper): Router {
+export function tripsRoutes(db: DBHelper, repo: DomainRepository): Router {
   const router = Router();
 
   router.get(
@@ -35,6 +36,26 @@ export function tripsRoutes(db: DBHelper): Router {
       const id = req.params.id;
       if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
       res.json(await getTripDetail(db, id));
+    }),
+  );
+
+  /**
+   * Segment-specific remaining capacity (Task 2.3) — the trip detail's
+   * flat `seats_available` is the whole-route bottleneck; once a customer
+   * has picked a pickup/dropoff pair on the booking form, this reflects
+   * the real remaining capacity for exactly that segment.
+   */
+  router.get(
+    '/:id/availability',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const fromWpointId = typeof req.query.from_wpoint_id === 'string' ? req.query.from_wpoint_id : null;
+      const toWpointId = typeof req.query.to_wpoint_id === 'string' ? req.query.to_wpoint_id : null;
+      if (fromWpointId && !UUID_RE.test(fromWpointId)) throw new ApiError(400, 'BAD_PARAM', 'from_wpoint_id invalide');
+      if (toWpointId && !UUID_RE.test(toWpointId)) throw new ApiError(400, 'BAD_PARAM', 'to_wpoint_id invalide');
+      const seatsAvailable = await repo.seatsAvailable(id, fromWpointId, toWpointId);
+      res.json({ seats_available: seatsAvailable });
     }),
   );
 

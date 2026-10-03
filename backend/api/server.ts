@@ -74,7 +74,7 @@ async function main(): Promise<void> {
   const authLimiter = rateLimit({ windowMs: 60_000, max: 15, message: "Trop de tentatives d'authentification — patientez une minute" });
   app.use('/api/auth', authLimiter, authRoutes(auth, cfg));
   app.use('/api/registry', registryRoutes(db, repo));
-  app.use('/api/trips', tripsRoutes(db));
+  app.use('/api/trips', tripsRoutes(db, repo));
   app.use('/api/reservations', reservationsRoutes(db, repo));
   app.use('/api/customer', customerRoutes(repo));
   app.use('/api/driver', driverRoutes(db, repo));

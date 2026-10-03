@@ -342,15 +342,15 @@ TASK 1.4 — Refund worklist
 
 Improve refund operations:
 
-[ ] dedicated pending-refund view
+[x] dedicated pending-refund view
 
-[ ] badge/count
+[x] badge/count
 
-[ ] clear distinction between refunded and refund-due
+[x] clear distinction between refunded and refund-due
 
-[ ] reservation/payment context
+[x] reservation/payment context
 
-[ ] admin action workflow
+[x] admin action workflow
 
 TASK 1.5 — Contextual domain errors
 
@@ -358,17 +358,17 @@ Replace raw technical messages with understandable UI messages.
 
 Examples:
 
-[ ] published trip is locked
+[x] published trip is locked
 
-[ ] trip has active reservations
+[x] trip has active reservations
 
-[ ] WPoint cannot be changed
+[x] WPoint cannot be changed
 
-[ ] WPoint cannot be deleted because it is used
+[x] WPoint cannot be deleted because it is used
 
-[ ] reservation cannot be cancelled
+[x] reservation cannot be cancelled
 
-[ ] payment cannot be refunded
+[x] payment cannot be refunded
 
 Where practical, replace string matching such as:
 
@@ -380,41 +380,41 @@ PHASE 2 — CORE BOOKING DOMAIN
 
 TASK 2.1 — Formalize reservation state machine
 
-[ ] Define states
+[x] Define states
 
-[ ] Define transitions
+[x] Define transitions
 
-[ ] Define who may perform each transition
+[x] Define who may perform each transition
 
-[ ] Define transition validation
+[x] Define transition validation
 
-[ ] Implement server-side transition enforcement
+[x] Implement server-side transition enforcement
 
-[ ] Test every legal transition
+[x] Test every legal transition
 
-[ ] Test illegal transitions
+[x] Test illegal transitions
 
 TASK 2.2 — Formalize trip lifecycle
 
-[ ] scheduled
+[x] scheduled
 
-[ ] in_progress
+[x] in_progress
 
-[ ] completed
+[x] completed
 
-[ ] cancelled
+[x] cancelled
 
 Implement:
 
-[ ] legal transition rules
+[x] legal transition rules
 
-[ ] server-side enforcement
+[x] server-side enforcement
 
-[ ] driver controls
+[x] driver controls
 
-[ ] admin controls
+[x] admin controls
 
-[ ] customer-visible status
+[x] customer-visible status
 
 TASK 2.3 — Segment-based capacity
 
@@ -428,17 +428,17 @@ A passenger traveling Alger → Blida must not consume capacity on Blida → Dje
 
 Implement:
 
-[ ] segment occupancy calculation
+[x] segment occupancy calculation
 
-[ ] overlapping reservation detection
+[x] overlapping reservation detection
 
-[ ] requested-seat calculation
+[x] requested-seat calculation
 
-[ ] remaining capacity
+[x] remaining capacity
 
-[ ] server-side enforcement
+[x] server-side enforcement
 
-[ ] atomic reservation protection
+[x] atomic reservation protection
 
 TASK 2.4 — Atomic seat reservation
 

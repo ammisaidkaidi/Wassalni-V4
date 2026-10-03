@@ -114,6 +114,30 @@ export interface RefundDueRow {
   refund_due: string;
 }
 
+/**
+ * Payment-level refund worklist row (Task 1.4) — one actionable row per
+ * still-refundable payment, instead of RefundDueRow's one row per
+ * reservation. Lets the admin UI put a "Rembourser" button directly next to
+ * the exact payment it applies to, with the reservation/customer context
+ * that was previously only visible by cross-referencing the payments table.
+ */
+export interface RefundWorklistRow {
+  payment_id: string;
+  payment_code: string;
+  payment_status: string;
+  reservation_id: string;
+  reservation_code: string;
+  customer_name: string;
+  customer_phone: string;
+  trip_code: string;
+  departure_at: string;
+  amount: string;
+  refunded_amount: string;
+  refund_due: string;
+  paid_at: string | null;
+}
+
+
 export interface CustomerRow {
   id: string;
   full_name: string;
@@ -230,6 +254,26 @@ export interface CommuneRow {
   nom_fr: string;
   nom_ar: string;
   code_postal: string | null;
+}
+
+/**
+ * Typed application-level validation error (Task 1.5) — thrown by domain
+ * methods that validate something in TypeScript before it would otherwise
+ * reach the database (e.g. a commune/wilaya pairing check that mirrors a
+ * composite FK). Carries a machine-readable `code` so callers can branch on
+ * `instanceof DomainValidationError` + `.code` instead of matching on
+ * `.message` substrings, which breaks silently if the message wording ever
+ * changes. Distinct from the DZxxx errors below, which come from the
+ * database itself (triggers/functions) via their SQLSTATE.
+ */
+export class DomainValidationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DomainValidationError';
+  }
 }
 
 // ── DZxxx error catalogue (mirrors the v_domain_errors view in the database) ──
@@ -394,7 +438,7 @@ export class DomainRepository {
       params,
     );
     if ((check[0]?.n ?? 0) !== uniqueIds.length) {
-      throw new Error("Une ou plusieurs communes ne correspondent pas à la wilaya de ce WPoint");
+      throw new DomainValidationError('BAD_COMMUNE', "Une ou plusieurs communes ne correspondent pas à la wilaya de ce WPoint");
     }
 
     const keepValues = uniqueIds.map((_, i) => `($${i + 3}::int)`).join(', ');
@@ -574,8 +618,15 @@ export class DomainRepository {
     await this.db.callProcedure('sp_close_trip', tripId);
   }
 
-  async seatsAvailable(tripId: string): Promise<number | null> {
-    return this.db.callScalar<number | null>('seats_available', tripId);
+  /**
+   * Remaining capacity. With no wpoints given: the tightest bottleneck
+   * across the whole route (trip-level overview). With both given: the
+   * remaining capacity for that exact pickup->dropoff segment (Task 2.3) —
+   * what search results and the booking UI should actually show once a
+   * passenger's segment is known.
+   */
+  async seatsAvailable(tripId: string, fromWpointId?: string | null, toWpointId?: string | null): Promise<number | null> {
+    return this.db.callScalar<number | null>('seats_available', tripId, fromWpointId ?? null, toWpointId ?? null);
   }
 
   async hasActiveReservations(tripId: string): Promise<boolean> {
@@ -652,13 +703,13 @@ export class DomainRepository {
       const wilayaId = data.home_wilaya_id !== undefined ? data.home_wilaya_id : current?.home_wilaya_id ?? null;
       const communeId = data.home_commune_id !== undefined ? data.home_commune_id : current?.home_commune_id ?? null;
       if (communeId !== null) {
-        if (wilayaId === null) throw new Error('Une commune ne peut être renseignée sans sa wilaya');
+        if (wilayaId === null) throw new DomainValidationError('BAD_COMMUNE', 'Une commune ne peut être renseignée sans sa wilaya');
         const check = await this.db.raw<{ n: number }>(
           'select count(*)::int as n from commune where id = $1 and wilaya_id = $2',
           [communeId, wilayaId],
         );
         if ((check[0]?.n ?? 0) !== 1) {
-          throw new Error('Cette commune ne correspond pas à la wilaya sélectionnée');
+          throw new DomainValidationError('BAD_COMMUNE', 'Cette commune ne correspond pas à la wilaya sélectionnée');
         }
       }
       patch.home_wilaya_id = wilayaId;
@@ -927,6 +978,35 @@ export class DomainRepository {
   /** Cancelled reservations that still have money to give back. */
   async refundsDue(): Promise<RefundDueRow[]> {
     return this.db.select<RefundDueRow>('v_refund_due');
+  }
+
+  /**
+   * Payment-level refund worklist — same business rule v_refund_due already
+   * encodes (cancelled reservation + a payment still holding a refundable
+   * balance), just expressed per-payment so each row carries the exact
+   * payment_id the admin needs to act on, plus trip/customer context.
+   * payment_refund_consistency already guarantees amount > refunded_amount
+   * whenever status is 'paid'/'partially_refunded' — the extra filter below
+   * is a defensive no-op, not a second source of truth for that rule.
+   */
+  async refundWorklist(): Promise<RefundWorklistRow[]> {
+    return this.db.raw<RefundWorklistRow>(
+      `select p.id as payment_id, p.code as payment_code, p.status as payment_status,
+              r.id as reservation_id, r.code as reservation_code,
+              cs.full_name as customer_name, cs.phone as customer_phone,
+              tr.code as trip_code, tr.departure_at,
+              p.amount, p.refunded_amount,
+              (p.amount - p.refunded_amount) as refund_due,
+              p.paid_at
+         from payment p
+         join reservation r on r.id = p.reservation_id
+         join customer cs   on cs.id = r.customer_id
+         join trip tr       on tr.id = r.trip_id
+        where r.status = 'cancelled'
+          and p.status in ('paid', 'partially_refunded')
+          and p.amount - p.refunded_amount > 0
+        order by p.paid_at nulls last, p.created_at`,
+    );
   }
 }
 

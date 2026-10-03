@@ -209,6 +209,22 @@ export interface RefundDueRow {
   refund_due: string;
 }
 
+export interface RefundWorklistRow {
+  payment_id: string;
+  payment_code: string;
+  payment_status: string;
+  reservation_id: string;
+  reservation_code: string;
+  customer_name: string;
+  customer_phone: string;
+  trip_code: string;
+  departure_at: string;
+  amount: string;
+  refunded_amount: string;
+  refund_due: string;
+  paid_at: string | null;
+}
+
 export interface TrackingRow {
   driver_id: string | null;
   driver_name: string | null;

@@ -225,15 +225,11 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
     wrap(async (req, res) => {
       uuidParam(req.params.id);
       const { commune_ids } = z.object({ commune_ids: z.array(z.number().int().min(1)) }).parse(req.body);
-      try {
-        const count = await repo.setWpointCommunes(uuidParam(req.params.wpointId), commune_ids);
-        res.json({ ok: true, count });
-      } catch (err) {
-        if (err instanceof Error && err.message.includes('wilaya de ce WPoint')) {
-          throw new ApiError(400, 'BAD_COMMUNE', err.message);
-        }
-        throw err;
-      }
+      // setWpointCommunes throws a typed DomainValidationError on a
+      // commune/wilaya mismatch — errorHandler maps it to a 400 directly,
+      // no string-matching needed here (Task 1.5).
+      const count = await repo.setWpointCommunes(uuidParam(req.params.wpointId), commune_ids);
+      res.json({ ok: true, count });
     }),
   );
 
