@@ -282,13 +282,13 @@ PHASE 1 — EXISTING BUGS AND CHEAP HIGH-VALUE FIXES
 
 TASK 1.1 — Fix driver trip completion
 
-[ ] Driver completion must use the same reservation-resolution semantics as admin trip closure.
+[x] Driver completion must use the same reservation-resolution semantics as admin trip closure.
 
-[ ] Confirmed reservations must become completed or no_show according to the existing business rules.
+[x] Confirmed reservations must become completed or no_show according to the existing business rules.
 
-[ ] Unresolved/straggler reservations must be handled correctly.
+[x] Unresolved/straggler reservations must be handled correctly.
 
-[ ] Verify no reservation remains incorrectly stuck at confirmed.
+[x] Verify no reservation remains incorrectly stuck at confirmed.
 
 TASK 1.2 — Customer profile
 

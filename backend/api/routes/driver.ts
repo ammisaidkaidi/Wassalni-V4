@@ -393,7 +393,13 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
     wrap(async (req, res) => {
       const tripId = uuidParam(req.params.id);
       await ownTripOrThrow(req, tripId);
-      await repo.completeTrip(tripId);
+      // closeTrip (sp_close_trip) is a strict superset of the bare complete_trip()
+      // transition: it also resolves every still-confirmed reservation to
+      // completed/no_show (by amount_paid) and cancels stragglers — the same
+      // semantics admin's "finish trip" already uses. Using the bare transition
+      // here left reservations permanently stuck at 'confirmed' when a driver
+      // (rather than an admin) closed out their own trip.
+      await repo.closeTrip(tripId);
       res.json({ ok: true });
     }),
   );
