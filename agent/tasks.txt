@@ -328,13 +328,13 @@ TASK 1.3 — Customer payment visibility
 
 Expose reservation financial information:
 
-[ ] amount paid
+[x] amount paid
 
-[ ] balance due
+[x] balance due
 
-[ ] payment status
+[x] payment status
 
-[ ] refund status where applicable
+[x] refund status where applicable
 
 Use existing database calculations instead of duplicating them in the frontend.
 

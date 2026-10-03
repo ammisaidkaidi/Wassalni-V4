@@ -40,6 +40,14 @@ interface ReservationRow {
   pickup_lon: string | null;
   dropoff_lat: string | null;
   dropoff_lon: string | null;
+  // Payment visibility (Task 1.3) — derived straight from the same
+  // amount_paid() SQL function / case logic v_reservation already uses, so
+  // the "paid so far" math is computed exactly once, in the database.
+  amount_paid: string;
+  balance_due: string;
+  refunded_amount: string;
+  payment_status: 'unpaid' | 'partially_paid' | 'paid' | 'cancelled';
+  refund_status: 'none' | 'partial' | 'full';
 }
 
 function reservationSelect(db: DBHelper, whereSql: string, params: unknown[]): Promise<ReservationRow[]> {
@@ -47,10 +55,31 @@ function reservationSelect(db: DBHelper, whereSql: string, params: unknown[]): P
     `select r.id, r.code, r.status, r.seats, r.total_price, r.currency,
             r.pickup_wpoint_id, r.dropoff_wpoint_id, r.notes, r.created_at,
             r.pickup_lat, r.pickup_lon, r.dropoff_lat, r.dropoff_lon,
-            t.code as trip_code, t.departure_at, tj.name as trajectory_name
+            t.code as trip_code, t.departure_at, tj.name as trajectory_name,
+            amount_paid(r.id) as amount_paid,
+            case when r.status = 'cancelled' then 0
+                 else greatest(r.total_price - amount_paid(r.id), 0) end as balance_due,
+            coalesce(pstat.refunded_amount, 0) as refunded_amount,
+            case
+              when r.status = 'cancelled' then 'cancelled'
+              when amount_paid(r.id) >= r.total_price and r.total_price > 0 then 'paid'
+              when amount_paid(r.id) > 0 then 'partially_paid'
+              else 'unpaid'
+            end as payment_status,
+            case
+              when coalesce(pstat.refunded_amount, 0) = 0 then 'none'
+              when coalesce(pstat.gross_paid, 0) > 0 and pstat.refunded_amount >= pstat.gross_paid then 'full'
+              else 'partial'
+            end as refund_status
        from reservation r
        join trip t       on t.id = r.trip_id
        join trajectory tj on tj.id = t.trajectory_id
+       left join lateral (
+         select coalesce(sum(p.refunded_amount), 0) as refunded_amount,
+                coalesce(sum(p.amount) filter (where p.status in ('paid', 'partially_refunded', 'refunded')), 0) as gross_paid
+           from payment p
+          where p.reservation_id = r.id
+       ) pstat on true
       where ${whereSql}
       order by r.created_at desc`,
     params,

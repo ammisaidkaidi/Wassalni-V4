@@ -87,6 +87,11 @@ export interface ReservationRow {
   trip_code: string;
   departure_at: string;
   trajectory_name: string;
+  amount_paid: string;
+  balance_due: string;
+  refunded_amount: string;
+  payment_status: 'unpaid' | 'partially_paid' | 'paid' | 'cancelled';
+  refund_status: 'none' | 'partial' | 'full';
 }
 
 export interface CustomerProfileRow {

@@ -56,6 +56,13 @@ export default function MyReservationsPage() {
       </p>
     );
 
+  const paymentLabel: Record<ReservationRow['payment_status'], string> = {
+    unpaid: 'Non payé',
+    partially_paid: 'Partiellement payé',
+    paid: 'Payé',
+    cancelled: 'Annulé',
+  };
+
   return (
     <section>
       <h1>Mes réservations</h1>
@@ -74,6 +81,21 @@ export default function MyReservationsPage() {
               <span>
                 👥 {r.seats} place(s) — {Number(r.total_price).toLocaleString('fr-DZ')} {r.currency}
               </span>
+            </div>
+            <div className="meta">
+              <span className={`chip ${r.payment_status}`}>💳 {paymentLabel[r.payment_status]}</span>
+              {Number(r.amount_paid) > 0 && (
+                <span>✔ Payé : {Number(r.amount_paid).toLocaleString('fr-DZ')} {r.currency}</span>
+              )}
+              {r.status !== 'cancelled' && Number(r.balance_due) > 0 && (
+                <span>⏳ Reste à payer : {Number(r.balance_due).toLocaleString('fr-DZ')} {r.currency}</span>
+              )}
+              {r.refund_status !== 'none' && (
+                <span>
+                  ↩ Remboursé {r.refund_status === 'full' ? 'intégralement' : 'partiellement'} :{' '}
+                  {Number(r.refunded_amount).toLocaleString('fr-DZ')} {r.currency}
+                </span>
+              )}
             </div>
             <div className="foot">
               <span className={`chip ${r.status}`}>{r.status}</span>

@@ -412,6 +412,16 @@ form .btn {
   color: #6d28d9;
 }
 
+.chip.partially_paid {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.chip.unpaid {
+  background: #e2e8f0;
+  color: #334155;
+}
+
 .muted.small,
 .small {
   font-size: 0.78rem;
