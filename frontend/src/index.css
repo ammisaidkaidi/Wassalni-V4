@@ -434,18 +434,185 @@ form .btn {
   flex-wrap: wrap;
 }
 
-.wpoint-refine {
-  margin-top: 8px;
-  padding: 10px;
+/* ── modal / dialog ──────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+
+.modal-box {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: 100%;
+  max-width: 640px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.modal-x {
+  padding: 2px 8px;
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+}
+
+.wpoint-modal > :not(.modal-head):not(.modal-foot) {
+  padding: 0 20px;
+  overflow-y: auto;
+}
+
+.wpoint-readonly-wilaya {
+  margin-top: 14px;
+  padding: 10px 12px;
   background: var(--bg);
   border-radius: 10px;
   display: flex;
-  flex-direction: column;
+  align-items: baseline;
   gap: 8px;
 }
 
-.wpoint-refine .form-inline {
+.chip-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.wpoint-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.wpoint-count {
+  margin-left: auto;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--primary-dark);
+}
+
+.wpoint-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+  min-height: 24px;
+}
+
+.chip.removable {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #ccfbf1;
+  color: var(--primary-dark);
+}
+
+.chip.removable button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  font-size: 0.9rem;
+}
+
+.wpoint-daira-list {
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.daira-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.daira-group:last-child {
+  border-bottom: none;
+}
+
+.daira-group summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.daira-group summary::-webkit-details-marker {
+  display: none;
+}
+
+.daira-group.daira-all summary {
+  background: #f0fdfa;
+}
+
+.daira-group.daira-partial summary {
+  background: #fffbeb;
+}
+
+.daira-name {
+  font-weight: 600;
+  flex: 1;
+}
+
+.daira-tally {
+  white-space: nowrap;
+}
+
+.commune-list {
+  list-style: none;
   margin: 0;
+  padding: 4px 12px 12px 38px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+}
+
+.commune-list label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+@media (max-width: 520px) {
+  .commune-list {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── trip detail ─────────────────────────────────────────── */

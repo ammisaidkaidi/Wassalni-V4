@@ -115,8 +115,23 @@ export interface TrajectoryRow {
 export interface WpointRow {
   id: string;
   position: number;
+  wilaya_id: number;
   nom_fr: string;
   nom_ar: string;
+}
+
+export interface DairaRow {
+  id: number;
+  nom_fr: string;
+  nom_ar: string;
+}
+
+export interface CommuneRow {
+  id: number;
+  daira_id: number;
+  nom_fr: string;
+  nom_ar: string;
+  code_postal: string | null;
 }
 
 export interface CustomerRow {

@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiError, api } from '../api';
 import type { Wilaya, WpointRow } from '../types';
-
-interface WpointRecord {
-  wilaya: string;
-  communes: string[];
-}
+import CommuneSelectorModal from './CommuneSelectorModal';
 
 interface WpointManagerProps {
   /** Which backend area owns the trajectory: admin can manage any, driver only their own. */
@@ -26,7 +22,8 @@ interface WpointManagerProps {
  *    *entire* current id list so the result stays contiguous;
  *  - wilaya_id/trajectory_id are immutable once set (trg_wpoint_guard /
  *    DZ206) — this UI never attempts to change them, only position and the
- *    attached communes;
+ *    attached communes (the Wilaya is shown read-only inside the commune
+ *    picker modal);
  *  - deleting a stop already used by an existing trip is blocked server-side
  *    (409 WPOINT_IN_USE) since trip_stop → wpoint cascades at the DB level;
  *    we just surface that error clearly instead of attempting to work around it.
@@ -37,9 +34,8 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
   const [msg, setMsg] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [openWpoint, setOpenWpoint] = useState<string | null>(null);
-  const [records, setRecords] = useState<Record<string, WpointRecord>>({});
-  const [refine, setRefine] = useState({ commune: '', daira: '' });
+  const [communeModalFor, setCommuneModalFor] = useState<WpointRow | null>(null);
+  const [communeCounts, setCommuneCounts] = useState<Record<string, number>>({});
 
   const onWpointsChangeRef = useRef(onWpointsChange);
   onWpointsChangeRef.current = onWpointsChange;
@@ -58,8 +54,8 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
   useEffect(() => {
     setMsg('');
     setError('');
-    setOpenWpoint(null);
-    setRecords({});
+    setCommuneModalFor(null);
+    setCommuneCounts({});
     load().catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [load]);
 
@@ -72,58 +68,6 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
       setWilayaId('');
       setMsg('✔ Arrêt ajouté');
       await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const toggleWpoint = async (wpointId: string): Promise<void> => {
-    if (openWpoint === wpointId) {
-      setOpenWpoint(null);
-      return;
-    }
-    setOpenWpoint(wpointId);
-    setRefine({ commune: '', daira: '' });
-    setError('');
-    try {
-      const r = await api<{ wpoint: WpointRecord }>(`${basePath}/trajectories/${trajectoryId}/wpoints/${wpointId}/record`);
-      setRecords((prev) => ({ ...prev, [wpointId]: r.wpoint }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const reloadRecord = async (wpointId: string): Promise<void> => {
-    const r = await api<{ wpoint: WpointRecord }>(`${basePath}/trajectories/${trajectoryId}/wpoints/${wpointId}/record`);
-    setRecords((prev) => ({ ...prev, [wpointId]: r.wpoint }));
-  };
-
-  const addCommune = async (wpointId: string): Promise<void> => {
-    setError('');
-    setMsg('');
-    try {
-      await api(`${basePath}/trajectories/${trajectoryId}/wpoints/${wpointId}/commune`, {
-        method: 'POST',
-        body: { commune: refine.commune },
-      });
-      setRefine({ ...refine, commune: '' });
-      await reloadRecord(wpointId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const addDaira = async (wpointId: string): Promise<void> => {
-    setError('');
-    setMsg('');
-    try {
-      const r = await api<{ added: number }>(`${basePath}/trajectories/${trajectoryId}/wpoints/${wpointId}/daira`, {
-        method: 'POST',
-        body: { daira: refine.daira },
-      });
-      setMsg(`✔ ${r.added} commune(s) de la daïra ajoutée(s)`);
-      setRefine({ ...refine, daira: '' });
-      await reloadRecord(wpointId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -155,11 +99,10 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
     try {
       await api(`${basePath}/trajectories/${trajectoryId}/wpoints/${wpointId}`, { method: 'DELETE' });
       setMsg('✔ Arrêt supprimé');
-      if (openWpoint === wpointId) setOpenWpoint(null);
       await load();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'WPOINT_IN_USE') {
-        setError("Impossible de supprimer : cet arrêt est utilisé par au moins un voyage existant.");
+        setError('Impossible de supprimer : cet arrêt est utilisé par au moins un voyage existant.');
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -180,6 +123,11 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
                   {w.position}. {w.nom_fr}
                 </strong>{' '}
                 <span className="muted">({w.nom_ar})</span>
+                {communeCounts[w.id] !== undefined && (
+                  <span className="muted small">
+                    — {communeCounts[w.id]} commune{communeCounts[w.id] > 1 ? 's' : ''}
+                  </span>
+                )}
                 <button
                   type="button"
                   className="btn ghost small"
@@ -198,41 +146,13 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
                 >
                   ↓
                 </button>
-                <button type="button" className="btn ghost small" onClick={() => void toggleWpoint(w.id)}>
-                  {openWpoint === w.id ? 'Masquer' : 'Affiner (communes)'}
+                <button type="button" className="btn ghost small" onClick={() => setCommuneModalFor(w)}>
+                  Gérer les communes
                 </button>
                 <button type="button" className="btn danger small" onClick={() => void remove(w.id, w.nom_fr)}>
                   Supprimer
                 </button>
               </div>
-              {openWpoint === w.id && (
-                <div className="wpoint-refine">
-                  <p className="muted small">
-                    Communes sélectionnées :{' '}
-                    {records[w.id]?.communes.length ? records[w.id].communes.join(', ') : 'toute la wilaya (aucune restriction)'}
-                  </p>
-                  <div className="form-inline">
-                    <input
-                      placeholder="Nom de commune"
-                      value={refine.commune}
-                      onChange={(e) => setRefine({ ...refine, commune: e.target.value })}
-                    />
-                    <button type="button" className="btn ghost small" onClick={() => void addCommune(w.id)} disabled={!refine.commune.trim()}>
-                      + Commune
-                    </button>
-                  </div>
-                  <div className="form-inline">
-                    <input
-                      placeholder="Nom de daïra (ajoute toutes ses communes)"
-                      value={refine.daira}
-                      onChange={(e) => setRefine({ ...refine, daira: e.target.value })}
-                    />
-                    <button type="button" className="btn ghost small" onClick={() => void addDaira(w.id)} disabled={!refine.daira.trim()}>
-                      + Daïra
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           </li>
         ))}
@@ -251,6 +171,22 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
         </label>
         <button className="btn primary">Ajouter</button>
       </form>
+
+      {communeModalFor && (
+        <CommuneSelectorModal
+          basePath={basePath}
+          trajectoryId={trajectoryId}
+          wpointId={communeModalFor.id}
+          wilayaId={communeModalFor.wilaya_id}
+          wilayaNomFr={communeModalFor.nom_fr}
+          wilayaNomAr={communeModalFor.nom_ar}
+          onClose={() => setCommuneModalFor(null)}
+          onSaved={(count) => {
+            setCommuneCounts((prev) => ({ ...prev, [communeModalFor.id]: count }));
+            setMsg('✔ Communes mises à jour');
+          }}
+        />
+      )}
     </div>
   );
 }

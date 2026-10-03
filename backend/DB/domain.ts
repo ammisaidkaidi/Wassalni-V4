@@ -334,6 +334,64 @@ export class DomainRepository {
     return (await this.db.callScalar<number>('select_daira', wpointId, dairaName)) ?? 0;
   }
 
+  /** Current commune selection of a wpoint, as ids (in insertion order). Daira is never stored — only resolved communes are. */
+  async wpointCommuneIds(wpointId: string): Promise<number[]> {
+    const rows = await this.db.raw<{ commune_id: number }>(
+      'select commune_id from wpoint_commune where wpoint_id = $1 order by sort_key',
+      [wpointId],
+    );
+    return rows.map((r) => r.commune_id);
+  }
+
+  /**
+   * Replaces a wpoint's entire commune selection in one atomic statement
+   * (diff: removes communes no longer selected, adds newly selected ones).
+   * Used by the WPoint commune-picker modal's Confirm action — the modal
+   * never calls the API while the user is just clicking around, only once,
+   * with the final chosen set, so Cancel never needs a server round trip.
+   *
+   * The Wilaya itself is immutable and never touched here (trg_wpoint_guard
+   * / DZ206) — every commune id is validated to belong to the wpoint's own
+   * wilaya before anything is written, on top of the DB's own
+   * (commune_id, wilaya_id) composite FK which would reject a mismatch anyway.
+   */
+  async setWpointCommunes(wpointId: string, communeIds: number[]): Promise<number> {
+    const wp = await this.db.selectOne<{ wilaya_id: number }>('wpoint', { columns: ['wilaya_id'], where: { id: wpointId } });
+    if (!wp) throw new Error('WPoint introuvable');
+
+    const uniqueIds = Array.from(new Set(communeIds));
+    if (uniqueIds.length === 0) {
+      await this.db.raw('delete from wpoint_commune where wpoint_id = $1', [wpointId]);
+      return 0;
+    }
+
+    const params: unknown[] = [wpointId, wp.wilaya_id, ...uniqueIds];
+    const idPlaceholders = uniqueIds.map((_, i) => `$${i + 3}`).join(', ');
+
+    const check = await this.db.raw<{ n: number }>(
+      `select count(*)::int as n from commune where wilaya_id = $2 and id in (${idPlaceholders})`,
+      params,
+    );
+    if ((check[0]?.n ?? 0) !== uniqueIds.length) {
+      throw new Error("Une ou plusieurs communes ne correspondent pas à la wilaya de ce WPoint");
+    }
+
+    const keepValues = uniqueIds.map((_, i) => `($${i + 3}::int)`).join(', ');
+    await this.db.raw(
+      `with keep(commune_id) as (values ${keepValues}),
+            del as (
+              delete from wpoint_commune
+               where wpoint_id = $1
+                 and commune_id not in (select commune_id from keep)
+            )
+       insert into wpoint_commune (wpoint_id, wilaya_id, commune_id)
+       select $1, $2, k.commune_id from keep k
+       on conflict (wpoint_id, commune_id) do nothing`,
+      params,
+    );
+    return uniqueIds.length;
+  }
+
   /** True if this wpoint is used as a stop by at least one trip (deleting it would cascade and silently break that trip). */
   async wpointHasTripStops(wpointId: string): Promise<boolean> {
     const rows = await this.db.raw<{ one: number }>('select 1 as one from trip_stop where wpoint_id = $1 limit 1', [wpointId]);

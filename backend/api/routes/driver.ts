@@ -162,7 +162,7 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
     wrap(async (req, res) => {
       res.json({
         wpoints: await db.raw(
-          `select wp.id, wp.position, w.nom_fr, w.nom_ar
+          `select wp.id, wp.position, wp.wilaya_id, w.nom_fr, w.nom_ar
              from wpoint wp join wilaya w on w.id = wp.wilaya_id
             where wp.trajectory_id = $1
             order by wp.position`,
@@ -210,6 +210,30 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       const { daira } = z.object({ daira: z.string().trim().min(1) }).parse(req.body);
       const added = await repo.selectDaira(uuidParam(req.params.wpointId), daira);
       res.json({ added });
+    }),
+  );
+
+  router.get(
+    '/trajectories/:id/wpoints/:wpointId/communes',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      res.json({ commune_ids: await repo.wpointCommuneIds(uuidParam(req.params.wpointId)) });
+    }),
+  );
+  router.put(
+    '/trajectories/:id/wpoints/:wpointId/communes',
+    wrap(async (req, res) => {
+      uuidParam(req.params.id);
+      const { commune_ids } = z.object({ commune_ids: z.array(z.number().int().min(1)) }).parse(req.body);
+      try {
+        const count = await repo.setWpointCommunes(uuidParam(req.params.wpointId), commune_ids);
+        res.json({ ok: true, count });
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('wilaya de ce WPoint')) {
+          throw new ApiError(400, 'BAD_COMMUNE', err.message);
+        }
+        throw err;
+      }
     }),
   );
 

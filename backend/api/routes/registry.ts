@@ -66,7 +66,7 @@ export function registryRoutes(db: DBHelper, repo: DomainRepository): Router {
     wrap(async (req, res) => {
       res.json({
         communes: await db.select('commune', {
-          columns: ['id', 'nom_fr', 'nom_ar', 'code_postal'],
+          columns: ['id', 'daira_id', 'nom_fr', 'nom_ar', 'code_postal'],
           where: { wilaya_id: intParam(req) },
           orderBy: 'nom_fr',
         }),
