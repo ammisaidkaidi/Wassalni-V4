@@ -536,17 +536,17 @@ Use available driver GPS information.
 
 Implement:
 
-[ ] current driver position
+[x] current driver position
 
-[ ] upcoming stops
+[x] upcoming stops
 
-[ ] estimated arrival
+[x] estimated arrival
 
-[ ] update mechanism
+[x] update mechanism
 
-[ ] customer display
+[x] customer display
 
-[ ] driver display
+[x] driver display
 
 Do not fabricate ETA when insufficient location data exists.
 
@@ -554,17 +554,17 @@ PHASE 5 — DRIVER BOOKING OPERATIONS
 
 TASK 5.1 — Driver approval workflow
 
-[ ] pending requests
+[x] pending requests
 
-[ ] request details
+[x] request details
 
-[ ] approve
+[x] approve
 
-[ ] reject
+[x] reject
 
-[ ] capacity revalidation during approval
+[x] capacity revalidation during approval
 
-[ ] correct reservation transition
+[x] correct reservation transition
 
 TASK 5.2 — Driver manifest
 
@@ -584,19 +584,19 @@ reservation seat count
 
 TASK 5.3 — No-show system
 
-[ ] customer no-show
+[x] customer no-show
 
-[ ] driver no-show
+[x] driver no-show
 
-[ ] record occurrence
+[x] record occurrence
 
-[ ] count occurrences
+[x] count occurrences
 
-[ ] configurable strike threshold
+[x] configurable strike threshold
 
-[ ] automatic flagging
+[x] automatic flagging
 
-[ ] reputation impact
+[x] reputation impact
 
 PHASE 6 — DRIVER KYC AND TRUST
 
@@ -604,29 +604,29 @@ TASK 6.1 — Driver KYC
 
 Support upload/review of:
 
-[ ] identity document
+[x] identity document
 
-[ ] driving license
+[x] driving license
 
-[ ] vehicle registration
+[x] vehicle registration
 
-[ ] insurance
+[x] insurance
 
 Implement:
 
-[ ] submission
+[x] submission
 
-[ ] admin review queue
+[x] admin review queue
 
-[ ] approve
+[x] approve
 
-[ ] reject
+[x] reject
 
-[ ] rejection reason
+[x] rejection reason
 
-[ ] correction/resubmission
+[x] correction/resubmission
 
-[ ] status tracking
+[x] status tracking
 
 TASK 6.2 — Vehicle inspection
 

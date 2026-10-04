@@ -1,5 +1,6 @@
 import type { QueryRow, SupabaseConnection } from './connection';
 import { DBHelper, type Where } from './DBHelper';
+import { WILAYA_CENTROIDS } from './wilayaCentroids';
 
 // ── domain types ──────────────────────────────────────────────────────────────
 
@@ -152,6 +153,8 @@ export interface CustomerRow {
   gps_lat: string | null;
   gps_lon: string | null;
   created_at: string;
+  no_show_count: number;
+  flagged_at: string | null;
 }
 
 const CUSTOMER_PROFILE_COLS = [
@@ -168,6 +171,8 @@ const CUSTOMER_PROFILE_COLS = [
   'gps_lat',
   'gps_lon',
   'created_at',
+  'no_show_count',
+  'flagged_at',
 ];
 
 export interface WilayaOverviewRow {
@@ -201,6 +206,78 @@ export interface TripManifestRow {
   dropoff_lon: string | null;
 }
 
+/** One row per boarding/alighting passenger at a stop manifest entry (Task 5.2). */
+export interface StopManifestPassenger {
+  reservation_id: string;
+  code: string;
+  customer_name: string;
+  seats: number;
+}
+
+/** Per-stop boarding/alighting/seat-count/remaining-capacity breakdown (Task 5.2). */
+export interface StopManifestEntry {
+  wpoint_id: string;
+  position: number;
+  wpoint_name: string;
+  wilaya_name: string;
+  boarding: StopManifestPassenger[];
+  alighting: StopManifestPassenger[];
+  seats_entering: number;
+  seats_leaving: number;
+  seats_aboard_after: number;
+  remaining_capacity: number;
+}
+
+/** Why no live ETA could be computed for a stop — never fabricate one. */
+export type EtaUnavailableReason = 'not_in_progress' | 'no_location' | 'stale_location' | 'no_reference_coordinates';
+
+export interface StopEtaEntry {
+  wpoint_id: string;
+  position: number;
+  wpoint_name: string;
+  wilaya_name: string;
+  eta: string | null;
+  distance_km: number | null;
+  reason: EtaUnavailableReason | null;
+}
+
+export interface TripEtaResult {
+  /** Seconds since the last GPS ping used for this estimate, or null if none exists. */
+  position_age_seconds: number | null;
+  stops: StopEtaEntry[];
+}
+
+export interface NoShowEventRow {
+  id: string;
+  trip_id: string | null;
+  reservation_id: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  driver_id: string | null;
+  driver_name: string | null;
+  kind: 'customer' | 'driver';
+  notes: string | null;
+  recorded_at: string;
+  trip_code: string | null;
+}
+
+export interface KycDocumentRow {
+  id: string;
+  driver_id: string;
+  driver_name: string;
+  doc_type: 'identity' | 'license' | 'vehicle_registration' | 'insurance';
+  file_path: string;
+  file_name: string;
+  mime_type: string;
+  status: 'pending' | 'approved' | 'rejected';
+  rejection_reason: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  submitted_at: string;
+  updated_at: string;
+}
+
 export interface DriverProfileRow {
   id: string;
   full_name: string;
@@ -209,6 +286,8 @@ export interface DriverProfileRow {
   email: string | null;
   address: string | null;
   vehicle_id: string | null;
+  no_show_count: number;
+  flagged_at: string | null;
 }
 
 export interface DriverReservationRow {
@@ -311,6 +390,10 @@ export const DOMAIN_ERRORS: Readonly<Record<string, string>> = {
   DZ603: 'Pickup must come before dropoff on the trajectory',
   DZ604: 'Commune is not among the ones configured for this stop',
   DZ605: 'GPS coordinates fall outside Algeria',
+  DZ309: 'Driver no-show can only be recorded on a trip that has not started',
+  DZ701: 'Unknown KYC document id',
+  DZ702: 'KYC document has already been approved or rejected',
+  DZ703: 'A rejection reason is required',
 };
 
 export interface DomainErrorInfo {
@@ -732,7 +815,7 @@ export class DomainRepository {
 
   async getDriverProfile(driverId: string): Promise<DriverProfileRow | null> {
     return this.db.selectOne<DriverProfileRow>('driver', {
-      columns: ['id', 'full_name', 'nin', 'phone', 'email', 'address', 'vehicle_id'],
+      columns: ['id', 'full_name', 'nin', 'phone', 'email', 'address', 'vehicle_id', 'no_show_count', 'flagged_at'],
       where: { id: driverId },
     });
   }
@@ -847,6 +930,175 @@ export class DomainRepository {
         order by r.created_at`,
       [tripId],
     );
+  }
+
+  /**
+   * Boarding/alighting manifest per stop (Task 5.2): for every stop on the
+   * trip's trajectory, who boards there, who alights there, how many seats
+   * that represents, and the running aboard-count / remaining capacity
+   * immediately after that stop. Computed in TS from the ordered stop list
+   * + each active reservation's pickup/dropoff wpoint — not duplicated SQL
+   * logic, just a different read shape over the same rows getTripManifest
+   * already reads.
+   */
+  async getTripStopManifest(tripId: string): Promise<StopManifestEntry[]> {
+    const trip = await this.db.selectOne<{ capacity: number }>('trip', {
+      where: { id: tripId },
+      columns: ['capacity'],
+    });
+    if (!trip) return [];
+
+    const stops = await this.db.raw<{ wpoint_id: string; position: number; wpoint_name: string; wilaya_name: string }>(
+      `select ts.wpoint_id, wp.position, w.nom_fr as wpoint_name, w.nom_fr as wilaya_name
+         from trip_stop ts
+         join wpoint wp on wp.id = ts.wpoint_id
+         join wilaya w  on w.id = wp.wilaya_id
+        where ts.trip_id = $1
+        order by wp.position`,
+      [tripId],
+    );
+
+    const reservations = await this.db.raw<{
+      id: string;
+      code: string;
+      seats: number;
+      customer_name: string;
+      pickup_wpoint_id: string | null;
+      dropoff_wpoint_id: string | null;
+    }>(
+      `select r.id, r.code, r.seats, cs.full_name as customer_name,
+              r.pickup_wpoint_id, r.dropoff_wpoint_id
+         from reservation r
+         join customer cs on cs.id = r.customer_id
+        where r.trip_id = $1 and r.status in ('pending','confirmed','completed')`,
+      [tripId],
+    );
+
+    let aboard = 0;
+    return stops.map((stop) => {
+      const boarding = reservations
+        .filter((r) => r.pickup_wpoint_id === stop.wpoint_id)
+        .map((r) => ({ reservation_id: r.id, code: r.code, customer_name: r.customer_name, seats: r.seats }));
+      const alighting = reservations
+        .filter((r) => r.dropoff_wpoint_id === stop.wpoint_id)
+        .map((r) => ({ reservation_id: r.id, code: r.code, customer_name: r.customer_name, seats: r.seats }));
+      const seats_entering = boarding.reduce((n, r) => n + r.seats, 0);
+      const seats_leaving = alighting.reduce((n, r) => n + r.seats, 0);
+      aboard = aboard - seats_leaving + seats_entering;
+      return {
+        wpoint_id: stop.wpoint_id,
+        position: stop.position,
+        wpoint_name: stop.wpoint_name,
+        wilaya_name: stop.wilaya_name,
+        boarding,
+        alighting,
+        seats_entering,
+        seats_leaving,
+        seats_aboard_after: aboard,
+        remaining_capacity: trip.capacity - aboard,
+      };
+    });
+  }
+
+  // ── Live ETA (Task 4.3) ──────────────────────────────────────────────────
+
+  /** Straight-line (haversine) distance in km between two lat/lon points. */
+  private static haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  /** How old a GPS ping can be and still be trusted for an ETA estimate. */
+  private static readonly ETA_STALE_SECONDS = 20 * 60;
+  /** Assumed average intercity road speed (km/h), including stops — a rough
+   *  heuristic in the absence of real route/traffic data; never presented
+   *  as more precise than it is. */
+  private static readonly ETA_ASSUMED_SPEED_KMH = 55;
+
+  /**
+   * Live ETA to every stop still on the trip, estimated from the driver's
+   * (or failing that, the vehicle's) last known GPS ping and a straight-line
+   * distance to each stop's wilaya chief-town coordinate — there is no
+   * route-polyline data in this schema to do better. Deliberately returns
+   * `eta: null` with a `reason` instead of fabricating a number whenever the
+   * trip hasn't started, no location has ever been reported, the last
+   * report is stale, or a wilaya has no reference coordinate.
+   */
+  async estimateTripEtas(tripId: string): Promise<TripEtaResult> {
+    const trip = await this.db.selectOne<{ status: TripStatus; driver_id: string | null; vehicle_id: string | null }>(
+      'trip',
+      { where: { id: tripId }, columns: ['status', 'driver_id', 'vehicle_id'] },
+    );
+    const stops = await this.db.raw<{ wpoint_id: string; position: number; wpoint_name: string; wilaya_name: string; wilaya_code: string }>(
+      `select ts.wpoint_id, wp.position, w.nom_fr as wpoint_name, w.nom_fr as wilaya_name, w.code as wilaya_code
+         from trip_stop ts
+         join wpoint wp on wp.id = ts.wpoint_id
+         join wilaya w  on w.id = wp.wilaya_id
+        where ts.trip_id = $1
+        order by wp.position`,
+      [tripId],
+    );
+
+    const bare = (reason: EtaUnavailableReason, positionAge: number | null): TripEtaResult => ({
+      position_age_seconds: positionAge,
+      stops: stops.map((s) => ({
+        wpoint_id: s.wpoint_id,
+        position: s.position,
+        wpoint_name: s.wpoint_name,
+        wilaya_name: s.wilaya_name,
+        eta: null,
+        distance_km: null,
+        reason,
+      })),
+    });
+
+    if (!trip || trip.status !== 'in_progress') return bare('not_in_progress', null);
+
+    let loc: LastLocationRow | null = trip.driver_id ? await this.getDriverLocation(trip.driver_id) : null;
+    if (!loc && trip.vehicle_id) loc = await this.getVehicleLocation(trip.vehicle_id);
+    if (!loc) return bare('no_location', null);
+
+    const ageSeconds = Math.max(0, Math.round((Date.now() - new Date(loc.recorded_at).getTime()) / 1000));
+    if (ageSeconds > DomainRepository.ETA_STALE_SECONDS) return bare('stale_location', ageSeconds);
+
+    const lat = Number(loc.gps_lat);
+    const lon = Number(loc.gps_lon);
+    const now = Date.now();
+
+    return {
+      position_age_seconds: ageSeconds,
+      stops: stops.map((s) => {
+        const centroid = WILAYA_CENTROIDS[s.wilaya_code];
+        if (!centroid) {
+          return {
+            wpoint_id: s.wpoint_id,
+            position: s.position,
+            wpoint_name: s.wpoint_name,
+            wilaya_name: s.wilaya_name,
+            eta: null,
+            distance_km: null,
+            reason: 'no_reference_coordinates',
+          };
+        }
+        const distanceKm = DomainRepository.haversineKm(lat, lon, centroid.lat, centroid.lon);
+        const hours = distanceKm / DomainRepository.ETA_ASSUMED_SPEED_KMH;
+        const eta = new Date(now + hours * 3_600_000).toISOString();
+        return {
+          wpoint_id: s.wpoint_id,
+          position: s.position,
+          wpoint_name: s.wpoint_name,
+          wilaya_name: s.wilaya_name,
+          eta,
+          distance_km: Math.round(distanceKm * 10) / 10,
+          reason: null,
+        };
+      }),
+    };
   }
 
   // ── GPS tracking (driver / vehicle last known location) ────────────────────
@@ -1050,6 +1302,111 @@ export class DomainRepository {
           and p.amount - p.refunded_amount > 0
         order by p.paid_at nulls last, p.created_at`,
     );
+  }
+
+  // ── No-show strikes (Task 5.3) ──────────────────────────────────────────────
+
+  /** Admin-configurable strike threshold; defaults to 3 if never set. */
+  async getNoShowThreshold(): Promise<number> {
+    const row = await this.db.selectOne<{ value: string }>('app_setting', {
+      where: { key: 'no_show_strike_threshold' },
+      columns: ['value'],
+    });
+    return row ? Number(row.value) : 3;
+  }
+
+  async setNoShowThreshold(value: number): Promise<void> {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new DomainValidationError('DZ001', 'Le seuil doit être un entier positif');
+    }
+    await this.db.upsert('app_setting', { key: 'no_show_strike_threshold', value: String(value), updated_at: new Date().toISOString() }, ['key']);
+  }
+
+  /** Flag-only (Task 5.3 scope decision): records the occurrence and lets the
+   *  existing trg_no_show_event_apply trigger bump the counter / flagged_at
+   *  on customer or driver. No automatic booking/publishing restriction is
+   *  applied — flags are surfaced to admins, who decide what to do. */
+  async recordDriverNoShow(tripId: string, notes?: string | null): Promise<void> {
+    await this.db.callScalar('record_driver_no_show', tripId, notes ?? null);
+  }
+
+  async listNoShowEvents(filter?: { kind?: 'customer' | 'driver'; customerId?: string; driverId?: string }): Promise<NoShowEventRow[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter?.kind) {
+      params.push(filter.kind);
+      where.push(`e.kind = $${params.length}`);
+    }
+    if (filter?.customerId) {
+      params.push(filter.customerId);
+      where.push(`e.customer_id = $${params.length}`);
+    }
+    if (filter?.driverId) {
+      params.push(filter.driverId);
+      where.push(`e.driver_id = $${params.length}`);
+    }
+    const whereSql = where.length ? `where ${where.join(' and ')}` : '';
+    return this.db.raw<NoShowEventRow>(
+      `select e.id, e.trip_id, e.reservation_id, e.customer_id, cs.full_name as customer_name,
+              e.driver_id, d.full_name as driver_name, e.kind, e.notes, e.recorded_at,
+              tr.code as trip_code
+         from no_show_event e
+         left join customer cs on cs.id = e.customer_id
+         left join driver d    on d.id  = e.driver_id
+         left join trip tr     on tr.id = e.trip_id
+         ${whereSql}
+        order by e.recorded_at desc`,
+      params,
+    );
+  }
+
+  // ── Driver KYC (Task 6.1) ────────────────────────────────────────────────
+
+  async submitKycDocument(
+    driverId: string,
+    docType: KycDocumentRow['doc_type'],
+    file: { path: string; fileName: string; mimeType: string },
+  ): Promise<string> {
+    const row = await this.db.insert<{ id: string }>('kyc_document', {
+      driver_id: driverId,
+      doc_type: docType,
+      file_path: file.path,
+      file_name: file.fileName,
+      mime_type: file.mimeType,
+    });
+    return row.id;
+  }
+
+  private static readonly KYC_SELECT = `
+    select k.id, k.driver_id, dr.full_name as driver_name, k.doc_type, k.file_path, k.file_name, k.mime_type,
+           k.status, k.rejection_reason, k.reviewed_by, au.full_name as reviewed_by_name,
+           k.reviewed_at, k.submitted_at, k.updated_at
+      from kyc_document k
+      join driver dr on dr.id = k.driver_id
+      left join app_user au on au.id = k.reviewed_by`;
+
+  async getKycDocument(id: string): Promise<KycDocumentRow | null> {
+    const rows = await this.db.raw<KycDocumentRow>(`${DomainRepository.KYC_SELECT} where k.id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async listKycDocumentsForDriver(driverId: string): Promise<KycDocumentRow[]> {
+    return this.db.raw<KycDocumentRow>(`${DomainRepository.KYC_SELECT} where k.driver_id = $1 order by k.submitted_at desc`, [driverId]);
+  }
+
+  async listKycDocumentsAdmin(status?: KycDocumentRow['status']): Promise<KycDocumentRow[]> {
+    const sql = status
+      ? `${DomainRepository.KYC_SELECT} where k.status = $1 order by k.submitted_at`
+      : `${DomainRepository.KYC_SELECT} order by k.submitted_at desc`;
+    return this.db.raw<KycDocumentRow>(sql, status ? [status] : []);
+  }
+
+  async approveKycDocument(id: string, adminId: string): Promise<void> {
+    await this.db.callScalar('kyc_approve', id, adminId);
+  }
+
+  async rejectKycDocument(id: string, adminId: string, reason: string): Promise<void> {
+    await this.db.callScalar('kyc_reject', id, adminId, reason);
   }
 }
 

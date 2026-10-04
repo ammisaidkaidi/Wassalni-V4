@@ -232,3 +232,109 @@ administrative lookup tables, not PostGIS boundaries).
 - A wpoint restricted (via `selectCommune`) to only the "Blida" commune: a dropoff commune of "Beni Mered" (same wilaya, different commune) was rejected `DZ604`; "Blida" itself was accepted; a commune from a completely different wilaya ("Alger Centre") was rejected `DZ203`.
 - A GPS pin in Paris (48.8566, 2.3522) was rejected `DZ605`; a pin in Algiers (36.75, 3.06) was accepted.
 - (Task 3.1) Searching Alger→Blida filtered to the "Blida" commune found the trip; filtered to "Beni Mered" (not served by that trip's wpoint) correctly excluded it.
+
+## 6. Live ETA (Task 4.3) — read-only, not a state machine
+
+Not a state machine, but documented here for the same reason as §3/§5: it's
+live-tested server-side logic driven by trip/reservation state. ETA is a
+**computed, never-stored** value — there is no "ETA" column anywhere.
+
+`estimateTripEtas(tripId)` returns one entry per remaining stop. For each it
+returns `eta: null` with a `reason` instead of a number whenever it cannot
+honestly compute one:
+
+| Reason | When |
+|---|---|
+| `not_in_progress` | Trip isn't `in_progress` yet (nothing to estimate against — matches the trip-lifecycle machine in §2). |
+| `no_location` | Trip is `in_progress` but the driver (or their vehicle) has never sent a GPS ping. |
+| `stale_location` | Latest ping exists but is older than 20 minutes — treated as unreliable rather than extrapolated. |
+| (missing centroid) | A wilaya has no entry in `WILAYA_CENTROIDS` — defensive, should not happen for the 58 seeded wilayas. |
+| *(none — real ETA)* | Fresh ping + trip in progress: haversine distance from last-known position to the stop's wilaya centroid, at an assumed 55 km/h average, plus `distance_km` and `position_age_seconds` for transparency. |
+
+### Access control
+- `GET /api/driver/trips/:id/eta` — driver, own trip only, all remaining stops.
+- `GET /api/reservations/:id/eta` — customer, own reservation only, **their
+  own dropoff stop only** (never the full manifest or raw coordinates of the
+  driver) — a reservation-scoped view, not a trip-scoped one, to avoid
+  leaking other passengers' stops or exact driver location to a customer.
+
+### Test evidence (live, Task 4.3 section of `live-verification.ts`)
+- `scheduled` trip: every stop reports `not_in_progress`, no fabricated ETA.
+- `in_progress` trip, never pinged: `no_location`, no fabricated ETA.
+- Fresh ping inserted: every stop gets a non-null ETA + distance; `position_age_seconds` < 60.
+- Same ping backdated 40 minutes: `stale_location`, no fabricated ETA.
+
+## 7. No-show strikes (Task 5.3)
+
+Not a state machine on an enum column — an append-only ledger
+(`no_show_event`) plus a derived, trigger-maintained counter/flag.
+
+### Customer no-show
+Happens only as a side effect of the trip-lifecycle `in_progress → completed`
+transition (§2): `sp_close_trip()` classifies any reservation still
+`confirmed` with `amount_paid = 0` as `no_show` (unchanged from before this
+task) and **now additionally** inserts a `no_show_event(kind='customer', ...)`
+row in the same statement — one source of truth for "was this a no-show",
+no duplicated logic between the classification and the ledger write.
+
+### Driver no-show
+A new, independent action: `record_driver_no_show(trip_id, notes)`. Legal
+**only** while the trip is still `scheduled` (the driver never started it —
+`DZ309` otherwise, including on an already-`cancelled` trip). Effects, all in
+one statement: inserts `no_show_event(kind='driver', ...)`, cancels the trip
+(`sp_cancel_trip`-equivalent transition to `cancelled`, reusing §2's cascade
+so active reservations are cancelled too — there is no "driver didn't show
+up but the trip stays bookable" state).
+
+### Strike counting & flagging
+`trg_no_show_event_apply` (`AFTER INSERT` on `no_show_event`) increments the
+matching `customer.no_show_count` or `driver.no_show_count`, and sets
+`flagged_at = now()` the moment the count reaches the configurable
+`app_setting.no_show_strike_threshold` (admin-editable via
+`GET`/`PUT /api/admin/settings/no-show-threshold`, default 3). Already-flagged
+accounts aren't re-flagged/timestamp-bumped on further strikes.
+
+**Explicit scope decision (user-directed):** flag-only. Reaching the
+threshold is purely a visible signal for admins (badge + count in the
+Chauffeurs/Clients tables, plus the full ledger in the new "Absences" tab) —
+it does **not** automatically block booking (customer) or publishing/starting
+trips (driver). Any restriction remains a manual admin action outside this
+mechanism.
+
+### Test evidence (live, Task 5.3 section of `live-verification.ts`)
+- An unpaid `confirmed` reservation on a trip that gets closed: reservation → `no_show`, a matching `no_show_event` ledger row is recorded, `customer.no_show_count` increments by exactly 1.
+- `record_driver_no_show` on a `scheduled` trip: succeeds, cancels the trip, cancels its pending reservation, records the ledger row with the given note.
+- A second `record_driver_no_show` call on the now-`cancelled` trip: rejected `DZ309`.
+
+## 8. Driver KYC document review (Task 6.1)
+
+`kyc_document.status` enum: `pending` → `approved` | `rejected` (terminal
+either way — a correction/resubmission is a **new row**, not a reopened one,
+so the review history is permanent and auditable).
+
+| From ↓ \ To → | pending | approved | rejected |
+|---|---|---|---|
+| **pending** | — | ✅ `kyc_approve(doc, admin)` | ✅ `kyc_reject(doc, admin, reason)` |
+| **approved** | ❌ `DZ702` | ❌ `DZ702` | ❌ `DZ702` |
+| **rejected** | ❌ `DZ702` | ❌ `DZ702` | ❌ `DZ702` |
+
+- `kyc_reject` additionally requires a non-blank `reason` (`DZ703`) — a
+  rejection is never silent; the reason is shown back to the driver.
+- Both functions raise `DZ701` if the document id doesn't exist.
+- A driver may have many `kyc_document` rows per `doc_type` over time (every
+  submission attempt is kept); "current status for a doc type" = the latest
+  row for that `(driver_id, doc_type)` ordered by `submitted_at`.
+- Real files (JPEG/PNG/WEBP/PDF, ≤8MB) are stored on disk under
+  `backend/uploads/kyc/<driver_id>/` and only ever served through an
+  auth-checked streaming route — never a public/static path — so "admin can
+  view/download the actual uploaded file" doesn't also mean "the file is
+  guessable/public".
+
+### Test evidence (live, Task 6.1 section of `live-verification.ts`)
+- Fresh submission starts `pending`.
+- Approve: succeeds, records `status='approved'` + `reviewed_by`.
+- Approve again on the same (now-approved) document: rejected `DZ702`.
+- Reject with a reason on a different, still-`pending` document: succeeds, records `status='rejected'` + the reason.
+- Reject with an empty reason: rejected `DZ703`.
+- Review (approve) of an unknown document id: rejected `DZ701`.
+- `listKycDocumentsForDriver` returns the driver's full 3-document submission history.

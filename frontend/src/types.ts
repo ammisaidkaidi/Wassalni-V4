@@ -84,7 +84,9 @@ export interface ReservationRow {
   currency: string;
   notes: string | null;
   created_at: string;
+  trip_id: string;
   trip_code: string;
+  trip_status: string;
   departure_at: string;
   trajectory_name: string;
   amount_paid: string;
@@ -120,6 +122,8 @@ export interface DriverRow {
   nin: string;
   phone: string;
   email: string | null;
+  no_show_count?: number;
+  flagged_at?: string | null;
 }
 
 export interface VehicleRow {
@@ -168,6 +172,8 @@ export interface CustomerRow {
   home_wilaya_id: number | null;
   home_commune_id: number | null;
   created_at: string;
+  no_show_count?: number;
+  flagged_at?: string | null;
 }
 
 export interface AdminReservationRow {
@@ -278,6 +284,8 @@ export interface DriverProfileRow {
   email: string | null;
   address: string | null;
   vehicle_id: string | null;
+  no_show_count: number;
+  flagged_at: string | null;
 }
 
 export interface DriverReservationRow {
@@ -323,6 +331,81 @@ export interface TripManifestRow {
   pickup_lon: string | null;
   dropoff_lat: string | null;
   dropoff_lon: string | null;
+}
+
+export interface StopManifestPassenger {
+  reservation_id: string;
+  code: string;
+  customer_name: string;
+  seats: number;
+}
+
+export interface StopManifestEntry {
+  wpoint_id: string;
+  position: number;
+  wpoint_name: string;
+  wilaya_name: string;
+  boarding: StopManifestPassenger[];
+  alighting: StopManifestPassenger[];
+  seats_entering: number;
+  seats_leaving: number;
+  seats_aboard_after: number;
+  remaining_capacity: number;
+}
+
+export type EtaUnavailableReason = 'not_in_progress' | 'no_location' | 'stale_location' | 'no_reference_coordinates';
+
+export interface StopEtaEntry {
+  wpoint_id: string;
+  position: number;
+  wpoint_name: string;
+  wilaya_name: string;
+  eta: string | null;
+  distance_km: number | null;
+  reason: EtaUnavailableReason | null;
+}
+
+export interface TripEtaResult {
+  position_age_seconds: number | null;
+  stops: StopEtaEntry[];
+}
+
+export interface ReservationEtaResult {
+  position_age_seconds: number | null;
+  stop: StopEtaEntry | null;
+}
+
+export interface NoShowEventRow {
+  id: string;
+  trip_id: string | null;
+  reservation_id: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  driver_id: string | null;
+  driver_name: string | null;
+  kind: 'customer' | 'driver';
+  notes: string | null;
+  recorded_at: string;
+  trip_code: string | null;
+}
+
+export type KycDocType = 'identity' | 'license' | 'vehicle_registration' | 'insurance';
+
+export interface KycDocumentRow {
+  id: string;
+  driver_id: string;
+  driver_name: string;
+  doc_type: KycDocType;
+  file_path: string;
+  file_name: string;
+  mime_type: string;
+  status: 'pending' | 'approved' | 'rejected';
+  rejection_reason: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  submitted_at: string;
+  updated_at: string;
 }
 
 export interface DomainErrorRow {

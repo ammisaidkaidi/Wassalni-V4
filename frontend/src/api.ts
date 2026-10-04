@@ -38,6 +38,24 @@ function withSessionParam(path: string): string {
   return `${path}${sep}sid=${encodeURIComponent(token)}`;
 }
 
+/** URL for a session-authenticated non-JSON resource (e.g. a KYC file), usable directly in an <a href>/<img src>. */
+export function fileUrl(path: string): string {
+  return withSessionParam(path);
+}
+
+/** Multipart upload (e.g. a KYC document) — browser sets the multipart boundary itself, so no Content-Type header here. */
+export async function apiUpload<T = unknown>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) form.append(k, v);
+  form.append('file', file);
+  const res = await fetch(withSessionParam(path), { method: 'POST', body: form, credentials: 'same-origin' });
+  const data = (await res.json().catch(() => ({}))) as { error?: { code?: string; message?: string } };
+  if (!res.ok) {
+    throw new ApiError(data.error?.message ?? `Erreur ${res.status}`, data.error?.code ?? 'UNKNOWN', res.status);
+  }
+  return data as T;
+}
+
 /** JSON fetch helper — session sent as a `?sid=` query param, throws ApiError on !ok. */
 export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
   const res = await fetch(withSessionParam(path), {

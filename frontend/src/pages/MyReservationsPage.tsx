@@ -2,7 +2,52 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
-import type { ReservationRow } from '../types';
+import type { ReservationEtaResult, ReservationRow } from '../types';
+
+const ETA_REASON_LABEL: Record<string, string> = {
+  not_in_progress: "Le voyage n'a pas encore démarré",
+  no_location: 'Position du chauffeur pas encore reçue',
+  stale_location: 'Dernière position connue trop ancienne',
+  no_reference_coordinates: 'Estimation indisponible pour cette destination',
+};
+
+/** Task 4.3 — live ETA to this reservation's own dropoff, shown only once the trip is actually under way. */
+function LiveEta({ reservationId }: { reservationId: string }) {
+  const [eta, setEta] = useState<ReservationEtaResult | null>(null);
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setEta(await api<ReservationEtaResult>(`/api/reservations/${reservationId}/eta`));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [reservationId]);
+
+  useEffect(() => {
+    void load();
+    const id = window.setInterval(() => void load(), 30_000);
+    return () => window.clearInterval(id);
+  }, [load]);
+
+  if (err) return null;
+  const stop = eta?.stop;
+
+  return (
+    <div className="meta">
+      {stop?.eta ? (
+        <span>
+          🚐 Arrivée estimée : {fmtDateTime(stop.eta)} ({stop.distance_km} km)
+        </span>
+      ) : (
+        <span className="muted small">🚐 {stop?.reason ? ETA_REASON_LABEL[stop.reason] : 'ETA indisponible'}</span>
+      )}
+      <button className="btn ghost small" onClick={() => void load()}>
+        Actualiser
+      </button>
+    </div>
+  );
+}
 
 export default function MyReservationsPage() {
   const { user, loading } = useAuth();
@@ -97,6 +142,7 @@ export default function MyReservationsPage() {
                 </span>
               )}
             </div>
+            {r.trip_status === 'in_progress' && r.status === 'confirmed' && <LiveEta reservationId={r.id} />}
             <div className="foot">
               <span className={`chip ${r.status}`}>{r.status}</span>
               {(r.status === 'pending' || r.status === 'confirmed') && (

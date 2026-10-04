@@ -50,6 +50,10 @@ const USER_MESSAGES: Readonly<Record<string, string>> = {
   DZ603: 'Le point de prise en charge doit précéder le point de dépose sur l\u2019itinéraire.',
   DZ604: 'Cette commune n\u2019est pas desservie par cet arrêt — choisissez une autre commune.',
   DZ605: 'Ces coordonnées GPS semblent se situer en dehors de l\u2019Algérie.',
+  DZ309: 'L\u2019absence du conducteur ne peut être signalée que sur un voyage qui n\u2019a pas encore démarré.',
+  DZ701: 'Document KYC introuvable.',
+  DZ702: 'Ce document a déjà été examiné (approuvé ou refusé).',
+  DZ703: 'Un motif de refus est requis.',
 };
 
 type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;

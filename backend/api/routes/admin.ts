@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
 import type { DBHelper } from '../../DB/DBHelper';
@@ -84,7 +85,10 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/drivers',
     wrap(async (_req, res) => {
       res.json({
-        drivers: await db.select('driver', { columns: ['id', 'full_name', 'nin', 'phone', 'email'], orderBy: 'full_name' }),
+        drivers: await db.select('driver', {
+          columns: ['id', 'full_name', 'nin', 'phone', 'email', 'no_show_count', 'flagged_at'],
+          orderBy: 'full_name',
+        }),
       });
     }),
   );
@@ -408,6 +412,14 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
       res.json({ ok: true });
     }),
   );
+  router.post(
+    '/trips/:id/driver-no-show',
+    wrap(async (req, res) => {
+      const notes = typeof req.body?.notes === 'string' ? req.body.notes : null;
+      await repo.recordDriverNoShow(uuidParam(req.params.id), notes);
+      res.json({ ok: true });
+    }),
+  );
   router.patch(
     '/trips/:id',
     wrap(async (req, res) => {
@@ -511,6 +523,71 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/refunds-worklist',
     wrap(async (_req, res) => {
       res.json({ worklist: await repo.refundWorklist() });
+    }),
+  );
+
+  // ── Task 5.3: no-show strikes ──────────────────────────────────────────────
+
+  router.get(
+    '/no-show-events',
+    wrap(async (req, res) => {
+      const kind = req.query.kind === 'customer' || req.query.kind === 'driver' ? req.query.kind : undefined;
+      const customerId = typeof req.query.customer_id === 'string' ? uuidParam(req.query.customer_id) : undefined;
+      const driverId = typeof req.query.driver_id === 'string' ? uuidParam(req.query.driver_id) : undefined;
+      res.json({ events: await repo.listNoShowEvents({ kind, customerId, driverId }) });
+    }),
+  );
+
+  router.get(
+    '/settings/no-show-threshold',
+    wrap(async (_req, res) => {
+      res.json({ value: await repo.getNoShowThreshold() });
+    }),
+  );
+
+  router.put(
+    '/settings/no-show-threshold',
+    wrap(async (req, res) => {
+      const value = Number(req.body?.value);
+      await repo.setNoShowThreshold(value);
+      res.json({ value: await repo.getNoShowThreshold() });
+    }),
+  );
+
+  // ── Task 6.1: driver KYC review queue ──────────────────────────────────────
+
+  router.get(
+    '/kyc',
+    wrap(async (req, res) => {
+      const status = typeof req.query.status === 'string' ? (req.query.status as 'pending' | 'approved' | 'rejected') : undefined;
+      res.json({ documents: await repo.listKycDocumentsAdmin(status) });
+    }),
+  );
+
+  router.get(
+    '/kyc/:id/file',
+    wrap(async (req, res) => {
+      const doc = await repo.getKycDocument(uuidParam(req.params.id));
+      if (!doc) throw new ApiError(404, 'NOT_FOUND', 'Document introuvable');
+      res.setHeader('Content-Type', doc.mime_type);
+      res.sendFile(path.resolve(doc.file_path));
+    }),
+  );
+
+  router.post(
+    '/kyc/:id/approve',
+    wrap(async (req, res) => {
+      await repo.approveKycDocument(uuidParam(req.params.id), req.user!.id);
+      res.json({ document: await repo.getKycDocument(req.params.id) });
+    }),
+  );
+
+  router.post(
+    '/kyc/:id/reject',
+    wrap(async (req, res) => {
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
+      await repo.rejectKycDocument(uuidParam(req.params.id), req.user!.id, reason);
+      res.json({ document: await repo.getKycDocument(req.params.id) });
     }),
   );
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { api, fmtDateTime } from '../api';
+import { api, apiUpload, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
 import WpointManager from '../components/WpointManager';
@@ -8,9 +8,13 @@ import type {
   DriverProfileRow,
   DriverReservationRow,
   DriverTripRow,
+  KycDocType,
+  KycDocumentRow,
   PricePair,
   Stop,
+  StopManifestEntry,
   TrajectoryRow,
+  TripEtaResult,
   TripManifestRow,
   VehicleRow,
   Wilaya,
@@ -31,14 +35,27 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: 'Annulé',
 };
 
-type Tab = 'trips' | 'current' | 'reservations' | 'trajectories' | 'settings';
+type Tab = 'trips' | 'current' | 'reservations' | 'trajectories' | 'kyc' | 'settings';
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'trips', label: 'Mes voyages' },
   { id: 'current', label: 'Trajet en cours' },
   { id: 'reservations', label: 'Réservations' },
   { id: 'trajectories', label: 'Trajectoires' },
+  { id: 'kyc', label: 'Mes documents' },
   { id: 'settings', label: 'Paramètres' },
 ];
+
+const KYC_DOC_LABEL: Record<KycDocType, string> = {
+  identity: "Pièce d'identité",
+  license: 'Permis de conduire',
+  vehicle_registration: 'Carte grise du véhicule',
+  insurance: "Attestation d'assurance",
+};
+const KYC_STATUS_LABEL: Record<KycDocumentRow['status'], string> = {
+  pending: 'En attente de vérification',
+  approved: 'Approuvé',
+  rejected: 'Refusé',
+};
 
 export default function DriverPage() {
   const { user, loading } = useAuth();
@@ -67,6 +84,7 @@ export default function DriverPage() {
       {tab === 'current' && <TrajetEnCoursTab />}
       {tab === 'reservations' && <ReservationsTab />}
       {tab === 'trajectories' && <TrajectoiresTab />}
+      {tab === 'kyc' && <KycTab />}
       {tab === 'settings' && <ParametresTab />}
     </section>
   );
@@ -369,7 +387,15 @@ interface CurrentTripDetailData {
   trip: DriverTripRow;
   stops: Stop[];
   manifest: TripManifestRow[];
+  stop_manifest: StopManifestEntry[];
 }
+
+const ETA_REASON_LABEL: Record<string, string> = {
+  not_in_progress: "Le voyage n'a pas encore démarré",
+  no_location: "Aucune position GPS reçue pour l'instant",
+  stale_location: 'Dernière position reçue trop ancienne',
+  no_reference_coordinates: 'Coordonnées de référence indisponibles pour cette wilaya',
+};
 
 /** Picks the trip to feature: the one actively in_progress, else the soonest upcoming scheduled one. */
 function pickCurrentTrip(trips: DriverTripRow[]): DriverTripRow | null {
@@ -387,6 +413,8 @@ function TrajetEnCoursTab() {
   const [wilayas, setWilayas] = useState<Wilaya[]>([]);
   const [msg, setMsg] = useState('');
   const [loaded, setLoaded] = useState(false);
+  const [eta, setEta] = useState<TripEtaResult | null>(null);
+  const [etaMsg, setEtaMsg] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -413,6 +441,27 @@ function TrajetEnCoursTab() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadEta = useCallback(async (tripId: string) => {
+    try {
+      setEta(await api<TripEtaResult>(`/api/driver/trips/${tripId}/eta`));
+    } catch (e) {
+      setEtaMsg(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  // Task 4.3 — live ETA: recompute on a short interval while the trip is
+  // in_progress (it's derived on read from the latest GPS ping, never
+  // stored, so re-fetching is the "update mechanism").
+  useEffect(() => {
+    if (!trip || trip.status !== 'in_progress') {
+      setEta(null);
+      return;
+    }
+    void loadEta(trip.id);
+    const id = window.setInterval(() => void loadEta(trip.id), 30_000);
+    return () => window.clearInterval(id);
+  }, [trip, loadEta]);
 
   const wilayaCoords = useMemo(() => {
     const m = new Map<number, { lat: number; lon: number }>();
@@ -481,6 +530,89 @@ function TrajetEnCoursTab() {
           <p className="empty">Coordonnées indisponibles pour cette trajectoire.</p>
         ) : (
           <TripMap stops={mapStops} pins={mapPins} height={420} />
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h2 style={{ marginTop: 0 }}>ETA en direct par arrêt</h2>
+        {etaMsg && <p className="alert error">{etaMsg}</p>}
+        {trip.status !== 'in_progress' ? (
+          <p className="muted small">{ETA_REASON_LABEL.not_in_progress}</p>
+        ) : (
+          <>
+            <p className="muted small">
+              {eta?.position_age_seconds != null
+                ? `Position reçue il y a ${Math.round(eta.position_age_seconds / 60)} min.`
+                : 'En attente de position GPS…'}{' '}
+              <button className="btn ghost small" onClick={() => void loadEta(trip.id)}>
+                Actualiser
+              </button>
+            </p>
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Arrêt</th>
+                    <th>Distance</th>
+                    <th>Arrivée estimée</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(eta?.stops ?? []).map((s) => (
+                    <tr key={s.wpoint_id}>
+                      <td>{s.wpoint_name}</td>
+                      <td>{s.distance_km != null ? `${s.distance_km} km` : '—'}</td>
+                      <td>{s.eta ? fmtDateTime(s.eta) : <span className="muted small">{s.reason ? ETA_REASON_LABEL[s.reason] : '—'}</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="muted small">
+              Estimation approximative (distance à vol d'oiseau depuis la dernière position connue, vitesse moyenne
+              supposée) — pas un calcul d'itinéraire routier précis.
+            </p>
+          </>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h2 style={{ marginTop: 0 }}>Manifeste par arrêt</h2>
+        {!data || data.stop_manifest.length === 0 ? (
+          <p className="empty">Aucun arrêt pour ce voyage.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Arrêt</th>
+                  <th>Montent</th>
+                  <th>Descendent</th>
+                  <th>Places +</th>
+                  <th>Places -</th>
+                  <th>À bord après</th>
+                  <th>Places restantes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.stop_manifest.map((s) => (
+                  <tr key={s.wpoint_id}>
+                    <td>{s.wpoint_name}</td>
+                    <td>
+                      {s.boarding.length === 0 ? '—' : s.boarding.map((p) => `${p.customer_name} (${p.seats})`).join(', ')}
+                    </td>
+                    <td>
+                      {s.alighting.length === 0 ? '—' : s.alighting.map((p) => `${p.customer_name} (${p.seats})`).join(', ')}
+                    </td>
+                    <td>{s.seats_entering}</td>
+                    <td>{s.seats_leaving}</td>
+                    <td>{s.seats_aboard_after}</td>
+                    <td>{s.remaining_capacity}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
@@ -933,6 +1065,11 @@ function ParametresTab() {
         <p className="muted small">
           Identité officielle (NIN {profile.nin}) non modifiable ici — contactez l'administrateur pour toute correction.
         </p>
+        {profile.no_show_count > 0 && (
+          <p className={`alert ${profile.flagged_at ? 'error' : 'info'}`}>
+            ⚠ {profile.no_show_count} absence(s) enregistrée(s){profile.flagged_at ? ' — compte signalé à l\u2019administration' : ''}.
+          </p>
+        )}
         <form className="form-grid" onSubmit={(e) => void saveProfile(e)}>
           <label>
             Nom complet
@@ -992,6 +1129,105 @@ function ParametresTab() {
           </label>
           <button className="btn primary">{vehicle ? 'Mettre à jour' : 'Enregistrer'}</button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Mes documents (KYC — Task 6.1) ──────────────────────────────────────────
+
+function KycTab() {
+  const [docs, setDocs] = useState<KycDocumentRow[]>([]);
+  const [msg, setMsg] = useState('');
+  const [busyType, setBusyType] = useState<KycDocType | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api<{ documents: KycDocumentRow[] }>('/api/driver/kyc');
+      setDocs(r.documents);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const latestByType = useMemo(() => {
+    const m = new Map<KycDocType, KycDocumentRow>();
+    for (const d of docs) {
+      const existing = m.get(d.doc_type);
+      if (!existing || new Date(d.submitted_at) > new Date(existing.submitted_at)) m.set(d.doc_type, d);
+    }
+    return m;
+  }, [docs]);
+
+  const upload = async (docType: KycDocType, file: File | undefined): Promise<void> => {
+    if (!file) return;
+    setBusyType(docType);
+    setMsg('');
+    try {
+      await apiUpload('/api/driver/kyc', file, { doc_type: docType });
+      setMsg('✔ Document envoyé pour vérification');
+      await load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyType(null);
+    }
+  };
+
+  const docTypes = Object.keys(KYC_DOC_LABEL) as KycDocType[];
+
+  return (
+    <div>
+      <p className="muted">
+        Téléversez vos documents justificatifs (identité, permis, carte grise, assurance). Un administrateur les vérifie
+        puis les approuve ou les refuse avec un motif ; en cas de refus, téléversez une nouvelle version ci-dessous.
+      </p>
+      {msg && <p className="alert info">{msg}</p>}
+      <div className="grid">
+        {docTypes.map((docType) => {
+          const current = latestByType.get(docType);
+          return (
+            <div key={docType} className="card">
+              <h3 style={{ marginTop: 0 }}>{KYC_DOC_LABEL[docType]}</h3>
+              {current ? (
+                <>
+                  <p>
+                    <span className={`chip ${current.status}`}>{KYC_STATUS_LABEL[current.status]}</span>
+                  </p>
+                  <p className="muted small">
+                    Envoyé le {fmtDateTime(current.submitted_at)} —{' '}
+                    <a href={fileUrl(`/api/driver/kyc/${current.id}/file`)} target="_blank" rel="noreferrer">
+                      voir le fichier
+                    </a>
+                  </p>
+                  {current.status === 'rejected' && current.rejection_reason && (
+                    <p className="alert error">Motif du refus : {current.rejection_reason}</p>
+                  )}
+                </>
+              ) : (
+                <p className="muted small">Aucun document envoyé pour le moment.</p>
+              )}
+              <label className="btn ghost small" style={{ display: 'inline-block', cursor: 'pointer' }}>
+                {busyType === docType ? 'Envoi…' : current ? 'Envoyer une nouvelle version' : 'Téléverser'}
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,application/pdf"
+                  style={{ display: 'none' }}
+                  disabled={busyType !== null}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    void upload(docType, file);
+                  }}
+                />
+              </label>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

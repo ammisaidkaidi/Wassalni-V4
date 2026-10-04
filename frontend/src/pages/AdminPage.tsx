@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { api, fmtDateTime } from '../api';
+import { api, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import WpointManager from '../components/WpointManager';
 import type {
@@ -8,6 +8,9 @@ import type {
   CustomerRow,
   DomainErrorRow,
   DriverRow,
+  KycDocType,
+  KycDocumentRow,
+  NoShowEventRow,
   PaymentRow,
   RefundWorklistRow,
   TrackingRow,
@@ -17,7 +20,18 @@ import type {
   WpointRow,
 } from '../types';
 
-type Tab = 'trips' | 'trajectories' | 'drivers' | 'vehicles' | 'customers' | 'reservations' | 'payments' | 'tracking' | 'errors';
+type Tab =
+  | 'trips'
+  | 'trajectories'
+  | 'drivers'
+  | 'vehicles'
+  | 'customers'
+  | 'reservations'
+  | 'payments'
+  | 'tracking'
+  | 'no-show'
+  | 'kyc'
+  | 'errors';
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'trips', label: 'Voyages' },
@@ -28,8 +42,17 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'reservations', label: 'Réservations' },
   { id: 'payments', label: 'Paiements' },
   { id: 'tracking', label: 'Suivi GPS' },
+  { id: 'no-show', label: 'Absences' },
+  { id: 'kyc', label: 'KYC chauffeurs' },
   { id: 'errors', label: 'Codes erreurs' },
 ];
+
+const KYC_DOC_LABEL: Record<KycDocType, string> = {
+  identity: "Pièce d'identité",
+  license: 'Permis de conduire',
+  vehicle_registration: 'Carte grise du véhicule',
+  insurance: "Attestation d'assurance",
+};
 
 export default function AdminPage() {
   const { user, loading } = useAuth();
@@ -74,6 +97,8 @@ export default function AdminPage() {
       {tab === 'reservations' && <ReservationsTab />}
       {tab === 'payments' && <PaymentsTab />}
       {tab === 'tracking' && <TrackingTab />}
+      {tab === 'no-show' && <NoShowTab />}
+      {tab === 'kyc' && <KycReviewTab />}
       {tab === 'errors' && <ErrorsTab />}
     </section>
   );
@@ -149,6 +174,21 @@ function TripsTab() {
     try {
       await api(`/api/admin/trips/${id}/${action}`, { method: 'POST', body: {} });
       setMsg(`✔ ${action} — ok`);
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Task 5.3 — the driver never started a scheduled trip: record the strike
+  // (flag-only — see NoShowTab) and cancel the trip since it can't proceed.
+  const reportDriverNoShow = async (id: string): Promise<void> => {
+    if (!confirm("Confirmer : le conducteur ne s'est pas présenté pour ce voyage ? Le voyage sera annulé.")) return;
+    const notes = window.prompt('Note (optionnel) :', '') ?? undefined;
+    setMsg('');
+    try {
+      await api(`/api/admin/trips/${id}/driver-no-show`, { method: 'POST', body: { notes } });
+      setMsg('✔ Absence du conducteur enregistrée, voyage annulé');
       await load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
@@ -259,6 +299,11 @@ function TripsTab() {
                   {(t.status === 'scheduled' || t.status === 'in_progress') && (
                     <button className="btn danger small" onClick={() => void act(t.id, 'cancel')}>
                       Annuler
+                    </button>
+                  )}
+                  {t.status === 'scheduled' && (
+                    <button className="btn danger small" onClick={() => void reportDriverNoShow(t.id)}>
+                      Absence conducteur
                     </button>
                   )}
                 </td>
@@ -460,6 +505,7 @@ function DriversTab() {
               <th>Nom</th>
               <th>NIN</th>
               <th>Téléphone</th>
+              <th>Absences</th>
               <th />
             </tr>
           </thead>
@@ -470,6 +516,10 @@ function DriversTab() {
                   <td>{d.full_name}</td>
                   <td>{d.nin}</td>
                   <td>{d.phone}</td>
+                  <td>
+                    {d.no_show_count ?? 0}
+                    {d.flagged_at && <span className="chip cancelled" style={{ marginLeft: 6 }}>⚠ signalé</span>}
+                  </td>
                   <td style={{ display: 'flex', gap: 6 }}>
                     <button className="btn ghost small" onClick={() => setAccountFor(accountFor === d.id ? null : d.id)}>
                       {accountFor === d.id ? 'Fermer' : 'Accès chauffeur'}
@@ -481,7 +531,7 @@ function DriversTab() {
                 </tr>
                 {accountFor === d.id && (
                   <tr>
-                    <td colSpan={4}>
+                    <td colSpan={5}>
                       <DriverAccountPanel driverId={d.id} defaultEmail={d.email} />
                     </td>
                   </tr>
@@ -716,6 +766,7 @@ function CustomersTab() {
               <th>Téléphone</th>
               <th>Email</th>
               <th>Créé le</th>
+              <th>Absences</th>
             </tr>
           </thead>
           <tbody>
@@ -725,11 +776,15 @@ function CustomersTab() {
                 <td>{c.phone}</td>
                 <td>{c.email ?? '—'}</td>
                 <td>{fmtDateTime(c.created_at)}</td>
+                <td>
+                  {c.no_show_count ?? 0}
+                  {c.flagged_at && <span className="chip cancelled" style={{ marginLeft: 6 }}>⚠ signalé</span>}
+                </td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={4} className="empty">
+                <td colSpan={5} className="empty">
                   Aucun client.
                 </td>
               </tr>
@@ -1205,6 +1260,227 @@ function ErrorsTab() {
                 <td>{r.description}</td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Absences (no-show strikes — Task 5.3) ───────────────────────────────────
+
+function NoShowTab() {
+  const [events, setEvents] = useState<NoShowEventRow[]>([]);
+  const [kindFilter, setKindFilter] = useState<'' | 'customer' | 'driver'>('');
+  const [threshold, setThreshold] = useState<number | null>(null);
+  const [thresholdInput, setThresholdInput] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const load = useCallback(async (kind: '' | 'customer' | 'driver') => {
+    try {
+      const qs = kind ? `?kind=${kind}` : '';
+      const [e, t] = await Promise.all([
+        api<{ events: NoShowEventRow[] }>(`/api/admin/no-show-events${qs}`),
+        api<{ value: number }>('/api/admin/settings/no-show-threshold'),
+      ]);
+      setEvents(e.events);
+      setThreshold(t.value);
+      setThresholdInput(String(t.value));
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load(kindFilter);
+  }, [load, kindFilter]);
+
+  const saveThreshold = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setMsg('');
+    try {
+      await api('/api/admin/settings/no-show-threshold', { method: 'PUT', body: { value: Number(thresholdInput) } });
+      setMsg('✔ Seuil mis à jour');
+      await load(kindFilter);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div>
+      <p className="muted">
+        Chaque absence (client non présenté au point de montée, ou conducteur n'ayant pas démarré son voyage) est
+        enregistrée ici. Au-delà du seuil, le compte concerné est marqué « signalé » dans les onglets Chauffeurs /
+        Clients — à charge pour un administrateur de décider d'une suite (aucun blocage automatique).
+      </p>
+      {msg && <p className="alert info">{msg}</p>}
+      <form className="card form-grid" onSubmit={(e) => void saveThreshold(e)} style={{ maxWidth: 320 }}>
+        <label>
+          Seuil de signalement (nombre d'absences)
+          {threshold !== null && (
+            <input type="number" min={1} required value={thresholdInput} onChange={(e) => setThresholdInput(e.target.value)} />
+          )}
+        </label>
+        <button className="btn primary">Enregistrer le seuil</button>
+      </form>
+
+      <div style={{ margin: '12px 0' }}>
+        <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value as '' | 'customer' | 'driver')}>
+          <option value="">Tous</option>
+          <option value="customer">Clients</option>
+          <option value="driver">Chauffeurs</option>
+        </select>
+      </div>
+
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Personne</th>
+              <th>Voyage</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.map((ev) => (
+              <tr key={ev.id}>
+                <td>{fmtDateTime(ev.recorded_at)}</td>
+                <td>{ev.kind === 'customer' ? 'Client' : 'Chauffeur'}</td>
+                <td>{ev.kind === 'customer' ? ev.customer_name : ev.driver_name}</td>
+                <td>{ev.trip_code ?? '—'}</td>
+                <td>{ev.notes ?? '—'}</td>
+              </tr>
+            ))}
+            {events.length === 0 && (
+              <tr>
+                <td colSpan={5} className="empty">
+                  Aucune absence enregistrée.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── KYC chauffeurs (Task 6.1) ────────────────────────────────────────────────
+
+function KycReviewTab() {
+  const [docs, setDocs] = useState<KycDocumentRow[]>([]);
+  const [statusFilter, setStatusFilter] = useState<'' | KycDocumentRow['status']>('pending');
+  const [msg, setMsg] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async (status: '' | KycDocumentRow['status']) => {
+    try {
+      const qs = status ? `?status=${status}` : '';
+      setDocs((await api<{ documents: KycDocumentRow[] }>(`/api/admin/kyc${qs}`)).documents);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load(statusFilter);
+  }, [load, statusFilter]);
+
+  const approve = async (id: string): Promise<void> => {
+    setBusyId(id);
+    setMsg('');
+    try {
+      await api(`/api/admin/kyc/${id}/approve`, { method: 'POST', body: {} });
+      setMsg('✔ Document approuvé');
+      await load(statusFilter);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const reject = async (id: string): Promise<void> => {
+    const reason = window.prompt('Motif du refus :', '');
+    if (!reason) return;
+    setBusyId(id);
+    setMsg('');
+    try {
+      await api(`/api/admin/kyc/${id}/reject`, { method: 'POST', body: { reason } });
+      setMsg('✔ Document refusé');
+      await load(statusFilter);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div>
+      <p className="muted">File de vérification des documents KYC envoyés par les chauffeurs (identité, permis, carte grise, assurance).</p>
+      {msg && <p className="alert info">{msg}</p>}
+      <div style={{ margin: '12px 0' }}>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as '' | KycDocumentRow['status'])}>
+          <option value="pending">En attente</option>
+          <option value="approved">Approuvés</option>
+          <option value="rejected">Refusés</option>
+          <option value="">Tous</option>
+        </select>
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Chauffeur</th>
+              <th>Type</th>
+              <th>Envoyé le</th>
+              <th>Fichier</th>
+              <th>Statut</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {docs.map((d) => (
+              <tr key={d.id}>
+                <td>{d.driver_name}</td>
+                <td>{KYC_DOC_LABEL[d.doc_type]}</td>
+                <td>{fmtDateTime(d.submitted_at)}</td>
+                <td>
+                  <a href={fileUrl(`/api/admin/kyc/${d.id}/file`)} target="_blank" rel="noreferrer">
+                    voir
+                  </a>
+                </td>
+                <td>
+                  <span className={`chip ${d.status === 'approved' ? 'confirmed' : d.status === 'rejected' ? 'cancelled' : 'pending'}`}>
+                    {d.status}
+                  </span>
+                  {d.status === 'rejected' && d.rejection_reason && <div className="muted small">{d.rejection_reason}</div>}
+                </td>
+                <td className="actions">
+                  {d.status === 'pending' && (
+                    <>
+                      <button className="btn primary small" disabled={busyId === d.id} onClick={() => void approve(d.id)}>
+                        Approuver
+                      </button>
+                      <button className="btn danger small" disabled={busyId === d.id} onClick={() => void reject(d.id)}>
+                        Refuser
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {docs.length === 0 && (
+              <tr>
+                <td colSpan={6} className="empty">
+                  Aucun document.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

@@ -38,7 +38,9 @@ interface ReservationRow {
   dropoff_wpoint_id: string | null;
   notes: string | null;
   created_at: string;
+  trip_id: string;
   trip_code: string;
+  trip_status: string;
   departure_at: string;
   trajectory_name: string;
   pickup_lat: string | null;
@@ -66,7 +68,7 @@ function reservationSelect(db: DBHelper, whereSql: string, params: unknown[]): P
             r.pickup_lat, r.pickup_lon, r.dropoff_lat, r.dropoff_lon,
             r.pickup_commune_id, cpc.nom_fr as pickup_commune_name,
             r.dropoff_commune_id, cdc.nom_fr as dropoff_commune_name,
-            t.code as trip_code, t.departure_at, tj.name as trajectory_name,
+            t.id as trip_id, t.code as trip_code, t.status as trip_status, t.departure_at, tj.name as trajectory_name,
             amount_paid(r.id) as amount_paid,
             case when r.status = 'cancelled' then 0
                  else greatest(r.total_price - amount_paid(r.id), 0) end as balance_due,
@@ -140,6 +142,29 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
     '/me',
     wrap(async (req, res) => {
       res.json({ reservations: await reservationSelect(db, 'r.customer_id = $1', [req.user!.customer_id!]) });
+    }),
+  );
+
+  router.get(
+    '/:id/eta',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const row = await db.selectOne<{ id: string; customer_id: string; trip_id: string; dropoff_wpoint_id: string | null }>(
+        'reservation',
+        { columns: ['id', 'customer_id', 'trip_id', 'dropoff_wpoint_id'], where: { id } },
+      );
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      const result = await repo.estimateTripEtas(row.trip_id);
+      // Only this reservation's own dropoff is relevant to the customer — never
+      // expose the full stop list / driver position granularity to them.
+      const mine = row.dropoff_wpoint_id
+        ? result.stops.find((s) => s.wpoint_id === row.dropoff_wpoint_id)
+        : result.stops[result.stops.length - 1];
+      res.json({ position_age_seconds: result.position_age_seconds, stop: mine ?? null });
     }),
   );
 

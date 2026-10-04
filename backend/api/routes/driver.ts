@@ -1,10 +1,43 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Router } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import type { DBHelper } from '../../DB/DBHelper';
-import type { DomainRepository } from '../../DB/domain';
+import type { DomainRepository, KycDocumentRow } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
 import { requireAuth, requireDriver } from '../middleware/session';
 import { getTripDetailForDriver } from '../services/tripSearch';
+
+// Task 6.1 — KYC document uploads, stored on local disk under backend/uploads
+// (not web-served/static; only streamed back through an auth-checked route).
+const KYC_UPLOAD_ROOT = path.join(__dirname, '../../uploads/kyc');
+const KYC_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+const KYC_DOC_TYPES = ['identity', 'license', 'vehicle_registration', 'insurance'] as const;
+
+const kycUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, _file, cb) => {
+      const driverId = (req as unknown as { user: { driver_id: string } }).user.driver_id;
+      const dir = path.join(KYC_UPLOAD_ROOT, driverId);
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10);
+      cb(null, `${Date.now()}-${crypto.randomUUID()}${ext}`);
+    },
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!KYC_ALLOWED_MIME.has(file.mimetype)) {
+      cb(new ApiError(400, 'BAD_PARAM', 'Format de fichier non supporté (JPEG, PNG, WEBP ou PDF uniquement)'));
+      return;
+    }
+    cb(null, true);
+  },
+});
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -370,7 +403,17 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       await ownTripOrThrow(req, tripId);
       const detail = await getTripDetailForDriver(db, tripId);
       const manifest = await repo.getTripManifest(tripId);
-      res.json({ ...detail, manifest });
+      const stop_manifest = await repo.getTripStopManifest(tripId);
+      res.json({ ...detail, manifest, stop_manifest });
+    }),
+  );
+
+  router.get(
+    '/trips/:id/eta',
+    wrap(async (req, res) => {
+      const tripId = uuidParam(req.params.id);
+      await ownTripOrThrow(req, tripId);
+      res.json(await repo.estimateTripEtas(tripId));
     }),
   );
 
@@ -450,6 +493,46 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       if (ownerDriverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', "Cette réservation ne concerne pas vos voyages");
       await repo.cancelReservation(id);
       res.json({ ok: true });
+    }),
+  );
+
+  // ── Task 6.1: driver KYC document submission / status tracking ───────────
+
+  router.get(
+    '/kyc',
+    wrap(async (req, res) => {
+      res.json({ documents: await repo.listKycDocumentsForDriver(req.user!.driver_id!) });
+    }),
+  );
+
+  router.post(
+    '/kyc',
+    kycUpload.single('file'),
+    wrap(async (req, res) => {
+      const file = (req as unknown as { file?: Express.Multer.File }).file;
+      if (!file) throw new ApiError(400, 'BAD_PARAM', 'Fichier manquant');
+      const docType = req.body?.doc_type as string;
+      if (!KYC_DOC_TYPES.includes(docType as (typeof KYC_DOC_TYPES)[number])) {
+        fs.unlink(file.path, () => undefined);
+        throw new ApiError(400, 'BAD_PARAM', 'Type de document invalide');
+      }
+      const id = await repo.submitKycDocument(req.user!.driver_id!, docType as KycDocumentRow['doc_type'], {
+        path: file.path,
+        fileName: file.originalname,
+        mimeType: file.mimetype,
+      });
+      res.status(201).json({ document: await repo.getKycDocument(id) });
+    }),
+  );
+
+  router.get(
+    '/kyc/:id/file',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const doc = await repo.getKycDocument(id);
+      if (!doc || doc.driver_id !== req.user!.driver_id) throw new ApiError(404, 'NOT_FOUND', 'Document introuvable');
+      res.setHeader('Content-Type', doc.mime_type);
+      res.sendFile(path.resolve(doc.file_path));
     }),
   );
 

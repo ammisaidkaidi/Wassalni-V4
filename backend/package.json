@@ -22,9 +22,11 @@
     "test:live": "ts-node DB/tests/live-verification.ts"
   },
   "dependencies": {
+    "@types/multer": "^2.3.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "multer": "^2.4.0",
     "nodemailer": "^6.9.14",
     "pg": "^8.12.0",
     "zod": "^3.23.8"
