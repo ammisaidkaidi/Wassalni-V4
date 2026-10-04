@@ -35,6 +35,13 @@ export interface ApiConfig {
     /** Per-phone-number ceiling on OTP SMS in a rolling 24h window — independent of the per-IP /api/auth limiter, because SMS has a real per-message cost and a different abuse shape (targeting one victim's phone from many IPs). */
     otpMaxPerPhonePerDay: number;
   };
+  /** Task 18.1 — our own logical-backup scheduler (see DB/backup.ts and backend/BACKUP_RECOVERY.md). */
+  backup: {
+    /** How many days of local logical backups to keep before pruning. */
+    retentionDays: number;
+    /** Set to false to disable the automatic nightly backup ticker entirely (e.g. if an external backup system already covers this). */
+    enabled: boolean;
+  };
 }
 
 function intEnv(name: string, def: number): number {
@@ -87,6 +94,10 @@ export function loadApiConfig(): ApiConfig {
     sms: {
       provider: process.env.SMS_PROVIDER?.trim() || undefined,
       otpMaxPerPhonePerDay: intEnv('SMS_OTP_MAX_PER_PHONE_PER_DAY', 10),
+    },
+    backup: {
+      retentionDays: intEnv('BACKUP_RETENTION_DAYS', 14),
+      enabled: process.env.BACKUP_SCHEDULER_ENABLED !== 'false',
     },
   };
 }

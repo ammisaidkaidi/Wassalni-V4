@@ -1,6 +1,6 @@
 import { Pool, type PoolConfig } from 'pg';
 import type { DbConfig } from './config';
-import { SupabaseManagementApi } from './management-api';
+import { SupabaseManagementApi, type BackupStatus } from './management-api';
 import { inlineParams } from './sql-utils';
 
 export type ConnectionMode = 'direct' | 'management-api';
@@ -212,6 +212,31 @@ export class SupabaseConnection {
 
   async close(): Promise<void> {
     if (this.pool) await this.pool.end();
+  }
+
+  /**
+   * Task 18.2 — live Supabase-managed backup/PITR status, straight from the
+   * Management API, regardless of which transport is used for queries
+   * (works even in 'direct' mode, as long as SUPABASE_ACCESS_TOKEN is also
+   * set — the two credentials are independent of each other).
+   */
+  async getManagedBackupStatus(): Promise<{ available: true; status: BackupStatus } | { available: false; reason: string }> {
+    const token = this.config.supabaseAccessToken;
+    if (!token) {
+      return {
+        available: false,
+        reason:
+          'No SUPABASE_ACCESS_TOKEN configured — cannot query Supabase-managed backup/PITR status this way (only the database query transport is configured). Check the dashboard directly instead.',
+      };
+    }
+    const mgmt = this.mgmt ?? new SupabaseManagementApi(token);
+    try {
+      const ref = await mgmt.resolveProjectRef(this.projectRef ?? this.config.supabaseProjectRef);
+      const status = await mgmt.getBackupStatus(ref);
+      return { available: true, status };
+    } catch (err) {
+      return { available: false, reason: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   // ── internals ───────────────────────────────────────────────────────────────

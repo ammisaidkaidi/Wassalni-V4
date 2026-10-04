@@ -1,6 +1,7 @@
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
+import { createBackup, listBackups, pruneOldBackups, restoreDrill, verifyBackup } from '../DB/backup';
 import { DBHelper, DomainRepository, SupabaseConnection, loadDbConfig } from '../DB';
 import { AuthService } from './auth/authService';
 import { createMailer } from './auth/email';
@@ -59,6 +60,25 @@ async function main(): Promise<void> {
   }
   if (cfg.isProduction && !cfg.cookieSecure) {
     console.warn('⚠ PRODUCTION avec COOKIE_SECURE=false — les cookies de session ne seront pas marqués "secure". À utiliser uniquement derrière HTTPS.');
+  }
+  // Task 18.1/18.2 — backup & recovery (see backend/BACKUP_RECOVERY.md).
+  // Fire-and-forget: a slow/unreachable Management API must never delay
+  // startup — this is purely an informational heads-up in the logs.
+  conn
+    .getManagedBackupStatus()
+    .then((r) => {
+      if (!r.available) {
+        console.warn(`⚠ Could not determine Supabase-managed backup/PITR status: ${r.reason}`);
+      } else if (!r.status.pitrEnabled && r.status.backups.length === 0) {
+        console.warn(
+          '⚠ This Supabase project has NO managed backups and NO PITR enabled. Our own nightly logical backup ' +
+            '(see below) is the only safety net until this is addressed — see backend/BACKUP_RECOVERY.md.',
+        );
+      }
+    })
+    .catch(() => undefined);
+  if (!cfg.backup.enabled) {
+    console.warn('⚠ BACKUP_SCHEDULER_ENABLED=false — automatic nightly logical backups are OFF. Only manual `npm run db -- backup:run` / an external backup system cover this project.');
   }
   // Task 17.1/17.2 — SMS (notifications + 2FA alternative).
   if (smsSender.mode === 'sandbox' && !cfg.isProduction) {
@@ -207,12 +227,60 @@ async function main(): Promise<void> {
   }, smsIntervalMs);
   smsTimer.unref();
 
+  // Task 18.1 — nightly logical backup + self-verification + retention
+  // pruning. Same log-don't-crash, unref'd-interval pattern as the tickers
+  // above. A fresh backup is immediately verified (checksum + structural
+  // self-consistency + live row-count drift) so a silently-broken backup
+  // never goes unnoticed until the day it's actually needed.
+  let backupTimer: ReturnType<typeof setInterval> | undefined;
+  if (cfg.backup.enabled) {
+    const backupIntervalMs = 24 * 60 * 60_000;
+    const runBackupTick = (): void => {
+      createBackup(db)
+        .then(async (manifest) => {
+          const verify = await verifyBackup(manifest.id, db);
+          const pruned = pruneOldBackups(cfg.backup.retentionDays);
+          console.log(
+            `⏱ Backup: ${manifest.id} created (${manifest.tables.length} tables) — verify ${verify.ok ? 'OK' : 'FAILED: ' + verify.issues.join('; ')} — pruned ${pruned.length} old backup(s)`,
+          );
+          if (!verify.ok) console.error('✗ Freshly-created backup failed verification — investigate immediately:', verify.issues);
+        })
+        .catch((err) => console.error('✗ Scheduled backup failed:', err));
+    };
+    backupTimer = setInterval(runBackupTick, backupIntervalMs);
+    backupTimer.unref();
+  }
+
+  // Task 18.1 — weekly restore-drill: the real proof a backup is loadable,
+  // not just present on disk. Heavier than a plain verify (round-trips
+  // every row through a real CREATE TABLE + INSERT), so it runs far less
+  // often; always targets the isolated 'backup_drill' schema and cleans up
+  // after itself regardless of outcome (see DB/backup.ts).
+  let restoreDrillTimer: ReturnType<typeof setInterval> | undefined;
+  if (cfg.backup.enabled) {
+    const restoreDrillIntervalMs = 7 * 24 * 60 * 60_000;
+    const runRestoreDrillTick = (): void => {
+      const latest = listBackups()[0];
+      if (!latest) return;
+      restoreDrill(db, latest.id)
+        .then((result) => {
+          console.log(`⏱ Restore drill: ${latest.id} → ${result.ok ? 'OK' : 'FAILED: ' + result.issues.join('; ')} (${result.durationMs}ms)`);
+          if (!result.ok) console.error('✗ Restore drill failed — the latest backup may not actually be restorable:', result.issues);
+        })
+        .catch((err) => console.error('✗ Scheduled restore drill failed:', err));
+    };
+    restoreDrillTimer = setInterval(runRestoreDrillTick, restoreDrillIntervalMs);
+    restoreDrillTimer.unref();
+  }
+
   const shutdown = (): void => {
     console.log('Shutting down…');
     clearInterval(expiryTimer);
     clearInterval(lifecycleTimer);
     clearInterval(pushTimer);
     clearInterval(smsTimer);
+    if (backupTimer) clearInterval(backupTimer);
+    if (restoreDrillTimer) clearInterval(restoreDrillTimer);
     server.close(() => {
       conn.close().finally(() => process.exit(0));
     });

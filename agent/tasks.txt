@@ -1411,13 +1411,13 @@ TASK 18.1 — Backup verification
 
 Establish:
 
-[ ] backup policy
+[x] backup policy
 
-[ ] retention
+[x] retention
 
-[ ] restore procedure
+[x] restore procedure
 
-[ ] verification procedure
+[x] verification procedure
 
 TASK 18.2 — Point-in-time recovery
 
@@ -1425,13 +1425,13 @@ Verify that the production database has an appropriate PITR strategy.
 
 Document:
 
-[ ] recovery procedure
+[x] recovery procedure
 
-[ ] recovery point objective
+[x] recovery point objective
 
-[ ] recovery time objective
+[x] recovery time objective
 
-[ ] restoration verification
+[x] restoration verification
 
 PHASE 19 — TESTING
 

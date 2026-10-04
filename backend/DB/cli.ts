@@ -9,6 +9,7 @@
  *   npm run db -- <cmd> → everything below
  */
 
+import { createBackup, listBackups, pruneOldBackups, restoreDrill, verifyBackup } from './backup';
 import { loadDbConfig, maskSecret } from './config';
 import { SupabaseConnection } from './connection';
 import { DatabaseInitializer } from './DatabaseInitializer';
@@ -36,6 +37,22 @@ Commands:
   demo                     End-to-end demo: driver, vehicle, trajectory,
                            default price, create_trip, stops, publish,
                            prices, customer, reservation
+
+  -- Task 18.1/18.2 — backup & recovery (see backend/BACKUP_RECOVERY.md) --
+  backup:status            Live Supabase-managed backup/PITR status for this
+                           project (GET …/database/backups) — the ground
+                           truth, not an assumption
+  backup:run               Create a full logical backup (every public table)
+                           under backend/data/backups/
+  backup:list              List local backups (id, age, row counts, size)
+  backup:verify <id>       Checksum + structural integrity check, plus live
+                           row-count drift if the DB is reachable
+  backup:restore-drill <id> [schema]
+                           Prove the backup is actually loadable: restores
+                           every table's rows into an isolated scratch schema
+                           (default: backup_drill), verifies counts, drops it
+                           again. Refuses to ever target "public".
+  backup:prune [days]      Delete local backups older than [days] (default 14)
   help                     This help
 `;
 
@@ -175,6 +192,85 @@ async function main(): Promise<void> {
 
       case 'demo': {
         await demo(db);
+        break;
+      }
+
+      case 'backup:status': {
+        const result = await conn.getManagedBackupStatus();
+        if (!result.available) {
+          console.log(`⚠ Could not reach Supabase-managed backup status: ${result.reason}`);
+          break;
+        }
+        const s = result.status;
+        console.log(`Region: ${s.region}`);
+        console.log(`WAL-G (physical backup/WAL archiving) enabled: ${s.walgEnabled}`);
+        console.log(`PITR enabled: ${s.pitrEnabled}`);
+        console.log(`Managed backups on record: ${s.backups.length}`);
+        if (s.backups.length) console.table(s.backups);
+        if (!s.pitrEnabled && s.backups.length === 0) {
+          console.log(
+            '\n⚠ This project currently has NO Supabase-managed backups and NO PITR. ' +
+              'Our own logical backups (backup:run) are the only safety net until this is addressed — see backend/BACKUP_RECOVERY.md.',
+          );
+        }
+        break;
+      }
+
+      case 'backup:run': {
+        const manifest = await createBackup(db);
+        console.log(`✔ Backup ${manifest.id} created (${manifest.tables.length} tables, ${manifest.sizeBytes} bytes)`);
+        console.table(manifest.rowCounts);
+        break;
+      }
+
+      case 'backup:list': {
+        const backups = listBackups();
+        if (!backups.length) {
+          console.log('No local backups yet — run: npm run db -- backup:run');
+          break;
+        }
+        console.table(
+          backups.map((b) => ({
+            id: b.id,
+            createdAt: b.createdAt,
+            tables: b.tables.length,
+            rows: Object.values(b.rowCounts).reduce((a, c) => a + c, 0),
+            sizeBytes: b.sizeBytes,
+          })),
+        );
+        break;
+      }
+
+      case 'backup:verify': {
+        const id = positionals[0];
+        if (!id) throw new Error('usage: backup:verify <id>');
+        const result = await verifyBackup(id, db);
+        console.log(result.ok ? `✔ Backup ${id} verified OK (age ${result.ageHours.toFixed(1)}h)` : `✗ Backup ${id} FAILED verification`);
+        if (result.issues.length) console.log(result.issues.map((i) => `  - ${i}`).join('\n'));
+        if (result.drift) console.table(result.drift);
+        if (!result.ok) process.exitCode = 1;
+        break;
+      }
+
+      case 'backup:restore-drill': {
+        const id = positionals[0];
+        if (!id) throw new Error('usage: backup:restore-drill <id> [schema]');
+        const result = await restoreDrill(db, id, { schema: positionals[1] });
+        console.log(
+          result.ok
+            ? `✔ Restore drill for ${id} passed in ${result.durationMs}ms (scratch schema "${result.schema}", dropped afterwards)`
+            : `✗ Restore drill for ${id} FAILED`,
+        );
+        console.table(result.tables);
+        if (result.issues.length) console.log(result.issues.map((i) => `  - ${i}`).join('\n'));
+        if (!result.ok) process.exitCode = 1;
+        break;
+      }
+
+      case 'backup:prune': {
+        const days = positionals[0] !== undefined ? Number(positionals[0]) : 14;
+        const pruned = pruneOldBackups(days);
+        console.log(pruned.length ? `Pruned ${pruned.length} backup(s) older than ${days} day(s): ${pruned.join(', ')}` : `No backups older than ${days} day(s)`);
         break;
       }
 

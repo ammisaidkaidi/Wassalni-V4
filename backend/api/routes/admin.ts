@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
+import { createBackup, listBackups, pruneOldBackups, restoreDrill, verifyBackup } from '../../DB/backup';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import type { AuthService } from '../auth/authService';
@@ -1229,6 +1230,60 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/scheduler/run-trip-lifecycle-tick',
     wrap(async (_req, res) => {
       res.json(await repo.runTripLifecycleTick());
+    }),
+  );
+
+  // ── Task 18.1/18.2 — backup & recovery (see backend/BACKUP_RECOVERY.md) ───────
+  // Deliberately NO "restore to production" endpoint here — that stays a
+  // manual, carefully-supervised CLI/dashboard operation (see the runbook),
+  // never a single web-request action even behind manage_backups.
+  router.get(
+    '/backups/status',
+    requirePermission('manage_backups'),
+    wrap(async (_req, res) => {
+      res.json(await db.connection.getManagedBackupStatus());
+    }),
+  );
+  router.get(
+    '/backups',
+    requirePermission('manage_backups'),
+    wrap(async (_req, res) => {
+      res.json({ backups: listBackups() });
+    }),
+  );
+  router.post(
+    '/backups/run',
+    requirePermission('manage_backups'),
+    wrap(async (req, res) => {
+      const manifest = await createBackup(db);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'run_backup', targetType: 'backup', targetId: manifest.id, after: { tables: manifest.tables.length, sizeBytes: manifest.sizeBytes } });
+      res.json({ manifest });
+    }),
+  );
+  router.post(
+    '/backups/:id/verify',
+    requirePermission('manage_backups'),
+    wrap(async (req, res) => {
+      const result = await verifyBackup(req.params.id, db);
+      res.json(result);
+    }),
+  );
+  router.post(
+    '/backups/:id/restore-drill',
+    requirePermission('manage_backups'),
+    wrap(async (req, res) => {
+      const result = await restoreDrill(db, req.params.id);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'run_backup_restore_drill', targetType: 'backup', targetId: req.params.id, after: { ok: result.ok } });
+      res.json(result);
+    }),
+  );
+  router.post(
+    '/backups/prune',
+    requirePermission('manage_backups'),
+    wrap(async (req, res) => {
+      const b = z.object({ retention_days: z.number().int().min(1).max(3650).optional() }).parse(req.body ?? {});
+      const pruned = pruneOldBackups(b.retention_days ?? 14);
+      res.json({ pruned });
     }),
   );
 

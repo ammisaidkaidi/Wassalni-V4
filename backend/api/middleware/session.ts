@@ -60,7 +60,7 @@ export const requireAdmin: RequestHandler = (req, _res, next) => {
  */
 export const ADMIN_PERMISSIONS: Record<string, readonly string[]> = {
   super_admin: ['*'],
-  admin: ['view', 'manage_trips', 'manage_drivers', 'manage_reservations', 'manage_payments', 'manage_payouts', 'manage_promo', 'manage_config'],
+  admin: ['view', 'manage_trips', 'manage_drivers', 'manage_reservations', 'manage_payments', 'manage_payouts', 'manage_promo', 'manage_config', 'manage_backups'],
   support: ['view', 'manage_reservations'],
   finance: ['view', 'manage_payments', 'manage_payouts', 'manage_promo'],
   operations: ['view', 'manage_trips', 'manage_drivers'],
