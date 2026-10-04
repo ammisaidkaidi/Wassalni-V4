@@ -1,5 +1,6 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth';
+import NotificationBell from './components/NotificationBell';
 import AdminPage from './pages/AdminPage';
 import DriverPage from './pages/DriverPage';
 import HomePage from './pages/HomePage';
@@ -7,6 +8,7 @@ import LoginPage from './pages/LoginPage';
 import MyReservationsPage from './pages/MyReservationsPage';
 import ProfilePage from './pages/ProfilePage';
 import RegisterPage from './pages/RegisterPage';
+import ShareTrackingPage from './pages/ShareTrackingPage';
 import TripDetailPage from './pages/TripDetailPage';
 import WalletPage from './pages/WalletPage';
 
@@ -31,6 +33,7 @@ export default function App() {
         <div className="auth">
           {user ? (
             <>
+              <NotificationBell />
               <span className="who" title={user.email}>
                 {user.full_name}
               </span>
@@ -60,6 +63,7 @@ export default function App() {
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/driver" element={<DriverPage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/track/:token" element={<ShareTrackingPage />} />
           <Route path="*" element={<p className="empty">Page introuvable</p>} />
         </Routes>
       </main>

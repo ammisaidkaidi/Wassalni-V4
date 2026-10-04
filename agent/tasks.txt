@@ -885,31 +885,31 @@ TASK 10.1 — Seat picker
 
 Replace bare seat-count selection where appropriate.
 
-[ ] visual seat map
+[x] visual seat map
 
-[ ] available seats
+[x] available seats
 
-[ ] occupied/held seats
+[x] occupied/held seats
 
-[ ] selected seats
+[x] selected seats
 
-[ ] accessibility considerations
+[x] accessibility considerations
 
 If actual physical seat identity is not supported by the domain model, do not falsely imply fixed physical seating. In that case implement a visual capacity selector instead.
 
 TASK 10.2 — Waitlist
 
-[ ] join waitlist
+[x] join waitlist
 
-[ ] position
+[x] position
 
-[ ] cancellation
+[x] cancellation
 
-[ ] automatic promotion
+[x] automatic promotion
 
-[ ] notification
+[x] notification
 
-[ ] concurrency-safe promotion
+[x] concurrency-safe promotion
 
 TASK 10.3 — Recurring trips
 
@@ -919,65 +919,65 @@ Monday / Wednesday / Friday 07:00 Alger → Oran
 
 Implement:
 
-[ ] recurring template
+[x] recurring template
 
-[ ] recurrence rules
+[x] recurrence rules
 
-[ ] generated trips
+[x] generated trips
 
-[ ] exceptions
+[x] exceptions
 
-[ ] cancellation
+[x] cancellation
 
-[ ] duplicate prevention
+[x] duplicate prevention
 
 TASK 10.4 — Nearby-date fallback
 
 If exact-date search returns zero:
 
-[ ] search nearby dates
+[x] search nearby dates
 
-[ ] clearly label fallback dates
+[x] clearly label fallback dates
 
-[ ] preserve origin/destination criteria
+[x] preserve origin/destination criteria
 
 TASK 10.5 — Favorites
 
 Support:
 
-[ ] favorite routes
+[x] favorite routes
 
-[ ] favorite drivers
+[x] favorite drivers
 
-[ ] notification subscription
+[x] notification subscription
 
-[ ] unfavorite
+[x] unfavorite
 
 TASK 10.6 — Group bookings
 
-[ ] multiple passengers
+[x] multiple passengers
 
-[ ] total seat count
+[x] total seat count
 
-[ ] fare calculation
+[x] fare calculation
 
-[ ] optional fare splitting
+[x] optional fare splitting
 
-[ ] booking owner
+[x] booking owner
 
-[ ] passenger list
+[x] passenger list
 
 TASK 10.7 — Accessibility/service requirements
 
 Support trip and reservation attributes:
 
-[ ] luggage
+[x] luggage
 
-[ ] pet
+[x] pet
 
-[ ] wheelchair accessibility
+[x] wheelchair accessibility
 
-[ ] other service requirements
+[x] other service requirements
 
 Implement matching rules where appropriate.
 
@@ -987,25 +987,25 @@ TASK 11.1 — Notifications
 
 Support events:
 
-[ ] booking request
+[x] booking request
 
-[ ] approval
+[x] approval
 
-[ ] rejection
+[x] rejection
 
-[ ] payment confirmation
+[x] payment confirmation
 
-[ ] payment expiration
+[x] payment expiration
 
-[ ] cancellation
+[x] cancellation
 
-[ ] schedule change
+[x] schedule change
 
-[ ] price change
+[ ] price change — N/A in the live product: trg_trip_edit_lock (Section 12 of sql.txt) permanently locks seat_price once a trip is published and has active reservations, specifically so a booked customer's price can never move under them, and no admin UI exposes a post-booking price edit either (unlike schedule_change, which has an explicit, audited admin_reschedule_trip() escape hatch for force-majeure reschedules). There is therefore no live trigger path that could ever fire a price_change notification — disclosed rather than silently dropped; see sql.txt's comment just above trg_trip_edit_lock.
 
-[ ] T-1h reminder
+[x] T-1h reminder
 
-[ ] trip completion
+[x] trip completion
 
 TASK 11.2 — In-app messaging
 
@@ -1013,41 +1013,41 @@ Create conversation model scoped appropriately.
 
 Implement:
 
-[ ] driver/customer conversation
+[x] driver/customer conversation
 
-[ ] reservation association
+[x] reservation association
 
-[ ] message persistence
+[x] message persistence
 
-[ ] read status
+[x] read status
 
-[ ] abuse controls
+[x] abuse controls
 
 TASK 11.3 — Masked calling
 
 If technically/legalistically appropriate:
 
-[ ] hide personal phone numbers
+[ ] hide personal phone numbers — partial by deliberate scope decision: reveal_contact() returns the real phone number (not a proxy/masked number from a telephony provider), but access is strictly reservation-scoped (only that reservation's driver/customer pair can ever request it, enforced server-side, DZ861 otherwise) and every reveal is audit-logged (contact_reveal_log). True number masking would need a telephony-proxy integration (e.g. a Twilio-style masked-number service), which is out of scope for this project the same way Tasks 7.1/7.2 use a mock/sandbox payment gateway rather than a real one. The other two checklist items (reservation-scoped communication, logging/audit) are genuinely done.
 
-[ ] reservation-scoped communication
+[x] reservation-scoped communication
 
-[ ] logging/audit
+[x] logging/audit
 
 TASK 11.4 — Shareable live-trip link
 
 Implement:
 
-[ ] signed share token
+[x] signed share token
 
-[ ] expiration
+[x] expiration
 
-[ ] read-only public tracking page
+[x] read-only public tracking page
 
-[ ] driver location
+[x] driver location
 
-[ ] trip status
+[x] trip status
 
-[ ] revoke/invalidate token
+[x] revoke/invalidate token
 
 Do not expose unnecessary personal information.
 
@@ -1055,19 +1055,19 @@ TASK 11.5 — SOS
 
 Implement:
 
-[ ] emergency contact
+[x] emergency contact
 
-[ ] one-tap SOS
+[x] one-tap SOS
 
-[ ] current location
+[x] current location
 
-[ ] reservation/trip association
+[x] reservation/trip association
 
-[ ] admin notification
+[x] admin notification
 
-[ ] emergency event audit
+[x] emergency event audit
 
-[ ] abuse/rate limiting
+[x] abuse/rate limiting
 
 PHASE 12 — ADMIN OPERATIONS
 
@@ -1075,39 +1075,39 @@ TASK 12.1 — Analytics
 
 Dashboard metrics:
 
-[ ] revenue
+[x] revenue
 
-[ ] occupancy
+[x] occupancy
 
-[ ] bookings
+[x] bookings
 
-[ ] cancellations
+[x] cancellations
 
-[ ] refunds
+[x] refunds
 
-[ ] no-shows
+[x] no-shows
 
-[ ] top Wilaya pairs
+[x] top Wilaya pairs
 
-[ ] top WPoint/commune pairs
+[x] top WPoint/commune pairs
 
-[ ] trajectory demand
+[x] trajectory demand
 
-[ ] driver performance
+[x] driver performance
 
 TASK 12.2 — Demand analytics
 
 Analyze:
 
-[ ] requested pickup communes
+[x] requested pickup communes
 
-[ ] requested dropoff communes
+[x] requested dropoff communes
 
-[ ] WPoint pairs
+[x] WPoint pairs
 
-[ ] failed searches if available
+[x] failed searches if available
 
-[ ] popular trajectories
+[x] popular trajectories
 
 Use this to identify opportunities for new trajectories/stops.
 
@@ -1115,37 +1115,37 @@ TASK 12.3 — CSV/PDF exports
 
 Add export capabilities to relevant admin tables:
 
-[ ] drivers
+[x] drivers
 
-[ ] customers
+[x] customers
 
-[ ] trips
+[x] trips
 
-[ ] reservations
+[x] reservations
 
-[ ] payments
+[x] payments
 
-[ ] refunds
+[x] refunds
 
-[ ] payouts
+[x] payouts
 
-[ ] analytics
+[x] analytics
 
 TASK 12.4 — Admin audit log
 
 Record privileged actions:
 
-[ ] actor
+[x] actor
 
-[ ] action
+[x] action
 
-[ ] target
+[x] target
 
-[ ] timestamp
+[x] timestamp
 
-[ ] relevant before/after information
+[x] relevant before/after information
 
-[ ] reason where applicable
+[x] reason where applicable
 
 Examples:
 
@@ -1155,19 +1155,19 @@ TASK 12.5 — Import history
 
 Expose historical registry imports:
 
-[ ] timestamp
+[x] timestamp
 
-[ ] Wilaya count
+[x] Wilaya count
 
-[ ] Daira count
+[x] Daira count
 
-[ ] Commune count
+[x] Commune count
 
-[ ] payload size
+[x] payload size
 
-[ ] success/failure
+[x] success/failure
 
-[ ] error details
+[x] error details
 
 TASK 12.6 — Granular admin roles
 
@@ -1187,13 +1187,13 @@ scheduled → in_progress → completed
 
 Handle:
 
-[ ] grace period
+[x] grace period
 
-[ ] missed departure
+[x] missed departure
 
-[ ] cancellation
+[x] cancellation
 
-[ ] no-show resolution
+[x] no-show resolution
 
 TASK 13.2 — Payment-hold cleanup
 
@@ -1201,13 +1201,13 @@ Automatically find expired holds.
 
 For every expired hold:
 
-[ ] release capacity
+[x] release capacity
 
-[ ] update reservation
+[x] update reservation
 
-[ ] update payment state
+[x] update payment state
 
-[ ] notify customer if appropriate
+[x] notify customer if appropriate
 
 Must be idempotent.
 

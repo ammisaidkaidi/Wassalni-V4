@@ -784,3 +784,184 @@ form .btn {
   display: flex;
   gap: 2px;
 }
+
+/* ── notifications bell (Task 11.1) ─────────────────────────────────────── */
+.notif-bell-wrap {
+  position: relative;
+}
+.notif-bell {
+  position: relative;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 1.05rem;
+}
+.notif-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #991b1b;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.notif-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 360px;
+  max-height: 440px;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 50;
+  padding: 10px;
+}
+.notif-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+.notif-item {
+  padding: 10px;
+  border-radius: 10px;
+  margin-bottom: 4px;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.notif-item.unread {
+  background: #f0fdfa;
+  font-weight: 600;
+}
+.notif-item .notif-time {
+  display: block;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.76rem;
+  margin-top: 2px;
+}
+
+/* ── SOS button (Task 11.5) ──────────────────────────────────────────────── */
+.sos-btn {
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.sos-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* ── misc small panels (waitlist/favorites/messaging/share) ───────────────── */
+.mini-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-top: 14px;
+}
+.chat-thread {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+}
+.chat-msg {
+  max-width: 75%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 0.88rem;
+  background: #f1f5f9;
+}
+.chat-msg.mine {
+  align-self: flex-end;
+  background: #ccfbf1;
+}
+.chat-msg .chat-meta {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* ── visual capacity selector (Task 10.1) ──────────────────────────────────── */
+.seat-picker {
+  margin: 10px 0 16px;
+}
+.seat-picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.seat-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  cursor: pointer;
+  padding: 0;
+}
+.seat-icon.available {
+  background: #ecfeff;
+  border-color: #a5f3fc;
+}
+.seat-icon.selected {
+  background: var(--primary);
+  border-color: var(--primary-dark);
+  filter: none;
+}
+.seat-icon.occupied {
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.seat-picker-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--muted);
+  align-items: center;
+}
+.seat-picker-legend .seat-icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  display: inline-block;
+  vertical-align: middle;
+}

@@ -32,7 +32,13 @@ export function tripsRoutes(db: DBHelper, repo: DomainRepository): Router {
       const toCommuneId = Number.isInteger(Number(req.query.to_commune_id)) && req.query.to_commune_id !== undefined ? Number(req.query.to_commune_id) : undefined;
       const page = Math.max(1, Number(req.query.page) || 1);
       const pageSize = Math.min(50, Math.max(1, Number(req.query.page_size) || 10));
-      res.json(await searchTrips(db, { fromWilayaId: from, toWilayaId: to, fromCommuneId, toCommuneId, dateFrom, dateTo, page, pageSize }));
+      const result = await searchTrips(db, { fromWilayaId: from, toWilayaId: to, fromCommuneId, toCommuneId, dateFrom, dateTo, page, pageSize });
+      // Task 12.2 — every search is logged (zero-result or not) so admins can
+      // see unmet demand (admin_failed_searches()), not just successful bookings.
+      repo
+        .logSearch({ fromWilayaId: from, toWilayaId: to, fromCommuneId, toCommuneId, dateFrom, dateTo, resultsCount: result.total })
+        .catch((err) => console.error('✗ log_search failed:', err));
+      res.json(result);
     }),
   );
 

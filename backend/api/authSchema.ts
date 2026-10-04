@@ -26,6 +26,15 @@ export const AUTH_SCHEMA_STATEMENTS: string[] = [
   `alter table app_user add column if not exists driver_id uuid references driver(id) on delete set null`,
   `alter table app_user drop constraint if exists app_user_role_check`,
   `alter table app_user add constraint app_user_role_check check (role in ('customer','admin','driver'))`,
+  // Task 12.6 — granular admin roles. Only meaningful when role='admin';
+  // every pre-existing admin account is grandfathered in as 'super_admin'
+  // (the most-privileged role) so nobody already set up as an admin is
+  // silently locked out of anything after this upgrade.
+  `alter table app_user add column if not exists admin_role text`,
+  `alter table app_user drop constraint if exists app_user_admin_role_check`,
+  `alter table app_user add constraint app_user_admin_role_check
+     check (admin_role is null or admin_role in ('super_admin','admin','support','finance','operations'))`,
+  `update app_user set admin_role = 'super_admin' where role = 'admin' and admin_role is null`,
   `create table if not exists app_user_otp (
      id          uuid primary key default gen_random_uuid(),
      user_id     uuid not null references app_user(id) on delete cascade,

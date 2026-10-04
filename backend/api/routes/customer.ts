@@ -123,5 +123,115 @@ export function customerRoutes(repo: DomainRepository): Router {
     }),
   );
 
+  // ── Waitlist (Task 10.2) ────────────────────────────────────────────────────
+
+  router.post(
+    '/waitlist',
+    wrap(async (req, res) => {
+      const b = z
+        .object({
+          trip_id: z.string().uuid(),
+          seats: z.number().int().min(1).max(30),
+          pickup_wpoint_id: z.string().uuid().nullish(),
+          dropoff_wpoint_id: z.string().uuid().nullish(),
+        })
+        .parse(req.body);
+      const id = await repo.joinWaitlist(b.trip_id, req.user!.customer_id!, b.seats, b.pickup_wpoint_id, b.dropoff_wpoint_id);
+      res.status(201).json({ id });
+    }),
+  );
+  router.get(
+    '/waitlist',
+    wrap(async (req, res) => {
+      res.json({ entries: await repo.listMyWaitlistEntries(req.user!.customer_id!) });
+    }),
+  );
+  router.post(
+    '/waitlist/:id/cancel',
+    wrap(async (req, res) => {
+      await repo.cancelWaitlistEntry(req.params.id, req.user!.customer_id!);
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── Favorites (Task 10.5) ───────────────────────────────────────────────────
+
+  router.get(
+    '/favorites/routes',
+    wrap(async (req, res) => {
+      res.json({ routes: await repo.listFavoriteRoutes(req.user!.customer_id!) });
+    }),
+  );
+  router.post(
+    '/favorites/routes',
+    wrap(async (req, res) => {
+      const b = z.object({ origin_wpoint_id: z.string().uuid(), destination_wpoint_id: z.string().uuid(), notify: z.boolean().optional() }).parse(req.body);
+      const id = await repo.addFavoriteRoute(req.user!.customer_id!, b.origin_wpoint_id, b.destination_wpoint_id, b.notify ?? true);
+      res.status(201).json({ id });
+    }),
+  );
+  router.delete(
+    '/favorites/routes/:id',
+    wrap(async (req, res) => {
+      await repo.removeFavoriteRoute(req.params.id, req.user!.customer_id!);
+      res.json({ ok: true });
+    }),
+  );
+  router.get(
+    '/favorites/drivers',
+    wrap(async (req, res) => {
+      res.json({ drivers: await repo.listFavoriteDrivers(req.user!.customer_id!) });
+    }),
+  );
+  router.post(
+    '/favorites/drivers',
+    wrap(async (req, res) => {
+      const b = z.object({ driver_id: z.string().uuid(), notify: z.boolean().optional() }).parse(req.body);
+      const id = await repo.addFavoriteDriver(req.user!.customer_id!, b.driver_id, b.notify ?? true);
+      res.status(201).json({ id });
+    }),
+  );
+  router.delete(
+    '/favorites/drivers/:id',
+    wrap(async (req, res) => {
+      await repo.removeFavoriteDriver(req.params.id, req.user!.customer_id!);
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── SOS + emergency contacts (Task 11.5) ────────────────────────────────────
+
+  router.get(
+    '/emergency-contacts',
+    wrap(async (req, res) => {
+      res.json({ contacts: await repo.listEmergencyContacts(req.user!.customer_id!) });
+    }),
+  );
+  router.post(
+    '/emergency-contacts',
+    wrap(async (req, res) => {
+      const b = z.object({ full_name: z.string().trim().min(1).max(200), phone: z.string().regex(/^\+?[0-9]{8,15}$/), relationship: z.string().max(100).nullish() }).parse(req.body);
+      const id = await repo.addEmergencyContact(req.user!.customer_id!, b.full_name, b.phone, b.relationship);
+      res.status(201).json({ id });
+    }),
+  );
+  router.delete(
+    '/emergency-contacts/:id',
+    wrap(async (req, res) => {
+      const deleted = await repo.removeEmergencyContact(req.params.id, req.user!.customer_id!);
+      res.json({ deleted });
+    }),
+  );
+  router.post(
+    '/sos',
+    wrap(async (req, res) => {
+      const b = z
+        .object({ reservation_id: z.string().uuid().nullish(), lat: z.number().min(-90).max(90).nullish(), lon: z.number().min(-180).max(180).nullish(), notes: z.string().max(1000).nullish() })
+        .parse(req.body ?? {});
+      const id = await repo.triggerSos({ reservationId: b.reservation_id, role: 'customer', id: req.user!.customer_id!, lat: b.lat, lon: b.lon, notes: b.notes });
+      res.status(201).json({ id });
+    }),
+  );
+
   return router;
 }

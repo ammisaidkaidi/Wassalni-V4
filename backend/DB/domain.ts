@@ -564,6 +564,153 @@ export interface LastLocationRow {
   recorded_at: string;
 }
 
+// ── Tasks 10.x-13.x (batch: waitlist, recurring trips, favorites, group
+// bookings, accessibility, notifications, messaging, share links, SOS,
+// admin audit/roles, analytics, scheduler) ─────────────────────────────────
+
+export type WaitlistStatus = 'waiting' | 'promoted' | 'cancelled' | 'expired';
+export interface WaitlistEntryRow {
+  id: string;
+  trip_id: string;
+  customer_id: string;
+  seats: number;
+  pickup_wpoint_id: string | null;
+  dropoff_wpoint_id: string | null;
+  position: number;
+  status: WaitlistStatus;
+  reservation_id: string | null;
+  created_at: string;
+  promoted_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface RecurringTemplateRow {
+  id: string;
+  trajectory_id: string;
+  driver_id: string | null;
+  vehicle_id: string | null;
+  weekdays: number[];
+  departure_time: string;
+  capacity: number;
+  seat_price: string;
+  starts_on: string;
+  ends_on: string | null;
+  horizon_days: number;
+  active: boolean;
+  notes: string | null;
+  last_generated_through: string | null;
+  created_at: string;
+}
+
+export interface RecurringExceptionRow {
+  id: string;
+  template_id: string;
+  exception_date: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface FavoriteRouteRow {
+  id: string;
+  customer_id: string;
+  origin_wpoint_id: string;
+  destination_wpoint_id: string;
+  notify: boolean;
+  created_at: string;
+}
+
+export interface FavoriteDriverRow {
+  id: string;
+  customer_id: string;
+  driver_id: string;
+  notify: boolean;
+  created_at: string;
+}
+
+export interface ReservationPassengerInput {
+  full_name: string;
+  phone?: string | null;
+  fare_share?: number | null;
+}
+export interface ReservationPassengerRow extends ReservationPassengerInput {
+  id: string;
+  reservation_id: string;
+  created_at: string;
+}
+
+export interface NotificationRow {
+  id: string;
+  recipient_user_id: string;
+  type: string;
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface ConversationRow {
+  id: string;
+  reservation_id: string;
+  blocked_at: string | null;
+  created_at: string;
+}
+export interface MessageRow {
+  id: string;
+  conversation_id: string;
+  sender_role: 'customer' | 'driver';
+  sender_id: string;
+  body: string;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface EmergencyContactRow {
+  id: string;
+  customer_id: string;
+  full_name: string;
+  phone: string;
+  relationship: string | null;
+  created_at: string;
+}
+
+export type SosStatus = 'open' | 'acknowledged' | 'resolved';
+export interface SosEventRow {
+  id: string;
+  reservation_id: string | null;
+  trip_id: string | null;
+  triggered_by_role: 'customer' | 'driver';
+  triggered_by_id: string;
+  gps_lat: string | null;
+  gps_lon: string | null;
+  status: SosStatus;
+  notes: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  created_at: string;
+}
+
+export interface AdminAuditLogRow {
+  id: string;
+  admin_user_id: string | null;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  before_data: Record<string, unknown> | null;
+  after_data: Record<string, unknown> | null;
+  reason: string | null;
+  created_at: string;
+}
+
+export interface AnalyticsSummary {
+  revenue: string;
+  refunds_total: string;
+  bookings: number;
+  cancellations: number;
+  no_shows: number;
+  occupancy_pct: string;
+}
+
 export interface DairaRow {
   daira_id: number;
   nom_fr: string;
@@ -665,6 +812,30 @@ export const DOMAIN_ERRORS: Readonly<Record<string, string>> = {
   DZ781: 'Unknown payout batch id',
   DZ782: 'Payout batch has already been marked as paid',
   DZ783: 'No unbatched payout ledger entries in that period for this driver',
+  DZ801: 'Unknown waitlist entry id',
+  DZ802: 'Customer already has an active waitlist entry for this trip',
+  DZ803: 'Illegal waitlist entry status transition',
+  DZ804: 'Can only join the waitlist of a scheduled, published trip',
+  DZ811: 'Unknown recurring trip template id',
+  DZ812: 'Recurrence rule must select at least one weekday',
+  DZ813: "Exception date is outside the template's generation window",
+  DZ821: 'Unknown favorite id',
+  DZ831: 'Number of named passengers must match the reserved seat count',
+  DZ832: 'Each passenger needs a name',
+  DZ841: 'Trip/vehicle cannot accommodate the requested service requirement',
+  DZ851: 'Unknown conversation id',
+  DZ852: 'You are not a participant in this conversation',
+  DZ853: 'Message body cannot be empty',
+  DZ854: 'Too many messages sent in a short period — please slow down',
+  DZ861: 'Only the driver/customer of this reservation may request contact',
+  DZ862: 'Unknown or invalid share link',
+  DZ863: 'This share link has expired',
+  DZ864: 'This share link has been revoked',
+  DZ871: 'Unknown SOS event id',
+  DZ872: 'Too many SOS triggers in a short period — please wait or call emergency services directly',
+  DZ881: 'Your admin role does not grant this permission',
+  DZ882: 'Unknown admin role',
+  DZ891: 'Unknown registry import run id',
 };
 
 export interface DomainErrorInfo {
@@ -1111,7 +1282,7 @@ export class DomainRepository {
 
   async getVehicle(vehicleId: string): Promise<Record<string, unknown> | null> {
     return this.db.selectOne('vehicle', {
-      columns: ['id', 'matricule', 'seats', 'make', 'model', 'notes'],
+      columns: ['id', 'matricule', 'seats', 'make', 'model', 'notes', 'wheelchair_accessible', 'pets_allowed', 'luggage_capacity'],
       where: { id: vehicleId },
     });
   }
@@ -2140,6 +2311,342 @@ export class DomainRepository {
     return paymentId
       ? this.db.raw<PaymentGatewayEventRow>('select * from payment_gateway_event where payment_id = $1 order by received_at desc', [paymentId])
       : this.db.raw<PaymentGatewayEventRow>('select * from payment_gateway_event order by received_at desc limit 200');
+  }
+
+  // ── Waitlist (Task 10.2) ───────────────────────────────────────────────────
+
+  async joinWaitlist(tripId: string, customerId: string, seats: number, pickupWpointId?: string | null, dropoffWpointId?: string | null): Promise<string> {
+    const id = await this.db.callScalar<string>('join_waitlist', tripId, customerId, seats, pickupWpointId ?? null, dropoffWpointId ?? null);
+    if (!id) throw new Error('join_waitlist returned no id');
+    return id;
+  }
+
+  async cancelWaitlistEntry(entryId: string, customerId: string): Promise<void> {
+    await this.db.callScalar('cancel_waitlist_entry', entryId, customerId);
+  }
+
+  async listMyWaitlistEntries(customerId: string): Promise<(WaitlistEntryRow & { trip_code: string; departure_at: string; position_now: number | null })[]> {
+    return this.db.raw(
+      `select w.*, t.code as trip_code, t.departure_at,
+              case when w.status = 'waiting' then waitlist_position(w.id) else null end as position_now
+         from waitlist_entry w join trip t on t.id = w.trip_id
+        where w.customer_id = $1
+        order by w.created_at desc`,
+      [customerId],
+    );
+  }
+
+  async listTripWaitlist(tripId: string): Promise<(WaitlistEntryRow & { customer_name: string })[]> {
+    return this.db.raw(
+      `select w.*, c.full_name as customer_name from waitlist_entry w join customer c on c.id = w.customer_id
+        where w.trip_id = $1 order by w.position asc`,
+      [tripId],
+    );
+  }
+
+  async promoteWaitlist(tripId: string): Promise<number> {
+    return (await this.db.callScalar<number>('promote_waitlist', tripId)) ?? 0;
+  }
+
+  // ── Recurring trip templates (Task 10.3) ──────────────────────────────────
+
+  async createRecurringTemplate(p: {
+    trajectoryId: string; driverId?: string | null; vehicleId?: string | null; weekdays: number[];
+    departureTime: string; capacity: number; seatPrice: number; startsOn: string; endsOn?: string | null;
+    horizonDays?: number; notes?: string | null;
+  }): Promise<string> {
+    // `weekdays` is a native `smallint[]` column. The management-API transport
+    // (see DB/sql-utils.ts sqlLiteral) always inlines a JS array as a jsonb
+    // literal, which Postgres cannot implicitly cast to smallint[] — so this
+    // formats it as a Postgres array-literal string ('{2,4}') and casts it
+    // explicitly in the SQL text instead of relying on the generic encoding.
+    const weekdaysLiteral = `{${p.weekdays.join(',')}}`;
+    const rows = await this.db.raw<{ id: string }>(
+      `insert into recurring_trip_template
+         (trajectory_id, driver_id, vehicle_id, weekdays, departure_time, capacity, seat_price, starts_on, ends_on, horizon_days, notes)
+       values ($1,$2,$3,$4::smallint[],$5,$6,$7,$8,$9,$10,$11) returning id`,
+      [p.trajectoryId, p.driverId ?? null, p.vehicleId ?? null, weekdaysLiteral, p.departureTime, p.capacity, p.seatPrice, p.startsOn, p.endsOn ?? null, p.horizonDays ?? 14, p.notes ?? null],
+    );
+    const id = rows[0]?.id;
+    if (!id) throw new Error('recurring_trip_template insert returned no id');
+    await this.db.callScalar('generate_recurring_trips', id);
+    return id;
+  }
+
+  async listRecurringTemplates(): Promise<(RecurringTemplateRow & { trajectory_name: string; driver_name: string | null })[]> {
+    return this.db.raw(
+      `select rt.*, tj.name as trajectory_name, d.full_name as driver_name
+         from recurring_trip_template rt
+         join trajectory tj on tj.id = rt.trajectory_id
+         left join driver d on d.id = rt.driver_id
+        order by rt.created_at desc`,
+    );
+  }
+
+  async generateRecurringTrips(templateId: string): Promise<number> {
+    return (await this.db.callScalar<number>('generate_recurring_trips', templateId)) ?? 0;
+  }
+
+  async cancelRecurringTemplate(templateId: string): Promise<number> {
+    return (await this.db.callScalar<number>('cancel_recurring_template', templateId)) ?? 0;
+  }
+
+  async addRecurringException(templateId: string, date: string, notes?: string | null): Promise<void> {
+    await this.db.callScalar('add_recurring_exception', templateId, date, notes ?? null);
+  }
+
+  async listRecurringExceptions(templateId: string): Promise<RecurringExceptionRow[]> {
+    return this.db.raw('select * from recurring_trip_exception where template_id = $1 order by exception_date', [templateId]);
+  }
+
+  async listRecurringTrips(templateId: string): Promise<QueryRow[]> {
+    return this.db.raw('select * from v_trip where id in (select id from trip where recurring_template_id = $1) order by departure_at', [templateId]);
+  }
+
+  // ── Favorites (Task 10.5) ──────────────────────────────────────────────────
+
+  async addFavoriteRoute(customerId: string, originWpointId: string, destinationWpointId: string, notify = true): Promise<string> {
+    const id = await this.db.callScalar<string>('add_favorite_route', customerId, originWpointId, destinationWpointId, notify);
+    if (!id) throw new Error('add_favorite_route returned no id');
+    return id;
+  }
+  async removeFavoriteRoute(id: string, customerId: string): Promise<void> {
+    await this.db.callScalar('remove_favorite_route', id, customerId);
+  }
+  async addFavoriteDriver(customerId: string, driverId: string, notify = true): Promise<string> {
+    const id = await this.db.callScalar<string>('add_favorite_driver', customerId, driverId, notify);
+    if (!id) throw new Error('add_favorite_driver returned no id');
+    return id;
+  }
+  async removeFavoriteDriver(id: string, customerId: string): Promise<void> {
+    await this.db.callScalar('remove_favorite_driver', id, customerId);
+  }
+  async listFavoriteRoutes(customerId: string): Promise<(FavoriteRouteRow & { origin_wilaya: string; destination_wilaya: string })[]> {
+    return this.db.raw(
+      `select fr.*, wo.nom_fr as origin_wilaya, wd.nom_fr as destination_wilaya
+         from favorite_route fr
+         join wpoint po on po.id = fr.origin_wpoint_id join wilaya wo on wo.id = po.wilaya_id
+         join wpoint pd on pd.id = fr.destination_wpoint_id join wilaya wd on wd.id = pd.wilaya_id
+        where fr.customer_id = $1 order by fr.created_at desc`,
+      [customerId],
+    );
+  }
+  async listFavoriteDrivers(customerId: string): Promise<(FavoriteDriverRow & { driver_name: string })[]> {
+    return this.db.raw(
+      `select fd.*, d.full_name as driver_name from favorite_driver fd join driver d on d.id = fd.driver_id
+        where fd.customer_id = $1 order by fd.created_at desc`,
+      [customerId],
+    );
+  }
+
+  // ── Group bookings (Task 10.6) ────────────────────────────────────────────
+
+  async setReservationPassengers(reservationId: string, passengers: ReservationPassengerInput[]): Promise<void> {
+    await this.db.callScalar('set_reservation_passengers', reservationId, JSON.stringify(passengers));
+  }
+  async listReservationPassengers(reservationId: string): Promise<ReservationPassengerRow[]> {
+    return this.db.raw('select * from reservation_passenger where reservation_id = $1 order by created_at', [reservationId]);
+  }
+
+  // ── Accessibility / service requirements (Task 10.7) ──────────────────────
+
+  async setReservationRequirements(reservationId: string, p: { needsWheelchair?: boolean; hasPet?: boolean; luggageCount?: number; specialRequirements?: string | null }): Promise<void> {
+    await this.db.callScalar(
+      'set_reservation_requirements', reservationId,
+      p.needsWheelchair ?? false, p.hasPet ?? false, p.luggageCount ?? 0, p.specialRequirements ?? null,
+    );
+  }
+  async setVehicleAccessibility(vehicleId: string, p: { wheelchairAccessible?: boolean; petsAllowed?: boolean; luggageCapacity?: number | null }): Promise<void> {
+    await this.db.raw(
+      'update vehicle set wheelchair_accessible = coalesce($2, wheelchair_accessible), pets_allowed = coalesce($3, pets_allowed), luggage_capacity = coalesce($4, luggage_capacity) where id = $1',
+      [vehicleId, p.wheelchairAccessible ?? null, p.petsAllowed ?? null, p.luggageCapacity ?? null],
+    );
+  }
+
+  // ── Notifications (Task 11.1) ─────────────────────────────────────────────
+
+  async listNotifications(userId: string, unreadOnly = false, limit = 100): Promise<NotificationRow[]> {
+    return unreadOnly
+      ? this.db.raw('select * from notification where recipient_user_id = $1 and read_at is null order by created_at desc limit $2', [userId, limit])
+      : this.db.raw('select * from notification where recipient_user_id = $1 order by created_at desc limit $2', [userId, limit]);
+  }
+  async countUnreadNotifications(userId: string): Promise<number> {
+    const rows = await this.db.raw<{ n: string }>('select count(*) as n from notification where recipient_user_id = $1 and read_at is null', [userId]);
+    return Number(rows[0]?.n ?? 0);
+  }
+  async markNotificationRead(id: string, userId: string): Promise<void> {
+    await this.db.callScalar('mark_notification_read', id, userId);
+  }
+  async markAllNotificationsRead(userId: string): Promise<number> {
+    return (await this.db.callScalar<number>('mark_all_notifications_read', userId)) ?? 0;
+  }
+
+  // ── In-app messaging (Task 11.2) ──────────────────────────────────────────
+
+  async getOrCreateConversation(reservationId: string): Promise<string> {
+    const id = await this.db.callScalar<string>('get_or_create_conversation', reservationId);
+    if (!id) throw new Error('get_or_create_conversation returned no id');
+    return id;
+  }
+  async sendMessage(conversationId: string, senderRole: 'customer' | 'driver', senderId: string, body: string): Promise<string> {
+    const id = await this.db.callScalar<string>('send_message', conversationId, senderRole, senderId, body);
+    if (!id) throw new Error('send_message returned no id');
+    return id;
+  }
+  async listMessages(conversationId: string): Promise<MessageRow[]> {
+    return this.db.raw('select * from message where conversation_id = $1 order by created_at asc', [conversationId]);
+  }
+  async markConversationRead(conversationId: string, readerRole: 'customer' | 'driver'): Promise<number> {
+    return (await this.db.callScalar<number>('mark_conversation_read', conversationId, readerRole)) ?? 0;
+  }
+  /** Reservation ids this driver/customer is a participant in, so the API can authorize access to a conversation. */
+  async getConversationParticipants(conversationId: string): Promise<{ reservation_id: string; customer_id: string; driver_id: string | null } | null> {
+    const rows = await this.db.raw<{ reservation_id: string; customer_id: string; driver_id: string | null }>(
+      `select c.reservation_id, r.customer_id, t.driver_id
+         from conversation c join reservation r on r.id = c.reservation_id join trip t on t.id = r.trip_id
+        where c.id = $1`,
+      [conversationId],
+    );
+    return rows[0] ?? null;
+  }
+
+  // ── Masked calling / contact reveal (Task 11.3 — honest scope, see sql.txt) ─
+
+  async revealContact(reservationId: string, requesterRole: 'customer' | 'driver', requesterId: string): Promise<string> {
+    const phone = await this.db.callScalar<string>('reveal_contact', reservationId, requesterRole, requesterId);
+    if (!phone) throw new Error('reveal_contact returned no phone');
+    return phone;
+  }
+  async listContactReveals(reservationId: string): Promise<QueryRow[]> {
+    return this.db.raw('select * from contact_reveal_log where reservation_id = $1 order by created_at desc', [reservationId]);
+  }
+
+  // ── Shareable live-trip link (Task 11.4) ──────────────────────────────────
+
+  async createShareToken(reservationId: string, tokenHash: string, ttlHours = 24): Promise<string> {
+    const id = await this.db.callScalar<string>('create_share_token', reservationId, tokenHash, ttlHours);
+    if (!id) throw new Error('create_share_token returned no id');
+    return id;
+  }
+  async revokeShareToken(tokenId: string, reservationId: string): Promise<void> {
+    await this.db.callScalar('revoke_share_token', tokenId, reservationId);
+  }
+  async listShareTokens(reservationId: string): Promise<QueryRow[]> {
+    return this.db.raw('select id, expires_at, revoked_at, created_at from trip_share_token where reservation_id = $1 order by created_at desc', [reservationId]);
+  }
+  async getSharedTripInfo(tokenHash: string): Promise<Record<string, unknown>> {
+    const result = await this.db.callScalar<Record<string, unknown>>('get_shared_trip_info', tokenHash);
+    if (!result) throw new Error('get_shared_trip_info returned no data');
+    return result;
+  }
+
+  // ── SOS (Task 11.5) ────────────────────────────────────────────────────────
+
+  async addEmergencyContact(customerId: string, fullName: string, phone: string, relationship?: string | null): Promise<string> {
+    const rows = await this.db.raw<{ id: string }>(
+      'insert into emergency_contact (customer_id, full_name, phone, relationship) values ($1,$2,$3,$4) returning id',
+      [customerId, fullName, phone, relationship ?? null],
+    );
+    return rows[0].id;
+  }
+  async listEmergencyContacts(customerId: string): Promise<EmergencyContactRow[]> {
+    return this.db.raw('select * from emergency_contact where customer_id = $1 order by created_at', [customerId]);
+  }
+  async removeEmergencyContact(id: string, customerId: string): Promise<number> {
+    const rows = await this.db.raw('delete from emergency_contact where id = $1 and customer_id = $2 returning id', [id, customerId]);
+    return rows.length;
+  }
+  async triggerSos(p: { reservationId?: string | null; role: 'customer' | 'driver'; id: string; lat?: number | null; lon?: number | null; notes?: string | null }): Promise<string> {
+    const id = await this.db.callScalar<string>('trigger_sos', p.reservationId ?? null, p.role, p.id, p.lat ?? null, p.lon ?? null, p.notes ?? null);
+    if (!id) throw new Error('trigger_sos returned no id');
+    return id;
+  }
+  async listSosEvents(status?: SosStatus): Promise<(SosEventRow & { reservation_code: string | null; trip_code: string | null })[]> {
+    return status
+      ? this.db.raw('select s.*, r.code as reservation_code, t.code as trip_code from sos_event s left join reservation r on r.id = s.reservation_id left join trip t on t.id = s.trip_id where s.status = $1 order by s.created_at desc', [status])
+      : this.db.raw('select s.*, r.code as reservation_code, t.code as trip_code from sos_event s left join reservation r on r.id = s.reservation_id left join trip t on t.id = s.trip_id order by s.created_at desc');
+  }
+  async resolveSosEvent(eventId: string, adminId: string, notes?: string | null): Promise<void> {
+    await this.db.callScalar('resolve_sos_event', eventId, adminId, notes ?? null);
+  }
+
+  // ── Admin audit log (Task 12.4) ───────────────────────────────────────────
+
+  async logAdminAction(p: { adminId: string | null; action: string; targetType: string; targetId: string | null; before?: unknown; after?: unknown; reason?: string | null }): Promise<string> {
+    const id = await this.db.callScalar<string>(
+      'log_admin_action', p.adminId, p.action, p.targetType, p.targetId,
+      p.before !== undefined ? JSON.stringify(p.before) : null,
+      p.after !== undefined ? JSON.stringify(p.after) : null,
+      p.reason ?? null,
+    );
+    if (!id) throw new Error('log_admin_action returned no id');
+    return id;
+  }
+  async listAdminAuditLog(limit = 200): Promise<(AdminAuditLogRow & { admin_name: string | null })[]> {
+    return this.db.raw(
+      `select l.*, u.full_name as admin_name from admin_audit_log l left join app_user u on u.id = l.admin_user_id
+        order by l.created_at desc limit $1`,
+      [limit],
+    );
+  }
+
+  // ── Admin reschedule override (Task 11.1 "schedule change") ───────────────
+
+  async adminRescheduleTrip(tripId: string, newDepartureAt: string, newArrivalEta: string | null, reason: string, adminId: string): Promise<void> {
+    await this.db.callScalar('admin_reschedule_trip', tripId, newDepartureAt, newArrivalEta, reason, adminId);
+  }
+
+  // ── Granular admin roles (Task 12.6) ──────────────────────────────────────
+
+  async listAdmins(): Promise<{ id: string; email: string; full_name: string; admin_role: string | null }[]> {
+    return this.db.raw(`select id, email, full_name, admin_role from app_user where role = 'admin' order by full_name`);
+  }
+  async setAdminRole(userId: string, adminRole: string): Promise<void> {
+    await this.db.raw(`update app_user set admin_role = $2 where id = $1 and role = 'admin'`, [userId, adminRole]);
+  }
+
+  // ── Analytics (Task 12.1 / 12.2) ──────────────────────────────────────────
+
+  async analyticsSummary(from?: string, to?: string): Promise<AnalyticsSummary> {
+    const result = await this.db.callScalar<AnalyticsSummary>('admin_analytics_summary', from ?? null, to ?? null);
+    return result ?? { revenue: '0', refunds_total: '0', bookings: 0, cancellations: 0, no_shows: 0, occupancy_pct: '0' };
+  }
+  async analyticsTopWilayaPairs(limit = 10): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_top_wilaya_pairs($1)', [limit]);
+  }
+  async analyticsTopWpointPairs(limit = 10): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_top_wpoint_pairs($1)', [limit]);
+  }
+  async analyticsTrajectoryDemand(limit = 10): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_trajectory_demand($1)', [limit]);
+  }
+  async analyticsDriverPerformance(limit = 50): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_driver_performance($1)', [limit]);
+  }
+  async analyticsDemandPickupCommunes(limit = 10): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_demand_pickup_communes($1)', [limit]);
+  }
+  async analyticsDemandDropoffCommunes(limit = 10): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_demand_dropoff_communes($1)', [limit]);
+  }
+  async analyticsFailedSearches(limit = 20): Promise<QueryRow[]> {
+    return this.db.raw('select * from admin_failed_searches($1)', [limit]);
+  }
+  async logSearch(p: { fromWilayaId: number; toWilayaId: number; fromCommuneId?: number | null; toCommuneId?: number | null; dateFrom?: string | null; dateTo?: string | null; resultsCount: number }): Promise<void> {
+    await this.db.callScalar('log_search', p.fromWilayaId, p.toWilayaId, p.fromCommuneId ?? null, p.toCommuneId ?? null, p.dateFrom ?? null, p.dateTo ?? null, p.resultsCount);
+  }
+
+  // ── Import history (Task 12.5 — exposes the existing import_log table) ────
+
+  async listImportHistory(limit = 50): Promise<QueryRow[]> {
+    return this.db.raw('select * from import_log order by ran_at desc limit $1', [limit]);
+  }
+
+  // ── Trip lifecycle scheduler (Task 13.1) ──────────────────────────────────
+
+  async runTripLifecycleTick(): Promise<Record<string, number>> {
+    const result = await this.db.callScalar<Record<string, number>>('run_trip_lifecycle_tick');
+    return result ?? { started: 0, driver_no_show: 0, cancelled_no_driver: 0, auto_closed: 0, reminded: 0 };
   }
 }
 

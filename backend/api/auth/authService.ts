@@ -5,6 +5,8 @@ import { ApiError } from '../middleware/errors';
 import { hashPassword, randomToken, sha256, sixDigitCode, verifyPassword } from './passwords';
 import { otpEmailHtml, type Mailer } from './email';
 
+export type AdminRole = 'super_admin' | 'admin' | 'support' | 'finance' | 'operations';
+
 export interface PublicUser {
   id: string;
   email: string;
@@ -14,6 +16,8 @@ export interface PublicUser {
   email_verified: boolean;
   customer_id: string | null;
   driver_id: string | null;
+  /** Task 12.6 — only set when role === 'admin'. */
+  admin_role: AdminRole | null;
 }
 
 export interface LoginChallenge {
@@ -24,7 +28,7 @@ export interface LoginChallenge {
   dev_code?: string;
 }
 
-const USER_COLS = 'id, email, full_name, phone, role, email_verified, customer_id, driver_id';
+const USER_COLS = 'id, email, full_name, phone, role, email_verified, customer_id, driver_id, admin_role';
 
 
 /**
@@ -166,7 +170,7 @@ export class AuthService {
 
   async getUserBySession(token: string): Promise<PublicUser | null> {
     const rows = await this.db.raw<PublicUser & { expires_at: string }>(
-      `select u.id, u.email, u.full_name, u.phone, u.role, u.email_verified, u.customer_id, u.driver_id, s.expires_at
+      `select u.id, u.email, u.full_name, u.phone, u.role, u.email_verified, u.customer_id, u.driver_id, u.admin_role, s.expires_at
          from app_session s join app_user u on u.id = s.user_id
         where s.token_hash = $1`,
       [sha256(token)],
@@ -185,6 +189,7 @@ export class AuthService {
       email_verified: row.email_verified,
       customer_id: row.customer_id,
       driver_id: row.driver_id,
+      admin_role: row.admin_role,
     };
   }
 

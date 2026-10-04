@@ -2,6 +2,17 @@ import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'reac
 import { Link } from 'react-router-dom';
 import { api, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
+import {
+  AdminsTab,
+  AnalyticsTab,
+  AuditLogTab,
+  ExportsTab,
+  ImportHistoryTab,
+  RecurringTemplatesTab,
+  SettingsTab,
+  SosAdminTab,
+  WaitlistAdminTab,
+} from './AdminExtras';
 import WpointManager from '../components/WpointManager';
 import type {
   AdminReservationRow,
@@ -45,7 +56,16 @@ type Tab =
   | 'vehicle-inspections'
   | 'ratings'
   | 'fraud'
-  | 'errors';
+  | 'errors'
+  | 'waitlist'
+  | 'recurring'
+  | 'analytics'
+  | 'audit-log'
+  | 'import-history'
+  | 'admins'
+  | 'settings'
+  | 'sos'
+  | 'exports';
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'trips', label: 'Voyages' },
@@ -64,6 +84,15 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'ratings', label: 'Évaluations' },
   { id: 'fraud', label: 'Fraude' },
   { id: 'errors', label: 'Codes erreurs' },
+  { id: 'waitlist', label: "Liste d'attente" },
+  { id: 'recurring', label: 'Voyages récurrents' },
+  { id: 'analytics', label: 'Analytique' },
+  { id: 'sos', label: 'SOS' },
+  { id: 'audit-log', label: "Journal d'audit" },
+  { id: 'import-history', label: 'Imports' },
+  { id: 'admins', label: 'Administrateurs' },
+  { id: 'settings', label: 'Configuration' },
+  { id: 'exports', label: 'Exports' },
 ];
 
 const KYC_DOC_LABEL: Record<KycDocType, string> = {
@@ -79,11 +108,18 @@ export default function AdminPage() {
   // Pending-refund count shown as a badge on the "Paiements" tab, so admins
   // notice outstanding refunds without having to open the tab first.
   const [pendingRefunds, setPendingRefunds] = useState(0);
+  // Task 11.5 — open-SOS count badge, same convenience pattern as the refund badge above.
+  const [openSos, setOpenSos] = useState(0);
 
   useEffect(() => {
     if (user?.role !== 'admin') return;
     api<{ worklist: RefundWorklistRow[] }>('/api/admin/refunds-worklist')
       .then((r) => setPendingRefunds(r.worklist.length))
+      .catch(() => {
+        /* badge is a convenience — silently skip if it fails to load */
+      });
+    api<{ events: unknown[] }>('/api/admin/sos?status=open')
+      .then((r) => setOpenSos(r.events.length))
       .catch(() => {
         /* badge is a convenience — silently skip if it fails to load */
       });
@@ -105,6 +141,7 @@ export default function AdminPage() {
           <button key={t.id} className={`tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
             {t.id === 'payments' && pendingRefunds > 0 && <span className="tab-badge">{pendingRefunds}</span>}
+            {t.id === 'sos' && openSos > 0 && <span className="tab-badge">{openSos}</span>}
           </button>
         ))}
       </div>
@@ -122,6 +159,15 @@ export default function AdminPage() {
       {tab === 'kyc' && <KycReviewTab />}
       {tab === 'vehicle-inspections' && <VehicleInspectionReviewTab />}
       {tab === 'ratings' && <RatingsModerationTab />}
+      {tab === 'waitlist' && <WaitlistAdminTab />}
+      {tab === 'recurring' && <RecurringTemplatesTab />}
+      {tab === 'analytics' && <AnalyticsTab />}
+      {tab === 'sos' && <SosAdminTab />}
+      {tab === 'audit-log' && <AuditLogTab />}
+      {tab === 'import-history' && <ImportHistoryTab />}
+      {tab === 'admins' && <AdminsTab />}
+      {tab === 'settings' && <SettingsTab />}
+      {tab === 'exports' && <ExportsTab />}
       {tab === 'fraud' && <FraudSignalsTab />}
       {tab === 'errors' && <ErrorsTab />}
     </section>

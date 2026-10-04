@@ -5,7 +5,9 @@ import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import type { AuthService } from '../auth/authService';
 import { ApiError, wrap } from '../middleware/errors';
+import { requirePermission } from '../middleware/session';
 import { streamReceiptPdf } from '../services/receipt';
+import { sendCsv, sendPdfTable, type ExportColumn } from '../services/export';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -336,6 +338,8 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
         throw new ApiError(409, 'WPOINT_IN_USE', 'Cet arrêt est utilisé par au moins un voyage existant — impossible de le supprimer');
       }
       await repo.deleteWpoint(trajectoryId, wpointId);
+      // Task 12.4 example — "delete WPoint".
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'delete_wpoint', targetType: 'wpoint', targetId: wpointId, before: { trajectory_id: trajectoryId } });
       res.json({ ok: true });
     }),
   );
@@ -521,12 +525,14 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
   );
   router.post(
     '/customers/:id/wallet/adjust',
+    requirePermission('manage_payments'),
     wrap(async (req, res) => {
       const b = z
         .object({ amount: z.number().refine((n) => n !== 0, 'amount must be non-zero'), description: z.string().min(1).max(500) })
         .parse(req.body);
       const id = uuidParam(req.params.id);
       const entryId = await repo.adjustWallet(id, b.amount, b.description);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'wallet_adjustment', targetType: 'customer', targetId: id, after: b, reason: b.description });
       res.status(201).json({ ok: true, entry_id: entryId, balance: await repo.walletBalance(id) });
     }),
   );
@@ -550,6 +556,8 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/reservations/:id/cancel',
     wrap(async (req, res) => {
       await repo.cancelReservation(uuidParam(req.params.id));
+      // Task 12.4 example — "decline reservation" (admin-side cancel acts as the decline here).
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'decline_reservation', targetType: 'reservation', targetId: req.params.id });
       res.json({ ok: true });
     }),
   );
@@ -583,9 +591,12 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
   );
   router.post(
     '/payments/:id/refund',
+    requirePermission('manage_payments'),
     wrap(async (req, res) => {
       const b = refundSchema.parse(req.body ?? {});
       const refundId = await repo.refundPayment(uuidParam(req.params.id), b.amount ?? null, req.user!.id);
+      // Task 12.4 example — "refund payment".
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'refund_payment', targetType: 'payment', targetId: req.params.id, after: b });
       res.json({ ok: true, refund_id: refundId });
     }),
   );
@@ -710,9 +721,11 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
   );
   router.post(
     '/payout-batches/:id/mark-paid',
+    requirePermission('manage_payouts'),
     wrap(async (req, res) => {
       const b = markPaidSchema.parse(req.body ?? {});
       await repo.markPayoutBatchPaid(uuidParam(req.params.id), b.reference);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'mark_payout_paid', targetType: 'payout_batch', targetId: req.params.id, after: b });
       res.json({ ok: true });
     }),
   );
@@ -778,7 +791,32 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     wrap(async (req, res) => {
       const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
       await repo.rejectKycDocument(uuidParam(req.params.id), req.user!.id, reason);
+      // Task 12.4 example — "reject driver" (document).
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'reject_kyc_document', targetType: 'kyc_document', targetId: req.params.id, reason });
       res.json({ document: await repo.getKycDocument(req.params.id) });
+    }),
+  );
+
+  // ── Task 12.4 example — "suspend account" (reuses app_user.locked_until, the
+  // same column the login-lockout mechanism already uses) ──────────────────────
+
+  router.post(
+    '/users/:id/suspend',
+    requirePermission('manage_config'),
+    wrap(async (req, res) => {
+      const b = z.object({ reason: z.string().trim().min(3).max(500) }).parse(req.body);
+      await db.raw(`update app_user set locked_until = 'infinity' where id = $1`, [uuidParam(req.params.id)]);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'suspend_account', targetType: 'app_user', targetId: req.params.id, reason: b.reason });
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/users/:id/unsuspend',
+    requirePermission('manage_config'),
+    wrap(async (req, res) => {
+      await db.raw(`update app_user set locked_until = null, failed_attempts = 0 where id = $1`, [uuidParam(req.params.id)]);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'unsuspend_account', targetType: 'app_user', targetId: req.params.id });
+      res.json({ ok: true });
     }),
   );
 
@@ -870,6 +908,327 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     wrap(async (req, res) => {
       const paymentId = typeof req.query.payment_id === 'string' ? req.query.payment_id : undefined;
       res.json({ events: await repo.listPaymentGatewayEvents(paymentId) });
+    }),
+  );
+
+  // ── Task 10.2 — waitlist (admin visibility + manual promotion trigger) ────────
+
+  router.get(
+    '/trips/:id/waitlist',
+    wrap(async (req, res) => {
+      res.json({ entries: await repo.listTripWaitlist(uuidParam(req.params.id)) });
+    }),
+  );
+  router.post(
+    '/trips/:id/waitlist/promote',
+    wrap(async (req, res) => {
+      res.json({ promoted: await repo.promoteWaitlist(uuidParam(req.params.id)) });
+    }),
+  );
+
+  // ── Task 10.3 — recurring trip templates ──────────────────────────────────────
+
+  const recurringTemplateSchema = z.object({
+    trajectory_id: z.string().uuid(),
+    driver_id: z.string().uuid().nullish(),
+    vehicle_id: z.string().uuid().nullish(),
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1),
+    departure_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/),
+    capacity: z.number().int().min(1).max(32767),
+    seat_price: z.number().nonnegative(),
+    starts_on: z.string().min(10),
+    ends_on: z.string().min(10).nullish(),
+    horizon_days: z.number().int().min(1).max(90).optional(),
+    notes: z.string().nullish(),
+  });
+  router.get(
+    '/recurring-templates',
+    wrap(async (_req, res) => {
+      res.json({ templates: await repo.listRecurringTemplates() });
+    }),
+  );
+  router.post(
+    '/recurring-templates',
+    requirePermission('manage_trips'),
+    wrap(async (req, res) => {
+      const b = recurringTemplateSchema.parse(req.body);
+      const id = await repo.createRecurringTemplate({
+        trajectoryId: b.trajectory_id,
+        driverId: b.driver_id,
+        vehicleId: b.vehicle_id,
+        weekdays: b.weekdays,
+        departureTime: b.departure_time,
+        capacity: b.capacity,
+        seatPrice: b.seat_price,
+        startsOn: b.starts_on,
+        endsOn: b.ends_on,
+        horizonDays: b.horizon_days,
+        notes: b.notes,
+      });
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'create_recurring_template', targetType: 'recurring_trip_template', targetId: id, after: b });
+      res.status(201).json({ id });
+    }),
+  );
+  router.get(
+    '/recurring-templates/:id/trips',
+    wrap(async (req, res) => {
+      res.json({ trips: await repo.listRecurringTrips(uuidParam(req.params.id)) });
+    }),
+  );
+  router.get(
+    '/recurring-templates/:id/exceptions',
+    wrap(async (req, res) => {
+      res.json({ exceptions: await repo.listRecurringExceptions(uuidParam(req.params.id)) });
+    }),
+  );
+  router.post(
+    '/recurring-templates/:id/generate',
+    requirePermission('manage_trips'),
+    wrap(async (req, res) => {
+      res.json({ generated: await repo.generateRecurringTrips(uuidParam(req.params.id)) });
+    }),
+  );
+  router.post(
+    '/recurring-templates/:id/exceptions',
+    requirePermission('manage_trips'),
+    wrap(async (req, res) => {
+      const b = z.object({ date: z.string().min(10), notes: z.string().nullish() }).parse(req.body);
+      await repo.addRecurringException(uuidParam(req.params.id), b.date, b.notes);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'add_recurring_exception', targetType: 'recurring_trip_template', targetId: req.params.id, reason: b.notes });
+      res.status(201).json({ ok: true });
+    }),
+  );
+  router.post(
+    '/recurring-templates/:id/cancel',
+    requirePermission('manage_trips'),
+    wrap(async (req, res) => {
+      const cancelled = await repo.cancelRecurringTemplate(uuidParam(req.params.id));
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'cancel_recurring_template', targetType: 'recurring_trip_template', targetId: req.params.id, after: { trips_cancelled: cancelled } });
+      res.json({ cancelled });
+    }),
+  );
+
+  // ── Task 11.1 — admin-override trip reschedule ("schedule change") ───────────
+
+  router.post(
+    '/trips/:id/reschedule',
+    requirePermission('manage_trips'),
+    wrap(async (req, res) => {
+      const b = z.object({ new_departure_at: z.string().min(10), new_arrival_eta: z.string().nullish(), reason: z.string().trim().min(3).max(500) }).parse(req.body);
+      await repo.adminRescheduleTrip(uuidParam(req.params.id), b.new_departure_at, b.new_arrival_eta ?? null, b.reason, req.user!.id);
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── Task 11.5 — SOS admin console ─────────────────────────────────────────────
+
+  router.get(
+    '/sos',
+    wrap(async (req, res) => {
+      const status = typeof req.query.status === 'string' ? (req.query.status as 'open' | 'acknowledged' | 'resolved') : undefined;
+      res.json({ events: await repo.listSosEvents(status) });
+    }),
+  );
+  router.post(
+    '/sos/:id/resolve',
+    wrap(async (req, res) => {
+      const b = z.object({ notes: z.string().max(2000).nullish() }).parse(req.body ?? {});
+      await repo.resolveSosEvent(uuidParam(req.params.id), req.user!.id, b.notes);
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── Task 12.1 / 12.2 — analytics + demand ─────────────────────────────────────
+
+  router.get(
+    '/analytics/summary',
+    wrap(async (req, res) => {
+      const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+      const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+      res.json(await repo.analyticsSummary(from, to));
+    }),
+  );
+  router.get(
+    '/analytics/top-wilaya-pairs',
+    wrap(async (_req, res) => res.json({ pairs: await repo.analyticsTopWilayaPairs() })),
+  );
+  router.get(
+    '/analytics/top-wpoint-pairs',
+    wrap(async (_req, res) => res.json({ pairs: await repo.analyticsTopWpointPairs() })),
+  );
+  router.get(
+    '/analytics/trajectory-demand',
+    wrap(async (_req, res) => res.json({ trajectories: await repo.analyticsTrajectoryDemand() })),
+  );
+  router.get(
+    '/analytics/driver-performance',
+    wrap(async (_req, res) => res.json({ drivers: await repo.analyticsDriverPerformance() })),
+  );
+  router.get(
+    '/analytics/demand-pickup-communes',
+    wrap(async (_req, res) => res.json({ communes: await repo.analyticsDemandPickupCommunes() })),
+  );
+  router.get(
+    '/analytics/demand-dropoff-communes',
+    wrap(async (_req, res) => res.json({ communes: await repo.analyticsDemandDropoffCommunes() })),
+  );
+  router.get(
+    '/analytics/failed-searches',
+    wrap(async (_req, res) => res.json({ searches: await repo.analyticsFailedSearches() })),
+  );
+
+  // ── Task 12.3 — CSV/PDF exports ───────────────────────────────────────────────
+
+  type ExportEntity = 'drivers' | 'customers' | 'trips' | 'reservations' | 'payments' | 'refunds' | 'payouts' | 'analytics';
+  const EXPORT_COLUMNS: Record<ExportEntity, ExportColumn[]> = {
+    drivers: [
+      { key: 'full_name', label: 'Nom' }, { key: 'nin', label: 'NIN' }, { key: 'phone', label: 'Téléphone' },
+      { key: 'email', label: 'Email' }, { key: 'no_show_count', label: 'Absences' }, { key: 'flagged_at', label: 'Signalé le' },
+    ],
+    customers: [
+      { key: 'full_name', label: 'Nom' }, { key: 'phone', label: 'Téléphone' }, { key: 'email', label: 'Email' },
+      { key: 'created_at', label: 'Créé le' },
+    ],
+    trips: [
+      { key: 'code', label: 'Code' }, { key: 'departure_at', label: 'Départ' }, { key: 'status', label: 'Statut' },
+      { key: 'capacity', label: 'Capacité' }, { key: 'seat_price', label: 'Prix/place' },
+    ],
+    reservations: [
+      { key: 'code', label: 'Code' }, { key: 'status', label: 'Statut' }, { key: 'seats', label: 'Places' },
+      { key: 'total_price', label: 'Total' }, { key: 'created_at', label: 'Créée le' },
+    ],
+    payments: [
+      { key: 'code', label: 'Code' }, { key: 'amount', label: 'Montant' }, { key: 'method', label: 'Méthode' },
+      { key: 'status', label: 'Statut' }, { key: 'created_at', label: 'Créé le' },
+    ],
+    refunds: [
+      { key: 'id', label: 'ID' }, { key: 'amount', label: 'Montant' }, { key: 'status', label: 'Statut' }, { key: 'created_at', label: 'Créé le' },
+    ],
+    payouts: [
+      { key: 'driver_name', label: 'Chauffeur' }, { key: 'period_start', label: 'Début' }, { key: 'period_end', label: 'Fin' },
+      { key: 'total_amount', label: 'Montant' }, { key: 'status', label: 'Statut' },
+    ],
+    analytics: [{ key: 'label', label: 'Métrique' }, { key: 'value', label: 'Valeur' }],
+  };
+
+  async function loadExportRows(entity: ExportEntity): Promise<Record<string, unknown>[]> {
+    switch (entity) {
+      case 'drivers':
+        return db.select('driver', { columns: ['id', 'full_name', 'nin', 'phone', 'email', 'no_show_count', 'flagged_at'], orderBy: 'full_name' }) as Promise<Record<string, unknown>[]>;
+      case 'customers':
+        return repo.listCustomers() as unknown as Promise<Record<string, unknown>[]>;
+      case 'trips':
+        return db.select('v_trip', { orderBy: 'departure_at desc' }) as Promise<Record<string, unknown>[]>;
+      case 'reservations':
+        return repo.listReservations() as unknown as Promise<Record<string, unknown>[]>;
+      case 'payments':
+        return repo.listPayments() as unknown as Promise<Record<string, unknown>[]>;
+      case 'refunds':
+        return repo.refundWorklist() as unknown as Promise<Record<string, unknown>[]>;
+      case 'payouts':
+        return repo.listPayoutBatches() as unknown as Promise<Record<string, unknown>[]>;
+      case 'analytics': {
+        const s = await repo.analyticsSummary();
+        return Object.entries(s).map(([label, value]) => ({ label, value }));
+      }
+      default:
+        throw new ApiError(400, 'BAD_PARAM', 'Export inconnu');
+    }
+  }
+  const EXPORT_LABELS: Record<ExportEntity, string> = {
+    drivers: 'Chauffeurs', customers: 'Clients', trips: 'Voyages', reservations: 'Réservations',
+    payments: 'Paiements', refunds: 'Remboursements', payouts: 'Versements', analytics: 'Analytique',
+  };
+  router.get(
+    '/export/:entity.:format',
+    wrap(async (req, res) => {
+      const entity = req.params.entity as ExportEntity;
+      const format = req.params.format;
+      if (!EXPORT_COLUMNS[entity]) throw new ApiError(400, 'BAD_PARAM', 'Export inconnu');
+      const rows = await loadExportRows(entity);
+      const columns = EXPORT_COLUMNS[entity];
+      const label = EXPORT_LABELS[entity];
+      if (format === 'csv') {
+        sendCsv(res, `${entity}.csv`, rows, columns);
+      } else if (format === 'pdf') {
+        sendPdfTable(res, `${entity}.pdf`, label, rows, columns);
+      } else {
+        throw new ApiError(400, 'BAD_PARAM', 'Format inconnu (csv ou pdf)');
+      }
+    }),
+  );
+
+  // ── Task 12.4 — admin audit log viewer ────────────────────────────────────────
+
+  router.get(
+    '/audit-log',
+    wrap(async (req, res) => {
+      const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 200));
+      res.json({ entries: await repo.listAdminAuditLog(limit) });
+    }),
+  );
+
+  // ── Task 12.5 — import history ────────────────────────────────────────────────
+
+  router.get(
+    '/import-history',
+    wrap(async (_req, res) => {
+      res.json({ imports: await repo.listImportHistory() });
+    }),
+  );
+
+  // ── Task 12.6 — granular admin roles ──────────────────────────────────────────
+
+  router.get(
+    '/admins',
+    requirePermission('manage_config'),
+    wrap(async (_req, res) => {
+      res.json({ admins: await repo.listAdmins() });
+    }),
+  );
+  router.post(
+    '/admins/:id/role',
+    // 'manage_admins' is not granted to any role in ADMIN_PERMISSIONS except
+    // super_admin's wildcard — role assignment is deliberately the one
+    // action even the broad legacy 'admin' role cannot do to another admin.
+    requirePermission('manage_admins'),
+    wrap(async (req, res) => {
+      const b = z.object({ admin_role: z.enum(['super_admin', 'admin', 'support', 'finance', 'operations']) }).parse(req.body);
+      await repo.setAdminRole(uuidParam(req.params.id), b.admin_role);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'set_admin_role', targetType: 'app_user', targetId: req.params.id, after: b });
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── app_setting — generic platform configuration (the "change
+  // configuration" example from Task 12.4's audit log; previously only
+  // ever set by SQL seed inserts, with no admin-facing endpoint at all) ──────
+
+  router.get(
+    '/settings',
+    wrap(async (_req, res) => {
+      res.json({ settings: await db.select('app_setting', { orderBy: 'key' }) });
+    }),
+  );
+  router.put(
+    '/settings/:key',
+    requirePermission('manage_config'),
+    wrap(async (req, res) => {
+      const b = z.object({ value: z.string().max(2000) }).parse(req.body);
+      const before = await db.selectOne('app_setting', { where: { key: req.params.key } });
+      await db.raw(`insert into app_setting (key, value) values ($1,$2) on conflict (key) do update set value = excluded.value, updated_at = now()`, [req.params.key, b.value]);
+      await repo.logAdminAction({ adminId: req.user!.id, action: 'change_configuration', targetType: 'app_setting', targetId: req.params.key, before, after: b });
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── Task 13.1 — manual trigger for the trip lifecycle scheduler tick ─────────
+  // (the real automation is the periodic setInterval wired in server.ts; this
+  // lets an admin force a tick on demand for ops/testing without waiting.)
+  router.post(
+    '/scheduler/run-trip-lifecycle-tick',
+    wrap(async (_req, res) => {
+      res.json(await repo.runTripLifecycleTick());
     }),
   );
 

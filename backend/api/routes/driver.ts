@@ -106,6 +106,10 @@ const vehicleUpdateSchema = z.object({
   seats: z.number().int().min(1).max(200).optional(),
   make: z.string().nullish(),
   model: z.string().nullish(),
+  // Task 10.7 — accessibility/service-requirement matching rules.
+  wheelchair_accessible: z.boolean().optional(),
+  pets_allowed: z.boolean().optional(),
+  luggage_capacity: z.number().int().min(0).max(1000).nullish(),
 });
 
 const trajectoryCreateSchema = z.object({ name: z.string().trim().min(2) });
@@ -206,7 +210,14 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
         make: b.make === null ? null : b.make,
         model: b.model === null ? null : b.model,
       });
-      res.json({ vehicle });
+      if (b.wheelchair_accessible !== undefined || b.pets_allowed !== undefined || b.luggage_capacity !== undefined) {
+        await repo.setVehicleAccessibility(profile.vehicle_id, {
+          wheelchairAccessible: b.wheelchair_accessible,
+          petsAllowed: b.pets_allowed,
+          luggageCapacity: b.luggage_capacity ?? undefined,
+        });
+      }
+      res.json({ vehicle: await repo.getVehicle(profile.vehicle_id) });
     }),
   );
 
@@ -699,6 +710,73 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
     '/earnings/payouts',
     wrap(async (req, res) => {
       res.json({ batches: await repo.listPayoutBatches(req.user!.driver_id!) });
+    }),
+  );
+
+  // ── Waitlist (Task 10.2) — view the queue for one's own trip ───────────────
+  router.get(
+    '/trips/:id/waitlist',
+    wrap(async (req, res) => {
+      await ownTripOrThrow(req, req.params.id);
+      res.json({ entries: await repo.listTripWaitlist(req.params.id) });
+    }),
+  );
+
+  /** Loads the reservation + enforces it belongs to a trip assigned to this driver. */
+  async function ownReservationOrThrow(req: { params: Record<string, string>; user?: { driver_id: string | null } }) {
+    const driverId = await repo.getReservationTripDriver(req.params.id);
+    if (!driverId) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+    if (driverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne concerne pas vos voyages');
+    return req.params.id;
+  }
+
+  // ── In-app messaging (Task 11.2) ────────────────────────────────────────────
+  router.get(
+    '/reservations/:id/conversation',
+    wrap(async (req, res) => {
+      const id = await ownReservationOrThrow(req);
+      const conversationId = await repo.getOrCreateConversation(id);
+      res.json({ conversation_id: conversationId, messages: await repo.listMessages(conversationId) });
+    }),
+  );
+  router.post(
+    '/reservations/:id/conversation/messages',
+    wrap(async (req, res) => {
+      const id = await ownReservationOrThrow(req);
+      const b = z.object({ body: z.string().trim().min(1).max(2000) }).parse(req.body);
+      const conversationId = await repo.getOrCreateConversation(id);
+      const msgId = await repo.sendMessage(conversationId, 'driver', req.user!.driver_id!, b.body);
+      res.status(201).json({ id: msgId });
+    }),
+  );
+  router.post(
+    '/reservations/:id/conversation/read',
+    wrap(async (req, res) => {
+      const id = await ownReservationOrThrow(req);
+      const conversationId = await repo.getOrCreateConversation(id);
+      res.json({ marked: await repo.markConversationRead(conversationId, 'driver') });
+    }),
+  );
+
+  // ── Masked calling / contact reveal (Task 11.3) ─────────────────────────────
+  router.post(
+    '/reservations/:id/reveal-contact',
+    wrap(async (req, res) => {
+      const id = await ownReservationOrThrow(req);
+      const phone = await repo.revealContact(id, 'driver', req.user!.driver_id!);
+      res.json({ phone });
+    }),
+  );
+
+  // ── SOS (Task 11.5) ──────────────────────────────────────────────────────────
+  router.post(
+    '/sos',
+    wrap(async (req, res) => {
+      const b = z
+        .object({ reservation_id: z.string().uuid().nullish(), lat: z.number().min(-90).max(90).nullish(), lon: z.number().min(-180).max(180).nullish(), notes: z.string().max(1000).nullish() })
+        .parse(req.body ?? {});
+      const id = await repo.triggerSos({ reservationId: b.reservation_id, role: 'driver', id: req.user!.driver_id!, lat: b.lat, lon: b.lon, notes: b.notes });
+      res.status(201).json({ id });
     }),
   );
 

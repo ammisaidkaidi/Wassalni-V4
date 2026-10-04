@@ -17,6 +17,7 @@ export interface User {
   email_verified: boolean;
   customer_id: string | null;
   driver_id: string | null;
+  admin_role: 'super_admin' | 'admin' | 'support' | 'finance' | 'operations' | null;
 }
 
 export interface TripSearchRow {
@@ -136,6 +137,9 @@ export interface VehicleRow {
   make: string | null;
   model: string | null;
   is_eligible?: boolean;
+  wheelchair_accessible?: boolean;
+  pets_allowed?: boolean;
+  luggage_capacity?: number | null;
 }
 
 export interface TrajectoryRow {
@@ -604,4 +608,153 @@ export interface PaymentGatewayEventRow {
   processing_result: 'processed' | 'duplicate' | 'rejected';
   processing_note: string | null;
   received_at: string;
+}
+
+// ── 20-task override: Tasks 10.1–13.2 ────────────────────────────────────────
+
+export interface NotificationRow {
+  id: string;
+  type: string;
+  title: string;
+  body: string | null;
+  read_at: string | null;
+  created_at: string;
+  data: Record<string, unknown> | null;
+}
+
+export interface WaitlistEntryRow {
+  id: string;
+  trip_id: string;
+  customer_id: string;
+  customer_name?: string;
+  seats: number;
+  status: 'waiting' | 'offered' | 'confirmed' | 'expired' | 'cancelled';
+  position: number;
+  created_at: string;
+  trip_code?: string;
+  departure_at?: string;
+}
+
+export interface FavoriteRouteRow {
+  id: string;
+  origin_wpoint_id: string;
+  destination_wpoint_id: string;
+  origin_label: string;
+  destination_label: string;
+  notify: boolean;
+  created_at: string;
+}
+
+export interface FavoriteDriverRow {
+  id: string;
+  driver_id: string;
+  driver_name: string;
+  notify: boolean;
+  created_at: string;
+}
+
+export interface ReservationPassengerRow {
+  id: string;
+  full_name: string;
+  phone: string | null;
+  fare_share: string | null;
+}
+
+export interface MessageRow {
+  id: string;
+  conversation_id: string;
+  sender_role: 'customer' | 'driver';
+  sender_id: string;
+  body: string;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface EmergencyContactRow {
+  id: string;
+  full_name: string;
+  phone: string;
+  relationship: string | null;
+  created_at: string;
+}
+
+export interface SosEventRow {
+  id: string;
+  reservation_id: string | null;
+  role: 'customer' | 'driver';
+  lat: number | null;
+  lon: number | null;
+  notes: string | null;
+  status: 'open' | 'acknowledged' | 'resolved';
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution_notes: string | null;
+}
+
+export interface AdminAuditLogRow {
+  id: string;
+  admin_id: string;
+  admin_name: string | null;
+  action: string;
+  target_type: string | null;
+  target_id: string | null;
+  reason: string | null;
+  before: unknown;
+  after: unknown;
+  created_at: string;
+}
+
+export interface RecurringTemplateRow {
+  id: string;
+  trajectory_id: string;
+  trajectory_name: string;
+  driver_id: string | null;
+  driver_name: string | null;
+  vehicle_id: string | null;
+  weekdays: number[];
+  departure_time: string;
+  capacity: number;
+  seat_price: string;
+  starts_on: string;
+  ends_on: string | null;
+  horizon_days: number;
+  active: boolean;
+  notes: string | null;
+  last_generated_through: string | null;
+  created_at: string;
+}
+
+export interface AnalyticsSummary {
+  revenue: number;
+  bookings: number;
+  no_shows: number;
+  cancellations: number;
+  occupancy_pct: number;
+  refunds_total: number;
+}
+
+export interface ImportLogRow {
+  id: string;
+  ran_at: string;
+  success: boolean;
+  error_details: string | null;
+  [k: string]: unknown;
+}
+
+export interface AdminUserRow {
+  id: string;
+  full_name: string;
+  email: string;
+  admin_role: 'super_admin' | 'admin' | 'support' | 'finance' | 'operations' | null;
+  created_at: string;
+}
+
+export interface SharedTripInfo {
+  reservation_status: string;
+  trip_status: string;
+  departure_at: string;
+  arrival_eta: string | null;
+  seats: number;
+  driver_location: { lat: number; lon: number; recorded_at: string } | null;
 }

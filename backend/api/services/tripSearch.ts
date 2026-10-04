@@ -36,6 +36,8 @@ export interface TripSearchRow {
   price: string;
   currency: string;
   seats_available: number | null;
+  /** Task 10.4 — set only on rows returned by the ±3-day fallback below, never on an exact-date match. */
+  fallback_date?: boolean;
 }
 
 /**
@@ -43,7 +45,31 @@ export interface TripSearchRow {
  * crosses FROM-wilaya before TO-wilaya and that have a defined trip_price
  * for that exact pair.
  */
-export async function searchTrips(db: DBHelper, p: TripSearchParams): Promise<{ trips: TripSearchRow[]; total: number; page: number; page_size: number }> {
+export async function searchTrips(
+  db: DBHelper,
+  p: TripSearchParams,
+): Promise<{ trips: TripSearchRow[]; total: number; page: number; page_size: number; fallback_date?: boolean }> {
+  const result = await searchTripsExact(db, p);
+  // Task 10.4 — a single exact calendar day with zero results gets a
+  // same-criteria ±3-day retry so the customer sees *something* nearby
+  // instead of a dead end, with every row clearly flagged as a fallback
+  // (never silently swapped in as if it matched the requested date).
+  if (result.total === 0 && p.dateFrom && p.dateTo && p.dateFrom === p.dateTo) {
+    const center = new Date(`${p.dateFrom}T00:00:00Z`);
+    const widen = (days: number): string => {
+      const d = new Date(center);
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+    const fallback = await searchTripsExact(db, { ...p, dateFrom: widen(-3), dateTo: widen(3), page: 1, pageSize: p.pageSize });
+    if (fallback.total > 0) {
+      return { ...fallback, trips: fallback.trips.map((t) => ({ ...t, fallback_date: true })), fallback_date: true };
+    }
+  }
+  return result;
+}
+
+async function searchTripsExact(db: DBHelper, p: TripSearchParams): Promise<{ trips: TripSearchRow[]; total: number; page: number; page_size: number }> {
   const params: unknown[] = [p.fromWilayaId, p.toWilayaId];
   let dateFilter = '';
   if (p.dateFrom && p.dateTo) {

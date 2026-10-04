@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom';
 import { ApiError, api, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
+import { ConversationAction, PassengersAction, RequirementsAction, RevealContactAction, ShareLinkAction } from '../components/ReservationExtras';
 import type { PaymentRow, ReservationEtaResult, ReservationRow, RatingStatus } from '../types';
 
 const PAYMENT_METHOD_LABEL: Record<string, string> = {
@@ -363,6 +364,15 @@ export default function MyReservationsPage() {
               )}
             </div>
             {r.trip_status === 'in_progress' && r.status === 'confirmed' && <LiveEta reservationId={r.id} />}
+            {r.status !== 'cancelled' && (
+              <div className="meta" style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                <ConversationAction apiBase={`/api/reservations/${r.id}`} myRole="customer" />
+                <RevealContactAction apiBase={`/api/reservations/${r.id}`} />
+                <ShareLinkAction apiBase={`/api/reservations/${r.id}`} />
+                <PassengersAction apiBase={`/api/reservations/${r.id}`} seats={r.seats} />
+                <RequirementsAction apiBase={`/api/reservations/${r.id}`} />
+              </div>
+            )}
             <div className="foot">
               <span className={`chip ${r.status}`}>{r.status}</span>
               {(r.status === 'pending' || r.status === 'confirmed') && (

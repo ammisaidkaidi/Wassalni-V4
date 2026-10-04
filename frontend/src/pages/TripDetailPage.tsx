@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
+import SeatPicker from '../components/SeatPicker';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
 import type { CommuneRow, TripDetail, Wilaya } from '../types';
 
@@ -22,6 +23,9 @@ export default function TripDetailPage() {
   const [seats, setSeats] = useState(1);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
+  const [favMsg, setFavMsg] = useState('');
+  const [waitlistMsg, setWaitlistMsg] = useState('');
+  const [joiningWaitlist, setJoiningWaitlist] = useState(false);
 
   const [showMap, setShowMap] = useState(false);
   const [pickMode, setPickMode] = useState<PickMode>('pickup');
@@ -219,6 +223,42 @@ export default function TripDetailPage() {
     }
   };
 
+  // Task 10.5 — favorite this pickup/dropoff pair for quick rebooking later.
+  const addFavoriteRoute = async (): Promise<void> => {
+    if (!user) {
+      navigate(`/login?next=/trips/${id}`);
+      return;
+    }
+    setFavMsg('');
+    try {
+      await api('/api/customer/favorites/routes', { method: 'POST', body: { origin_wpoint_id: pickup, destination_wpoint_id: dropoff } });
+      setFavMsg('✔ Trajet ajouté à vos favoris');
+    } catch (e) {
+      setFavMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Task 10.2 — when the chosen segment has no free seats, offer the waitlist instead.
+  const joinWaitlist = async (): Promise<void> => {
+    if (!user) {
+      navigate(`/login?next=/trips/${id}`);
+      return;
+    }
+    setWaitlistMsg('');
+    setJoiningWaitlist(true);
+    try {
+      await api('/api/customer/waitlist', {
+        method: 'POST',
+        body: { trip_id: id, seats, pickup_wpoint_id: pickup, dropoff_wpoint_id: dropoff },
+      });
+      setWaitlistMsg("✔ Vous êtes sur la liste d'attente — retrouvez-la dans votre profil.");
+    } catch (e) {
+      setWaitlistMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setJoiningWaitlist(false);
+    }
+  };
+
   if (error) return <p className="alert error">{error}</p>;
   if (!data) return <p className="empty">Chargement…</p>;
   const { trip, stops } = data;
@@ -293,16 +333,15 @@ export default function TripDetailPage() {
               ))}
             </select>
           </label>
-          <label>
-            Places
-            <input
-              type="number"
-              min={1}
-              max={maxSeats}
-              value={seats}
-              onChange={(e) => setSeats(Math.max(1, Math.min(maxSeats, Number(e.target.value) || 1)))}
-            />
-          </label>
+          <div className="form-inline" style={{ marginBottom: 8 }}>
+            <button type="button" className="btn ghost small" onClick={() => void addFavoriteRoute()}>
+              ★ Ajouter ce trajet aux favoris
+            </button>
+          </div>
+          {favMsg && <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>{favMsg}</p>}
+
+          <label>Places</label>
+          <SeatPicker capacity={trip.capacity} available={maxSeats} selected={seats} onChange={(n) => setSeats(Math.max(1, Math.min(maxSeats, n)))} />
 
           <div className="form-inline" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
             <button type="button" className="btn ghost small" onClick={locateMe}>
@@ -351,6 +390,17 @@ export default function TripDetailPage() {
           </div>
           {done ? (
             <p className="alert success">{done}</p>
+          ) : maxSeats < 1 && pricePair ? (
+            <>
+              <p className="muted small">Ce trajet est complet pour le moment.</p>
+              {waitlistMsg ? (
+                <p className="alert success">{waitlistMsg}</p>
+              ) : (
+                <button className="btn primary wide" disabled={joiningWaitlist} onClick={() => void joinWaitlist()}>
+                  {joiningWaitlist ? 'Inscription…' : "Rejoindre la liste d'attente"}
+                </button>
+              )}
+            </>
           ) : (
             <button className="btn primary wide" disabled={!pricePair || maxSeats < 1} onClick={() => void book()}>
               {user ? 'Réserver' : 'Se connecter pour réserver'}

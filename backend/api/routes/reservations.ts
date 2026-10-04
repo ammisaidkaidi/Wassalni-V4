@@ -6,6 +6,7 @@ import { ApiError, wrap } from '../middleware/errors';
 import { GATEWAY_NAME, generateTransactionId } from '../payments/mockGateway';
 import { requireAuth, requireCustomer } from '../middleware/session';
 import { streamReceiptPdf } from '../services/receipt';
+import { randomToken, sha256 } from '../auth/passwords';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -392,6 +393,134 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
         );
       }
       await db.raw('delete from reservation where id = $1', [id]);
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── helpers shared by the sections below ──────────────────────────────────
+  async function ownReservationOrThrow(req: { params: Record<string, string>; user?: { customer_id?: string | null } }): Promise<{ id: string; customer_id: string }> {
+    const id = req.params.id;
+    if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+    const row = await db.selectOne<{ id: string; customer_id: string }>('reservation', { columns: ['id', 'customer_id'], where: { id } });
+    if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+    if (row.customer_id !== req.user!.customer_id) throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+    return row;
+  }
+
+  // ── Task 10.6 — group bookings: named passenger list + optional fare split ─
+  const passengersSchema = z.object({
+    passengers: z
+      .array(
+        z.object({
+          full_name: z.string().trim().min(1).max(200),
+          phone: z.string().regex(/^\+?[0-9]{8,15}$/).nullish(),
+          fare_share: z.number().min(0).nullish(),
+        }),
+      )
+      .min(1)
+      .max(30),
+  });
+  router.put(
+    '/:id/passengers',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const b = passengersSchema.parse(req.body);
+      await repo.setReservationPassengers(row.id, b.passengers);
+      res.json({ passengers: await repo.listReservationPassengers(row.id) });
+    }),
+  );
+  router.get(
+    '/:id/passengers',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      res.json({ passengers: await repo.listReservationPassengers(row.id) });
+    }),
+  );
+
+  // ── Task 10.7 — accessibility / service requirements ───────────────────────
+  const requirementsSchema = z.object({
+    needs_wheelchair: z.boolean().optional(),
+    has_pet: z.boolean().optional(),
+    luggage_count: z.number().int().min(0).max(50).optional(),
+    special_requirements: z.string().max(1000).nullish(),
+  });
+  router.put(
+    '/:id/requirements',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const b = requirementsSchema.parse(req.body);
+      await repo.setReservationRequirements(row.id, {
+        needsWheelchair: b.needs_wheelchair,
+        hasPet: b.has_pet,
+        luggageCount: b.luggage_count,
+        specialRequirements: b.special_requirements ?? undefined,
+      });
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── Task 11.2 — in-app messaging, scoped to this reservation ────────────────
+  router.get(
+    '/:id/conversation',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const conversationId = await repo.getOrCreateConversation(row.id);
+      const messages = await repo.listMessages(conversationId);
+      res.json({ conversation_id: conversationId, messages });
+    }),
+  );
+  router.post(
+    '/:id/conversation/messages',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const b = z.object({ body: z.string().trim().min(1).max(2000) }).parse(req.body);
+      const conversationId = await repo.getOrCreateConversation(row.id);
+      const id = await repo.sendMessage(conversationId, 'customer', req.user!.customer_id!, b.body);
+      res.status(201).json({ id });
+    }),
+  );
+  router.post(
+    '/:id/conversation/read',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const conversationId = await repo.getOrCreateConversation(row.id);
+      res.json({ marked: await repo.markConversationRead(conversationId, 'customer') });
+    }),
+  );
+
+  // ── Task 11.3 — contact reveal (honest masked-calling scope, see sql.txt) ──
+  router.post(
+    '/:id/reveal-contact',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const phone = await repo.revealContact(row.id, 'customer', req.user!.customer_id!);
+      res.json({ phone });
+    }),
+  );
+
+  // ── Task 11.4 — shareable live-trip link ────────────────────────────────────
+  router.post(
+    '/:id/share-links',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      const b = z.object({ ttl_hours: z.number().min(1).max(168).optional() }).parse(req.body ?? {});
+      const token = randomToken();
+      const id = await repo.createShareToken(row.id, sha256(token), b.ttl_hours ?? 24);
+      res.status(201).json({ id, token });
+    }),
+  );
+  router.get(
+    '/:id/share-links',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      res.json({ links: await repo.listShareTokens(row.id) });
+    }),
+  );
+  router.post(
+    '/:id/share-links/:tokenId/revoke',
+    wrap(async (req, res) => {
+      const row = await ownReservationOrThrow(req);
+      await repo.revokeShareToken(req.params.tokenId, row.id);
       res.json({ ok: true });
     }),
   );

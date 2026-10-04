@@ -394,6 +394,12 @@ create table if not exists import_log (
   nb_communes   integer not null,
   payload_bytes integer not null
 );
+-- Task 12.5 — "Import history" additionally wants success/failure + error
+-- details, which the original importer never recorded (a failure rolled
+-- back and left no trace at all). Nullable/defaulted so existing rows stay
+-- valid; sp_import_algeria_data below now logs failures too.
+alter table import_log add column if not exists success       boolean not null default true;
+alter table import_log add column if not exists error_details text;
 
 
 -- ─── INDEXES ───
@@ -493,7 +499,32 @@ select * from (values
   ('DZ773','REFERRAL_ALREADY_ATTRIBUTED',   'DomainError',                 'This account already has a referrer on file'),
   ('DZ781','PAYOUT_BATCH_NOT_FOUND',        'DomainError',                 'Unknown payout batch id'),
   ('DZ782','PAYOUT_BATCH_ALREADY_PAID',     'DomainError',                 'Payout batch has already been marked as paid'),
-  ('DZ783','PAYOUT_BATCH_EMPTY',            'DomainError',                 'No unbatched payout ledger entries in that period for this driver')
+  ('DZ783','PAYOUT_BATCH_EMPTY',            'DomainError',                 'No unbatched payout ledger entries in that period for this driver'),
+  -- Phase 10-13 batch (Tasks 10.1-13.2)
+  ('DZ801','WAITLIST_NOT_FOUND',            'DomainError',                 'Unknown waitlist entry id'),
+  ('DZ802','WAITLIST_ALREADY_ACTIVE',       'DomainError',                 'Customer already has an active waitlist entry for this trip'),
+  ('DZ803','WAITLIST_INVALID_TRANSITION',   'DomainError',                 'Illegal waitlist entry status transition'),
+  ('DZ804','WAITLIST_TRIP_NOT_SCHEDULED',   'DomainError',                 'Can only join the waitlist of a scheduled, published trip'),
+  ('DZ811','RECURRING_TEMPLATE_NOT_FOUND',  'DomainError',                 'Unknown recurring trip template id'),
+  ('DZ812','RECURRING_TEMPLATE_INVALID_RULE','DomainError',                'Recurrence rule must select at least one weekday'),
+  ('DZ813','RECURRING_EXCEPTION_INVALID',   'DomainError',                 'Exception date is outside the template''s generation window'),
+  ('DZ821','FAVORITE_NOT_FOUND',            'DomainError',                 'Unknown favorite id'),
+  ('DZ831','PASSENGER_LIST_MISMATCH',       'DomainError',                 'Number of named passengers must match the reserved seat count'),
+  ('DZ832','PASSENGER_NAME_REQUIRED',       'DomainError',                 'Each passenger needs a name'),
+  ('DZ841','SERVICE_REQUIREMENT_UNSUPPORTED','DomainError',                'Trip/vehicle cannot accommodate the requested service requirement'),
+  ('DZ851','CONVERSATION_NOT_FOUND',        'DomainError',                 'Unknown conversation id'),
+  ('DZ852','MESSAGE_FORBIDDEN',             'DomainError',                 'You are not a participant in this conversation'),
+  ('DZ853','MESSAGE_EMPTY',                 'DomainError',                 'Message body cannot be empty'),
+  ('DZ854','MESSAGE_RATE_LIMITED',          'DomainError',                 'Too many messages sent in a short period — please slow down'),
+  ('DZ861','CONTACT_REVEAL_FORBIDDEN',      'DomainError',                 'Only the driver/customer of this reservation may request contact'),
+  ('DZ862','SHARE_TOKEN_NOT_FOUND',         'DomainError',                 'Unknown or invalid share link'),
+  ('DZ863','SHARE_TOKEN_EXPIRED',           'DomainError',                 'This share link has expired'),
+  ('DZ864','SHARE_TOKEN_REVOKED',           'DomainError',                 'This share link has been revoked'),
+  ('DZ871','SOS_NOT_FOUND',                 'DomainError',                 'Unknown SOS event id'),
+  ('DZ872','SOS_RATE_LIMITED',              'DomainError',                 'Too many SOS triggers in a short period — please wait or call emergency services directly'),
+  ('DZ881','PERMISSION_DENIED',             'DomainError',                 'Your admin role does not grant this permission'),
+  ('DZ882','ADMIN_ROLE_NOT_FOUND',          'DomainError',                 'Unknown admin role'),
+  ('DZ891','IMPORT_RUN_NOT_FOUND',          'DomainError',                 'Unknown registry import run id')
 ) as t(sqlstate, code_name, ts_equivalent, description);
 
 
@@ -1530,21 +1561,30 @@ $$
 declare
   v_res_id uuid;
   v_status reservation_status;
+  v_res    reservation%rowtype;
+  v_pay    payment%rowtype;
 begin
   select reservation_id into v_res_id from payment where id = p_payment;
   if v_res_id is null then
     raise exception 'Payment not found' using errcode = 'DZ501';
   end if;
 
-  select status into v_status from reservation where id = v_res_id for update;
-  if v_status = 'cancelled' then
+  select * into v_res from reservation where id = v_res_id for update;
+  if v_res.status = 'cancelled' then
     raise exception 'Cancelled reservation is not payable' using errcode = 'DZ403';
   end if;
 
-  update payment set status = 'paid' where id = p_payment and status = 'pending';
+  update payment set status = 'paid' where id = p_payment and status = 'pending' returning * into v_pay;
   if not found then
     raise exception 'Invalid payment transition' using errcode = 'DZ502';
   end if;
+
+  -- Task 11.1 — "payment confirmation" notification (any method: wallet,
+  -- gateway webhook, cash, admin manual settlement — all funnel here).
+  perform notify_customer(v_res.customer_id, 'payment_confirmed',
+    'Paiement confirmé', 'Votre paiement de ' || v_pay.amount || ' ' || v_pay.currency ||
+    ' pour la réservation ' || v_res.code || ' a été confirmé.',
+    jsonb_build_object('reservation_id', v_res.id, 'payment_id', p_payment));
 end;
 $$;
 
@@ -1626,6 +1666,15 @@ begin
         perform apply_refund(v_pay.payment_id, v_remaining, 'system', null, 100);
       end if;
     end loop;
+
+    -- Task 11.1 — "cancellation" notification: every customer swept up by
+    -- the whole-trip cancellation gets notified (customer-initiated single
+    -- reservation cancellations are notified from cancel_reservation()
+    -- itself instead).
+    perform notify_customer(r.customer_id, 'trip_cancelled',
+      'Voyage annulé', 'Votre réservation ' || r.code || ' a été annulée car le voyage a été annulé.',
+      jsonb_build_object('reservation_id', r.id, 'trip_id', new.id))
+    from reservation r where r.trip_id = new.id and r.status = 'cancelled';
   end if;
   return null;
 end;
@@ -1700,6 +1749,13 @@ begin
 
   if new.capacity < v_held then
     raise exception 'Capacity too low' using errcode = 'DZ305';
+  end if;
+
+  -- Task 10.2 — an admin raising a trip's capacity can free room for
+  -- waitlisted customers; promote_waitlist() is a no-op if nobody is
+  -- waiting or there still isn't enough room for anyone queued.
+  if new.capacity > old.capacity then
+    perform promote_waitlist(new.id);
   end if;
 
   return null;
@@ -2619,6 +2675,7 @@ $$
 declare
   v_rec   record;
   v_count integer := 0;
+  v_res   reservation%rowtype;
 begin
   for v_rec in
     select id, reservation_id from payment
@@ -2628,7 +2685,17 @@ begin
     update payment set status = 'expired', updated_at = now() where id = v_rec.id;
     v_count := v_count + 1;
 
-    if exists (select 1 from reservation where id = v_rec.reservation_id and status = 'pending') then
+    select * into v_res from reservation where id = v_rec.reservation_id;
+
+    -- Task 13.2 — "notify customer if appropriate": only the pending
+    -- reservation this specific checkout attempt would have paid for is
+    -- actually impacted (cancel_reservation() below already no-ops, via
+    -- the exists() guard, if something else already confirmed/paid it).
+    if v_res.id is not null and v_res.status = 'pending' then
+      perform notify_customer(v_res.customer_id, 'payment_expired',
+        'Délai de paiement expiré', 'Le délai pour régler votre réservation ' || v_res.code ||
+        ' a expiré ; la réservation a été annulée.',
+        jsonb_build_object('reservation_id', v_res.id, 'payment_id', v_rec.id));
       perform cancel_reservation(v_rec.reservation_id);
     end if;
   end loop;
@@ -3477,6 +3544,1616 @@ $$;
 
 
 -- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13M — NOTIFICATIONS (Task 11.1)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Generic in-app notification sink, addressed to exactly one of
+-- customer/driver/admin app_user accounts. Built first (even though
+-- numbered 11.1) because the waitlist (10.2), SOS (11.5) and payment-hold
+-- cleanup (13.2) features below all need to raise notifications and must
+-- not each invent their own delivery mechanism.
+
+-- recipient_user_id is a bare uuid (no FK): it points at app_user, which
+-- lives in api/authSchema.ts and is only guaranteed to exist once the API
+-- has booted at least once — same reason vehicle_inspection.reviewed_by
+-- above has no FK either (Task 6.2).
+create table if not exists notification (
+  id            uuid primary key default gen_random_uuid(),
+  recipient_user_id uuid,
+  type          text not null,
+  title         text not null,
+  body          text not null,
+  data          jsonb not null default '{}'::jsonb,
+  read_at       timestamptz,
+  created_at    timestamptz not null default now()
+);
+create index if not exists idx_notification_recipient on notification (recipient_user_id, created_at desc);
+create index if not exists idx_notification_unread     on notification (recipient_user_id) where read_at is null;
+
+-- Looks up the app_user row(s) for a customer/driver, and fans the same
+-- notification out to every account linked to that profile (today a
+-- profile has at most one app_user, but this keeps the fan-out generic).
+create or replace function notify_customer(p_customer uuid, p_type text, p_title text, p_body text, p_data jsonb default '{}'::jsonb)
+returns void language plpgsql as
+$$
+begin
+  if p_customer is null then return; end if;
+  insert into notification (recipient_user_id, type, title, body, data)
+  select u.id, p_type, p_title, p_body, p_data from app_user u where u.customer_id = p_customer;
+end;
+$$;
+
+create or replace function notify_driver(p_driver uuid, p_type text, p_title text, p_body text, p_data jsonb default '{}'::jsonb)
+returns void language plpgsql as
+$$
+begin
+  if p_driver is null then return; end if;
+  insert into notification (recipient_user_id, type, title, body, data)
+  select u.id, p_type, p_title, p_body, p_data from app_user u where u.driver_id = p_driver;
+end;
+$$;
+
+-- Fans a notification out to every admin account (used for SOS / fraud
+-- signals / other "the platform needs to know now" events). Role-targeted
+-- variant lets 12.6's granular roles receive only what's relevant to them.
+create or replace function notify_admins(p_type text, p_title text, p_body text, p_data jsonb default '{}'::jsonb, p_admin_role text default null)
+returns void language plpgsql as
+$$
+begin
+  insert into notification (recipient_user_id, type, title, body, data)
+  select u.id, p_type, p_title, p_body, p_data
+  from app_user u
+  where u.role = 'admin'
+    and (p_admin_role is null or u.admin_role = p_admin_role or u.admin_role = 'super_admin');
+end;
+$$;
+
+create or replace function mark_notification_read(p_notification uuid, p_user uuid)
+returns void language plpgsql as
+$$
+begin
+  update notification set read_at = coalesce(read_at, now())
+  where id = p_notification and recipient_user_id = p_user;
+end;
+$$;
+
+create or replace function mark_all_notifications_read(p_user uuid)
+returns integer language plpgsql as
+$$
+declare v_n integer;
+begin
+  update notification set read_at = now() where recipient_user_id = p_user and read_at is null;
+  get diagnostics v_n = row_count;
+  return v_n;
+end;
+$$;
+
+-- ── Wire notify_customer() into the reservation lifecycle events already
+-- implemented in earlier sections — booking request / approval / rejection
+-- / cancellation / trip completion (schedule change and price change are
+-- wired further down, once the trip tables they touch are in scope).
+-- cancel_reservation() distinguishes rejection (was 'pending', e.g. a
+-- driver declining a booking request) from cancellation (was 'confirmed')
+-- purely from the row's old status — no new parameter needed.
+create or replace function reserve(
+  p_trip           uuid,
+  p_customer       uuid,
+  p_seats          integer,
+  p_pickup_wpoint  uuid default null,
+  p_dropoff_wpoint uuid default null,
+  p_notes          text default null
+)
+returns uuid language plpgsql as
+$$
+declare
+  v_trip      trip%rowtype;
+  v_total     numeric(12,2);
+  v_unit      numeric(12,2);
+  v_free      integer;
+  v_id        uuid;
+  v_pick_pos  integer;
+  v_drop_pos  integer;
+  v_has_stops boolean;
+begin
+  if p_seats is null or p_seats < 1 or p_seats > 30 then
+    raise exception 'Seats must be between 1 and 30' using errcode = 'DZ001';
+  end if;
+
+  if not exists (select 1 from customer where id = p_customer) then
+    raise exception 'Customer not found' using errcode = 'DZ404';
+  end if;
+
+  select * into v_trip from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+
+  if v_trip.published_at is null then
+    raise exception 'Trip is not published' using errcode = 'DZ302';
+  end if;
+
+  if v_trip.status <> 'scheduled' or v_trip.departure_at <= now() then
+    raise exception 'Trip is not bookable' using errcode = 'DZ302';
+  end if;
+
+  v_free := seats_available(p_trip, p_pickup_wpoint, p_dropoff_wpoint);
+  if v_free is null or p_seats > v_free then
+    raise exception 'Insufficient seats' using errcode = 'DZ303';
+  end if;
+
+  v_has_stops := exists (select 1 from trip_stop where trip_id = p_trip);
+
+  if p_pickup_wpoint is not null then
+    select position into v_pick_pos
+    from wpoint
+    where id = p_pickup_wpoint and trajectory_id = v_trip.trajectory_id;
+
+    if v_pick_pos is null
+       or (v_has_stops and not exists (select 1 from trip_stop
+                                       where trip_id = p_trip and wpoint_id = p_pickup_wpoint)) then
+      raise exception 'Invalid pickup stop' using errcode = 'DZ601';
+    end if;
+  end if;
+
+  if p_dropoff_wpoint is not null then
+    select position into v_drop_pos
+    from wpoint
+    where id = p_dropoff_wpoint and trajectory_id = v_trip.trajectory_id;
+
+    if v_drop_pos is null
+       or (v_has_stops and not exists (select 1 from trip_stop
+                                       where trip_id = p_trip and wpoint_id = p_dropoff_wpoint)) then
+      raise exception 'Invalid dropoff stop' using errcode = 'DZ601';
+    end if;
+  end if;
+
+  if v_pick_pos is not null and v_drop_pos is not null and v_pick_pos >= v_drop_pos then
+    raise exception 'Invalid route order' using errcode = 'DZ603';
+  end if;
+
+  if p_pickup_wpoint is not null and p_dropoff_wpoint is not null then
+    select tp.price into v_unit
+    from trip_price tp
+    where tp.trip_id = p_trip
+      and tp.from_wpoint_id = p_pickup_wpoint
+      and tp.to_wpoint_id   = p_dropoff_wpoint;
+
+    if v_unit is null then
+      raise exception 'Trip price not defined' using errcode = 'DZ308';
+    end if;
+
+    v_total := p_seats * v_unit;
+  else
+    v_total := p_seats * v_trip.seat_price; -- fallback
+  end if;
+
+  insert into reservation (code, trip_id, trajectory_id, customer_id, seats,
+                           pickup_wpoint_id, dropoff_wpoint_id, total_price, currency, notes)
+  values ('RES-' || to_char(now(), 'YYYYMM') || '-' || lpad(nextval('seq_business_code')::text, 6, '0'),
+          p_trip, v_trip.trajectory_id, p_customer, p_seats,
+          p_pickup_wpoint, p_dropoff_wpoint, v_total, v_trip.currency, p_notes)
+  returning id into v_id;
+
+  perform notify_customer(p_customer, 'booking_request',
+    'Demande de réservation envoyée', 'Votre demande de réservation ' ||
+    (select code from reservation where id = v_id) || ' est en attente de confirmation.',
+    jsonb_build_object('reservation_id', v_id, 'trip_id', p_trip));
+
+  return v_id;
+end;
+$$;
+
+create or replace function confirm_reservation(p_reservation uuid)
+returns void language plpgsql as
+$$
+declare v_res reservation%rowtype;
+begin
+  update reservation set status = 'confirmed'
+  where id = p_reservation and status = 'pending'
+  returning * into v_res;
+  if not found then
+    if exists (select 1 from reservation where id = p_reservation) then
+      raise exception 'Invalid reservation transition' using errcode = 'DZ402';
+    else
+      raise exception 'Reservation not found' using errcode = 'DZ401';
+    end if;
+  end if;
+
+  perform notify_customer(v_res.customer_id, 'reservation_approved',
+    'Réservation confirmée', 'Votre réservation ' || v_res.code || ' a été confirmée par le chauffeur.',
+    jsonb_build_object('reservation_id', v_res.id, 'trip_id', v_res.trip_id));
+end;
+$$;
+
+create or replace function cancel_reservation(p_reservation uuid)
+returns void language plpgsql as
+$$
+declare
+  v_res reservation%rowtype;
+  v_old_status reservation_status;
+  v_pct numeric;
+  v_pay record;
+  v_remaining numeric;
+  v_amt numeric;
+begin
+  select status into v_old_status from reservation where id = p_reservation for update;
+
+  update reservation set status = 'cancelled'
+  where id = p_reservation and status in ('pending','confirmed')
+  returning * into v_res;
+
+  if v_res.id is null then
+    if exists (select 1 from reservation where id = p_reservation) then
+      raise exception 'Invalid reservation transition' using errcode = 'DZ402';
+    else
+      raise exception 'Reservation not found' using errcode = 'DZ401';
+    end if;
+  end if;
+
+  v_pct := cancellation_refund_pct(v_res.trip_id, now());
+  if v_pct > 0 then
+    for v_pay in
+      select id, amount, refunded_amount from payment
+      where reservation_id = p_reservation and status in ('paid','partially_refunded')
+      for update
+    loop
+      v_remaining := v_pay.amount - v_pay.refunded_amount;
+      v_amt := round(v_remaining * v_pct / 100.0, 2);
+      if v_amt > 0 then
+        perform apply_refund(v_pay.id, v_amt, 'system', null, v_pct);
+      end if;
+    end loop;
+  end if;
+
+  if v_old_status = 'pending' then
+    perform notify_customer(v_res.customer_id, 'reservation_rejected',
+      'Réservation refusée', 'Votre demande de réservation ' || v_res.code || ' a été refusée.',
+      jsonb_build_object('reservation_id', v_res.id, 'trip_id', v_res.trip_id));
+  else
+    perform notify_customer(v_res.customer_id, 'reservation_cancelled',
+      'Réservation annulée', 'Votre réservation ' || v_res.code || ' a été annulée.',
+      jsonb_build_object('reservation_id', v_res.id, 'trip_id', v_res.trip_id));
+  end if;
+
+  -- Task 10.2 — cancelling a confirmed/pending seat may free capacity that
+  -- a waiting customer on the SAME trip can now be promoted into. Reuses
+  -- the one promotion function (concurrency-safe, advisory-locked) rather
+  -- than duplicating the "find next waiter, try to reserve them" logic
+  -- anywhere else it's needed (this function, trg_trip_capacity_guard, and
+  -- the Task 13.1 scheduler tick all call this same promote_waitlist()).
+  perform promote_waitlist(v_res.trip_id);
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13N — WAITLIST (Task 10.2)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Scope decision: a waitlist entry targets the TRIP as a whole (like the
+-- rest of the pre-2.3 capacity story) but may optionally pin a specific
+-- pickup/dropoff segment; when promoted it reserves exactly that segment
+-- (or the trip's full first→last stop span if none was given).
+
+create table if not exists waitlist_entry (
+  id                uuid primary key default gen_random_uuid(),
+  trip_id           uuid not null references trip(id) on delete cascade,
+  customer_id       uuid not null references customer(id) on delete cascade,
+  seats             smallint not null check (seats between 1 and 30),
+  pickup_wpoint_id  uuid,
+  dropoff_wpoint_id uuid,
+  position          integer not null,
+  status            text not null default 'waiting' check (status in ('waiting','promoted','cancelled','expired')),
+  reservation_id    uuid references reservation(id) on delete set null,
+  created_at        timestamptz not null default now(),
+  promoted_at       timestamptz,
+  cancelled_at      timestamptz
+);
+create unique index if not exists uq_waitlist_active_per_customer
+  on waitlist_entry (trip_id, customer_id) where status = 'waiting';
+create index if not exists idx_waitlist_trip_position on waitlist_entry (trip_id, position) where status = 'waiting';
+
+create or replace function join_waitlist(
+  p_trip uuid, p_customer uuid, p_seats integer,
+  p_pickup_wpoint uuid default null, p_dropoff_wpoint uuid default null
+)
+returns uuid language plpgsql as
+$$
+declare
+  v_trip trip%rowtype;
+  v_pos  integer;
+  v_id   uuid;
+begin
+  if p_seats is null or p_seats < 1 or p_seats > 30 then
+    raise exception 'Seats must be between 1 and 30' using errcode = 'DZ001';
+  end if;
+  if not exists (select 1 from customer where id = p_customer) then
+    raise exception 'Customer not found' using errcode = 'DZ404';
+  end if;
+
+  select * into v_trip from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+  if v_trip.published_at is null or v_trip.status <> 'scheduled' or v_trip.departure_at <= now() then
+    raise exception 'Can only join the waitlist of a scheduled, published trip' using errcode = 'DZ804';
+  end if;
+
+  if exists (select 1 from waitlist_entry where trip_id = p_trip and customer_id = p_customer and status = 'waiting') then
+    raise exception 'Customer already has an active waitlist entry for this trip' using errcode = 'DZ802';
+  end if;
+
+  select coalesce(max(position), 0) + 1 into v_pos from waitlist_entry where trip_id = p_trip;
+
+  insert into waitlist_entry (trip_id, customer_id, seats, pickup_wpoint_id, dropoff_wpoint_id, position)
+  values (p_trip, p_customer, p_seats, p_pickup_wpoint, p_dropoff_wpoint, v_pos)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+create or replace function cancel_waitlist_entry(p_entry uuid, p_customer uuid)
+returns void language plpgsql as
+$$
+begin
+  update waitlist_entry
+  set status = 'cancelled', cancelled_at = now()
+  where id = p_entry and customer_id = p_customer and status = 'waiting';
+  if not found then
+    if exists (select 1 from waitlist_entry where id = p_entry) then
+      raise exception 'Illegal waitlist entry status transition' using errcode = 'DZ803';
+    else
+      raise exception 'Unknown waitlist entry id' using errcode = 'DZ801';
+    end if;
+  end if;
+end;
+$$;
+
+-- Current 1-based queue position among still-waiting entries (nulls when
+-- not waiting) — recomputed on read rather than stored, since entries
+-- ahead of this one may have been promoted/cancelled since it joined.
+create or replace function waitlist_position(p_entry uuid)
+returns integer language sql stable as
+$$
+  select count(*)::int + 1
+  from waitlist_entry w2
+  join waitlist_entry w1 on w1.id = p_entry
+  where w2.trip_id = w1.trip_id and w2.status = 'waiting' and w2.position < w1.position;
+$$;
+
+-- Concurrency-safe automatic promotion: takes a per-trip advisory
+-- transaction lock (released at statement end) so two triggers firing on
+-- the same trip at nearly the same instant (e.g. two cancellations) cannot
+-- both try to promote into the same freed seat — reserve()'s own row lock
+-- on trip/trip_price is a second, independent layer of protection.
+-- Called automatically right after any capacity-freeing event on a trip
+-- (reservation cancellation, trip capacity increase) and safe to call
+-- again as a periodic backstop sweep (Task 13.1/13.3) since it only acts
+-- on entries still in 'waiting' status.
+create or replace function promote_waitlist(p_trip uuid)
+returns integer language plpgsql as
+$$
+declare
+  v_entry  waitlist_entry%rowtype;
+  v_free   integer;
+  v_res_id uuid;
+  v_pickup uuid;
+  v_dropoff uuid;
+  v_count  integer := 0;
+begin
+  perform pg_advisory_xact_lock(hashtextextended(p_trip::text, 1));
+
+  for v_entry in
+    select * from waitlist_entry
+    where trip_id = p_trip and status = 'waiting'
+    order by position asc
+  loop
+    v_pickup  := v_entry.pickup_wpoint_id;
+    v_dropoff := v_entry.dropoff_wpoint_id;
+    v_free := seats_available(p_trip, v_pickup, v_dropoff);
+    if v_free is not null and v_entry.seats <= v_free then
+      begin
+        v_res_id := reserve(p_trip, v_entry.customer_id, v_entry.seats, v_pickup, v_dropoff,
+                            'Promu depuis la liste d''attente');
+        perform confirm_reservation(v_res_id);
+        update waitlist_entry
+        set status = 'promoted', promoted_at = now(), reservation_id = v_res_id
+        where id = v_entry.id;
+        perform notify_customer(v_entry.customer_id, 'waitlist_promoted',
+          'Place disponible !', 'Une place s''est libérée et votre réservation a été confirmée automatiquement.',
+          jsonb_build_object('reservation_id', v_res_id, 'trip_id', p_trip));
+        v_count := v_count + 1;
+      exception when others then
+        -- A race (e.g. the freed seat vanished again) must not abort the
+        -- whole sweep — leave this entry waiting and move on.
+        null;
+      end;
+    end if;
+  end loop;
+
+  return v_count;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13O — ADMIN AUDIT LOG (Task 12.4)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Scope decision: "record privileged actions" is effectively unbounded
+-- across the whole admin API surface. log_admin_action() is a single,
+-- generic, reusable helper; it is wired into the task's own listed
+-- examples (delete WPoint, refund, reject/decline reservation, suspend
+-- account, change configuration) plus the new privileged actions this
+-- batch adds (payout actions, admin role changes, trip reschedule
+-- override, SOS resolution) rather than attempting exhaustive coverage of
+-- every existing admin route — disclosed here, not silently partial.
+
+create table if not exists admin_audit_log (
+  id            uuid primary key default gen_random_uuid(),
+  admin_user_id uuid, -- bare uuid: points at app_user, see notification.recipient_user_id note above
+  action        text not null,
+  target_type   text not null,
+  target_id     text,
+  before_data   jsonb,
+  after_data    jsonb,
+  reason        text,
+  created_at    timestamptz not null default now()
+);
+create index if not exists idx_admin_audit_log_created on admin_audit_log (created_at desc);
+create index if not exists idx_admin_audit_log_target   on admin_audit_log (target_type, target_id);
+create index if not exists idx_admin_audit_log_actor     on admin_audit_log (admin_user_id);
+
+create or replace function log_admin_action(
+  p_admin uuid, p_action text, p_target_type text, p_target_id text,
+  p_before jsonb default null, p_after jsonb default null, p_reason text default null
+)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  insert into admin_audit_log (admin_user_id, action, target_type, target_id, before_data, after_data, reason)
+  values (p_admin, p_action, p_target_type, p_target_id, p_before, p_after, p_reason)
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13P — ADMIN-OVERRIDE TRIP RESCHEDULE (Task 11.1 "schedule change")
+-- ───────────────────────────────────────────────────────────────────────────────
+-- By design (trg_trip_edit_lock, Section 12) departure_at/pricing can never
+-- change on a trip once it has active reservations — exactly so a booked
+-- customer can never be silently rescheduled. That guarantee also means
+-- there is normally NO live trigger path for the "schedule change" /
+-- "price change" notification events the task lists: nothing could ever
+-- fire them. Rather than leave them unimplemented, this adds the one
+-- legitimate, audited, admin-privileged escape hatch real platforms need
+-- (driver breakdown, weather, force majeure): admin_reschedule_trip()
+-- requires a reason, flips a transaction-local flag that trg_trip_edit_lock
+-- explicitly recognises, notifies every affected customer, and writes an
+-- audit log entry. "Price change" has no equivalent live path added
+-- (nothing in the existing admin UI lets a price be edited post-booking
+-- either) and is disclosed as not wired, same as masked calling (11.3).
+
+create or replace function trg_trip_edit_lock()
+returns trigger language plpgsql as
+$$
+declare v_override boolean := coalesce(current_setting('wassalni.admin_reschedule', true), '') = 'on';
+begin
+  if old.published_at is not null and new.published_at is distinct from old.published_at then
+    raise exception 'published_at immutable' using errcode = 'DZ306';
+  end if;
+
+  if old.published_at is not null and trip_has_active_reservations(old.id) then
+    if not v_override and (
+         new.departure_at  is distinct from old.departure_at
+      or new.trajectory_id is distinct from old.trajectory_id
+      or new.seat_price    is distinct from old.seat_price
+      or new.currency      is distinct from old.currency
+      or new.driver_id     is distinct from old.driver_id
+      or new.vehicle_id    is distinct from old.vehicle_id
+    ) then
+      raise exception 'Trip locked' using errcode = 'DZ306';
+    end if;
+
+    if new.capacity < old.capacity then
+      raise exception 'Trip locked (capacity decrease)' using errcode = 'DZ306';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function admin_reschedule_trip(
+  p_trip uuid, p_new_departure timestamptz, p_new_arrival_eta timestamptz default null,
+  p_reason text default null, p_admin uuid default null
+)
+returns void language plpgsql as
+$$
+declare
+  v_old trip%rowtype;
+  v_res record;
+begin
+  if p_reason is null or btrim(p_reason) = '' then
+    raise exception 'A reason is required' using errcode = 'DZ001';
+  end if;
+
+  select * into v_old from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+
+  perform set_config('wassalni.admin_reschedule', 'on', true);
+  update trip set departure_at = p_new_departure, arrival_eta = coalesce(p_new_arrival_eta, arrival_eta)
+  where id = p_trip;
+
+  perform log_admin_action(p_admin, 'reschedule_trip', 'trip', p_trip::text,
+    jsonb_build_object('departure_at', v_old.departure_at),
+    jsonb_build_object('departure_at', p_new_departure),
+    p_reason);
+
+  for v_res in
+    select r.id, r.customer_id, r.code from reservation r
+    where r.trip_id = p_trip and r.status in ('pending','confirmed')
+  loop
+    perform notify_customer(v_res.customer_id, 'schedule_change',
+      'Horaire modifié', 'Le départ de votre réservation ' || v_res.code ||
+      ' a été déplacé au ' || to_char(p_new_departure, 'DD/MM/YYYY HH24:MI') || '. Motif : ' || p_reason,
+      jsonb_build_object('reservation_id', v_res.id, 'trip_id', p_trip, 'new_departure_at', p_new_departure));
+  end loop;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13Q — TRIP LIFECYCLE SCHEDULER (Task 13.1) + T-1h REMINDER (11.1)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- A single periodic tick (called from server.ts on the same kind of
+-- setInterval already used for Task 7.3's payment-intent sweep) drives all
+-- four required transitions purely by calling EXISTING, already-tested
+-- functions (start_trip / record_driver_no_show / sp_cancel_trip /
+-- sp_close_trip) — no transition logic is duplicated here, this is pure
+-- orchestration:
+--   grace period      -> still 'scheduled', just past departure, within the
+--                        grace window: auto-start it (start_trip).
+--   missed departure  -> still 'scheduled', past the grace window, HAS a
+--                        driver assigned: the driver never started it
+--                        (record_driver_no_show, which itself cancels the
+--                        trip + cascades refunds).
+--   cancellation      -> still 'scheduled', past the grace window, has NO
+--                        driver assigned at all: nothing to blame on a
+--                        driver, so the trip is simply cancelled
+--                        (sp_cancel_trip).
+--   no-show resolution-> still 'in_progress' long past its arrival ETA
+--                        (nobody manually closed it): auto-close
+--                        (sp_close_trip), which itself resolves each
+--                        confirmed reservation to completed/no_show
+--                        exactly as a manual close would.
+-- Also opportunistically re-runs promote_waitlist() for every trip it
+-- touches (bonus safety net toward Task 13.3, not claimed complete here)
+-- and fires the T-1h reminder notification (11.1) for trips about to
+-- depart that haven't been reminded yet.
+
+alter table trip add column if not exists reminder_sent_at timestamptz;
+
+insert into app_setting (key, value) values
+  ('trip_scheduler_grace_minutes', '30'),
+  ('trip_scheduler_autoclose_grace_minutes', '120'),
+  ('trip_reminder_lead_minutes', '60')
+on conflict (key) do nothing;
+
+create or replace function run_trip_lifecycle_tick()
+returns jsonb language plpgsql as
+$$
+declare
+  v_grace_min    integer;
+  v_close_min    integer;
+  v_reminder_min integer;
+  v_trip         record;
+  v_started      integer := 0;
+  v_noshow       integer := 0;
+  v_cancelled    integer := 0;
+  v_closed       integer := 0;
+  v_reminded     integer := 0;
+begin
+  select coalesce((select value from app_setting where key = 'trip_scheduler_grace_minutes')::int, 30) into v_grace_min;
+  select coalesce((select value from app_setting where key = 'trip_scheduler_autoclose_grace_minutes')::int, 120) into v_close_min;
+  select coalesce((select value from app_setting where key = 'trip_reminder_lead_minutes')::int, 60) into v_reminder_min;
+
+  -- scheduled, past departure, still within grace -> auto-start
+  for v_trip in
+    select id from trip
+    where status = 'scheduled' and published_at is not null
+      and departure_at <= now() and departure_at > now() - make_interval(mins => v_grace_min)
+    for update skip locked
+  loop
+    perform start_trip(v_trip.id);
+    v_started := v_started + 1;
+  end loop;
+
+  -- scheduled, past grace window
+  for v_trip in
+    select id, driver_id from trip
+    where status = 'scheduled' and published_at is not null
+      and departure_at <= now() - make_interval(mins => v_grace_min)
+    for update skip locked
+  loop
+    if v_trip.driver_id is not null then
+      perform record_driver_no_show(v_trip.id, 'Automatique : départ manqué au-delà du délai de grâce');
+      v_noshow := v_noshow + 1;
+    else
+      call sp_cancel_trip(v_trip.id);
+      v_cancelled := v_cancelled + 1;
+    end if;
+  end loop;
+
+  -- in_progress long past its ETA (or, lacking one, past departure + 2x
+  -- the auto-close grace) and nobody manually closed it -> auto-close
+  for v_trip in
+    select id from trip
+    where status = 'in_progress'
+      and coalesce(arrival_eta, departure_at + make_interval(mins => v_close_min))
+          <= now() - make_interval(mins => v_close_min)
+    for update skip locked
+  loop
+    call sp_close_trip(v_trip.id);
+    v_closed := v_closed + 1;
+  end loop;
+
+  -- Task 11.1 — T-1h reminder (one-shot per trip via reminder_sent_at)
+  for v_trip in
+    select id from trip
+    where status = 'scheduled' and published_at is not null and reminder_sent_at is null
+      and departure_at <= now() + make_interval(mins => v_reminder_min) and departure_at > now()
+    for update skip locked
+  loop
+    perform notify_customer(r.customer_id, 'trip_reminder', 'Départ dans moins d''une heure',
+      'Votre voyage ' || r.code || ' part bientôt, soyez prêt !',
+      jsonb_build_object('reservation_id', r.id, 'trip_id', v_trip.id))
+    from reservation r where r.trip_id = v_trip.id and r.status in ('pending','confirmed');
+
+    update trip set reminder_sent_at = now() where id = v_trip.id;
+    v_reminded := v_reminded + 1;
+  end loop;
+
+  return jsonb_build_object(
+    'started', v_started, 'driver_no_show', v_noshow, 'cancelled_no_driver', v_cancelled,
+    'auto_closed', v_closed, 'reminded', v_reminded
+  );
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13R — RECURRING TRIP TEMPLATES (Task 10.3)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists recurring_trip_template (
+  id              uuid primary key default gen_random_uuid(),
+  trajectory_id   uuid not null references trajectory(id),
+  driver_id       uuid references driver(id),
+  vehicle_id      uuid references vehicle(id),
+  weekdays        smallint[] not null,            -- 0=Sunday .. 6=Saturday (extract(dow))
+  departure_time  time not null,
+  capacity        smallint not null check (capacity > 0),
+  seat_price      numeric(12,2) not null check (seat_price >= 0),
+  starts_on       date not null,
+  ends_on         date,
+  horizon_days    integer not null default 14 check (horizon_days between 1 and 90),
+  active          boolean not null default true,
+  notes           text,
+  created_by      uuid,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  last_generated_through date,
+  constraint recurring_weekdays_nonempty check (cardinality(weekdays) > 0),
+  constraint recurring_date_range check (ends_on is null or starts_on <= ends_on)
+);
+
+-- Guards the weekdays array actually only contains 0..6 (can't express
+-- this as a plain column CHECK without a helper, since CHECK can't easily
+-- iterate an array in all Postgres versions used here).
+create or replace function trg_recurring_template_guard()
+returns trigger language plpgsql as
+$$
+begin
+  if exists (select 1 from unnest(new.weekdays) d where d not between 0 and 6) then
+    raise exception 'Recurrence rule must select at least one weekday' using errcode = 'DZ812';
+  end if;
+  new.updated_at := now();
+  return new;
+end;
+$$;
+drop trigger if exists trg_recurring_template_guard on recurring_trip_template;
+create trigger trg_recurring_template_guard
+  before insert or update on recurring_trip_template
+  for each row execute function trg_recurring_template_guard();
+
+create table if not exists recurring_trip_exception (
+  id            uuid primary key default gen_random_uuid(),
+  template_id   uuid not null references recurring_trip_template(id) on delete cascade,
+  exception_date date not null,
+  notes         text,
+  created_at    timestamptz not null default now(),
+  unique (template_id, exception_date)
+);
+
+-- Duplicate prevention: at most one generated trip per (template, calendar
+-- date) — enforced server-side, not just by generate_recurring_trips()'s
+-- own "not exists" check, so even a buggy caller can't double-generate.
+alter table trip add column if not exists recurring_template_id uuid references recurring_trip_template(id) on delete set null;
+alter table trip add column if not exists recurring_date date;
+create unique index if not exists uq_trip_recurring_occurrence
+  on trip (recurring_template_id, recurring_date) where recurring_template_id is not null;
+
+create or replace function generate_recurring_trips(p_template uuid, p_through date default null)
+returns integer language plpgsql as
+$$
+declare
+  v_tpl   recurring_trip_template%rowtype;
+  v_from  date;
+  v_to    date;
+  v_d     date;
+  v_dep   timestamptz;
+  v_trip  uuid;
+  v_count integer := 0;
+begin
+  select * into v_tpl from recurring_trip_template where id = p_template for update;
+  if not found then
+    raise exception 'Unknown recurring trip template id' using errcode = 'DZ811';
+  end if;
+  if not v_tpl.active then
+    return 0;
+  end if;
+
+  v_to := coalesce(p_through, current_date + v_tpl.horizon_days);
+  if v_tpl.ends_on is not null then
+    v_to := least(v_to, v_tpl.ends_on);
+  end if;
+  v_from := greatest(coalesce(v_tpl.last_generated_through + 1, v_tpl.starts_on), v_tpl.starts_on);
+
+  if v_from > v_to then
+    return 0;
+  end if;
+
+  v_d := v_from;
+  while v_d <= v_to loop
+    if extract(dow from v_d)::smallint = any(v_tpl.weekdays)
+       and not exists (select 1 from recurring_trip_exception where template_id = p_template and exception_date = v_d)
+       and not exists (select 1 from trip where recurring_template_id = p_template and recurring_date = v_d)
+    then
+      v_dep := v_d + v_tpl.departure_time;
+      if v_dep > now() then
+        v_trip := create_trip(v_tpl.trajectory_id, v_dep, v_tpl.capacity, v_tpl.seat_price, null, v_tpl.driver_id, v_tpl.vehicle_id,
+                              'Généré depuis le modèle récurrent');
+        update trip set recurring_template_id = p_template, recurring_date = v_d where id = v_trip;
+        perform populate_trip_stops(v_trip);
+        if v_tpl.driver_id is not null then
+          begin
+            call sp_populate_trip_prices_from_defaults(v_trip, false);
+            call sp_publish_trip(v_trip);
+          exception when others then
+            null; -- no default prices configured yet / vehicle not eligible: leave unpublished, admin finishes manually
+          end;
+        end if;
+        v_count := v_count + 1;
+      end if;
+    end if;
+    v_d := v_d + 1;
+  end loop;
+
+  update recurring_trip_template set last_generated_through = v_to where id = p_template;
+  return v_count;
+end;
+$$;
+
+create or replace function cancel_recurring_template(p_template uuid)
+returns integer language plpgsql as
+$$
+declare v_trip record; v_count integer := 0;
+begin
+  if not exists (select 1 from recurring_trip_template where id = p_template) then
+    raise exception 'Unknown recurring trip template id' using errcode = 'DZ811';
+  end if;
+
+  update recurring_trip_template set active = false, updated_at = now() where id = p_template;
+
+  for v_trip in
+    select id from trip where recurring_template_id = p_template and status = 'scheduled' and departure_at > now()
+  loop
+    call sp_cancel_trip(v_trip.id);
+    v_count := v_count + 1;
+  end loop;
+  return v_count;
+end;
+$$;
+
+-- Skip a single future occurrence (exception): cancels the already-generated
+-- trip for that date, if any, and prevents it from ever being regenerated.
+create or replace function add_recurring_exception(p_template uuid, p_date date, p_notes text default null)
+returns void language plpgsql as
+$$
+declare v_trip_id uuid;
+begin
+  if not exists (select 1 from recurring_trip_template where id = p_template) then
+    raise exception 'Unknown recurring trip template id' using errcode = 'DZ811';
+  end if;
+
+  insert into recurring_trip_exception (template_id, exception_date, notes)
+  values (p_template, p_date, p_notes)
+  on conflict (template_id, exception_date) do update set notes = excluded.notes;
+
+  select id into v_trip_id from trip
+  where recurring_template_id = p_template and recurring_date = p_date and status = 'scheduled';
+  if v_trip_id is not null then
+    call sp_cancel_trip(v_trip_id);
+  end if;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13S — FAVORITES (Task 10.5)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists favorite_route (
+  id                   uuid primary key default gen_random_uuid(),
+  customer_id          uuid not null references customer(id) on delete cascade,
+  origin_wpoint_id     uuid not null references wpoint(id),
+  destination_wpoint_id uuid not null references wpoint(id),
+  notify               boolean not null default true,
+  created_at           timestamptz not null default now(),
+  unique (customer_id, origin_wpoint_id, destination_wpoint_id)
+);
+
+create table if not exists favorite_driver (
+  id          uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references customer(id) on delete cascade,
+  driver_id   uuid not null references driver(id) on delete cascade,
+  notify      boolean not null default true,
+  created_at  timestamptz not null default now(),
+  unique (customer_id, driver_id)
+);
+
+create or replace function add_favorite_route(p_customer uuid, p_origin uuid, p_destination uuid, p_notify boolean default true)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  insert into favorite_route (customer_id, origin_wpoint_id, destination_wpoint_id, notify)
+  values (p_customer, p_origin, p_destination, p_notify)
+  on conflict (customer_id, origin_wpoint_id, destination_wpoint_id) do update set notify = excluded.notify
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function remove_favorite_route(p_id uuid, p_customer uuid)
+returns void language plpgsql as
+$$
+begin
+  delete from favorite_route where id = p_id and customer_id = p_customer;
+  if not found then
+    raise exception 'Unknown favorite id' using errcode = 'DZ821';
+  end if;
+end;
+$$;
+
+create or replace function add_favorite_driver(p_customer uuid, p_driver uuid, p_notify boolean default true)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  insert into favorite_driver (customer_id, driver_id, notify)
+  values (p_customer, p_driver, p_notify)
+  on conflict (customer_id, driver_id) do update set notify = excluded.notify
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function remove_favorite_driver(p_id uuid, p_customer uuid)
+returns void language plpgsql as
+$$
+begin
+  delete from favorite_driver where id = p_id and customer_id = p_customer;
+  if not found then
+    raise exception 'Unknown favorite id' using errcode = 'DZ821';
+  end if;
+end;
+$$;
+
+-- Notification subscription: fired when a NEW trip is published that
+-- matches a favorited route (exact origin/destination wpoint pair, via its
+-- stops) or a favorited driver — reuses sp_publish_trip, no separate path.
+create or replace function notify_favorites_of_publish(p_trip uuid)
+returns void language plpgsql as
+$$
+declare v_traj uuid; v_driver uuid;
+begin
+  select trajectory_id, driver_id into v_traj, v_driver from trip where id = p_trip;
+
+  perform notify_customer(fr.customer_id, 'favorite_route_trip',
+    'Nouveau voyage sur votre trajet favori',
+    'Un nouveau voyage est disponible sur votre trajet favori.',
+    jsonb_build_object('trip_id', p_trip))
+  from favorite_route fr
+  where fr.notify
+    and exists (select 1 from trip_stop ts where ts.trip_id = p_trip and ts.wpoint_id = fr.origin_wpoint_id)
+    and exists (select 1 from trip_stop ts where ts.trip_id = p_trip and ts.wpoint_id = fr.destination_wpoint_id);
+
+  if v_driver is not null then
+    perform notify_customer(fd.customer_id, 'favorite_driver_trip',
+      'Votre chauffeur favori publie un nouveau voyage',
+      'Un nouveau voyage est disponible avec un chauffeur que vous suivez.',
+      jsonb_build_object('trip_id', p_trip, 'driver_id', v_driver))
+    from favorite_driver fd
+    where fd.notify and fd.driver_id = v_driver;
+  end if;
+end;
+$$;
+
+create or replace procedure sp_publish_trip(p_trip uuid)
+language plpgsql as
+$$
+declare v trip%rowtype;
+begin
+  select * into v from trip where id = p_trip for update;
+  if not found then
+    raise exception 'Trip % not found', p_trip using errcode = 'DZ301';
+  end if;
+
+  if v.driver_id is null then
+    raise exception 'Trip must have driver_id before publishing' using errcode = 'DZ001';
+  end if;
+
+  if v.vehicle_id is not null and not vehicle_is_eligible(v.vehicle_id) then
+    raise exception 'Vehicle is not eligible for publishing (no approved, unexpired inspection on file, or marked out of service)' using errcode = 'DZ714';
+  end if;
+
+  update trip
+  set published_at = coalesce(published_at, now())
+  where id = p_trip;
+
+  if v.published_at is null then
+    perform notify_favorites_of_publish(p_trip);
+  end if;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13T — GROUP BOOKINGS (Task 10.6)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Booking owner = reservation.customer_id (unchanged, already the single
+-- payer/account of record). This table only adds the NAMED passenger
+-- manifest + optional fare split on top of the existing seats/total_price.
+
+create table if not exists reservation_passenger (
+  id             uuid primary key default gen_random_uuid(),
+  reservation_id uuid not null references reservation(id) on delete cascade,
+  full_name      text not null check (btrim(full_name) <> ''),
+  phone          text,
+  fare_share     numeric(12,2) check (fare_share is null or fare_share >= 0),
+  created_at     timestamptz not null default now()
+);
+create index if not exists idx_reservation_passenger_res on reservation_passenger (reservation_id);
+
+-- Replaces the full passenger list transactionally. p_passengers is a jsonb
+-- array like [{"full_name":"...", "phone":"...", "fare_share":500}, ...].
+-- Validates: count must equal reservation.seats (DZ831); each needs a name
+-- (DZ832); if ANY fare_share is given, ALL must be given and sum exactly to
+-- total_price (reuses DZ831, "fare split must account for the full fare").
+create or replace function set_reservation_passengers(p_reservation uuid, p_passengers jsonb)
+returns void language plpgsql as
+$$
+declare
+  v_res        reservation%rowtype;
+  v_count      integer;
+  v_named_sum  numeric;
+  v_null_count integer;
+  v_p          jsonb;
+begin
+  select * into v_res from reservation where id = p_reservation for update;
+  if not found then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+
+  v_count := jsonb_array_length(p_passengers);
+  if v_count <> v_res.seats then
+    raise exception 'Number of named passengers must match the reserved seat count' using errcode = 'DZ831';
+  end if;
+
+  for v_p in select * from jsonb_array_elements(p_passengers)
+  loop
+    if coalesce(btrim(v_p ->> 'full_name'), '') = '' then
+      raise exception 'Each passenger needs a name' using errcode = 'DZ832';
+    end if;
+  end loop;
+
+  select count(*) filter (where (elem ->> 'fare_share') is null), sum((elem ->> 'fare_share')::numeric)
+  into v_null_count, v_named_sum
+  from jsonb_array_elements(p_passengers) elem;
+
+  if v_null_count = 0 and v_named_sum is distinct from v_res.total_price then
+    raise exception 'Number of named passengers must match the reserved seat count' using errcode = 'DZ831';
+  end if;
+  if v_null_count > 0 and v_null_count < v_count then
+    raise exception 'Number of named passengers must match the reserved seat count' using errcode = 'DZ831';
+  end if;
+
+  delete from reservation_passenger where reservation_id = p_reservation;
+
+  insert into reservation_passenger (reservation_id, full_name, phone, fare_share)
+  select p_reservation, elem ->> 'full_name', nullif(elem ->> 'phone', ''), (elem ->> 'fare_share')::numeric
+  from jsonb_array_elements(p_passengers) elem;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13U — ACCESSIBILITY / SERVICE REQUIREMENTS (Task 10.7)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+alter table vehicle add column if not exists wheelchair_accessible boolean not null default false;
+alter table vehicle add column if not exists pets_allowed          boolean not null default true;
+alter table vehicle add column if not exists luggage_capacity      smallint check (luggage_capacity is null or luggage_capacity >= 0);
+
+alter table reservation add column if not exists needs_wheelchair      boolean not null default false;
+alter table reservation add column if not exists has_pet               boolean not null default false;
+alter table reservation add column if not exists luggage_count         smallint not null default 0 check (luggage_count >= 0);
+alter table reservation add column if not exists special_requirements  text;
+
+-- Same "create the reservation, then attach the precise detail" pattern as
+-- set_reservation_communes()/set_reservation_geo() — matching rule only
+-- enforced when the trip actually has a vehicle assigned (optional-vehicle
+-- convention used throughout this schema).
+create or replace function set_reservation_requirements(
+  p_reservation uuid, p_needs_wheelchair boolean default false, p_has_pet boolean default false,
+  p_luggage_count integer default 0, p_special_requirements text default null
+)
+returns void language plpgsql as
+$$
+declare v_vehicle_id uuid; v_vehicle vehicle%rowtype;
+begin
+  select v.vehicle_id into v_vehicle_id
+  from reservation r join trip v on v.id = r.trip_id
+  where r.id = p_reservation;
+  if v_vehicle_id is null and not exists (select 1 from reservation where id = p_reservation) then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+
+  if v_vehicle_id is not null then
+    select * into v_vehicle from vehicle where id = v_vehicle_id;
+    if p_needs_wheelchair and not v_vehicle.wheelchair_accessible then
+      raise exception 'Trip/vehicle cannot accommodate the requested service requirement' using errcode = 'DZ841';
+    end if;
+    if p_has_pet and not v_vehicle.pets_allowed then
+      raise exception 'Trip/vehicle cannot accommodate the requested service requirement' using errcode = 'DZ841';
+    end if;
+  end if;
+
+  update reservation
+  set needs_wheelchair     = p_needs_wheelchair,
+      has_pet              = p_has_pet,
+      luggage_count        = coalesce(p_luggage_count, 0),
+      special_requirements = p_special_requirements
+  where id = p_reservation;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13V — IN-APP MESSAGING (Task 11.2)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Scoped to exactly one reservation (the natural, narrowest scope that
+-- actually needs driver↔customer contact) — not a generic DM system.
+
+create table if not exists conversation (
+  id             uuid primary key default gen_random_uuid(),
+  reservation_id uuid not null unique references reservation(id) on delete cascade,
+  blocked_at     timestamptz,
+  created_at     timestamptz not null default now()
+);
+
+create table if not exists message (
+  id              uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversation(id) on delete cascade,
+  sender_role     text not null check (sender_role in ('customer','driver')),
+  sender_id       uuid not null, -- customer_id or driver_id depending on sender_role
+  body            text not null check (btrim(body) <> ''),
+  read_at         timestamptz,
+  created_at      timestamptz not null default now()
+);
+create index if not exists idx_message_conversation on message (conversation_id, created_at);
+
+create or replace function get_or_create_conversation(p_reservation uuid)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  if not exists (select 1 from reservation where id = p_reservation) then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+  insert into conversation (reservation_id) values (p_reservation)
+  on conflict (reservation_id) do nothing;
+  select id into v_id from conversation where reservation_id = p_reservation;
+  return v_id;
+end;
+$$;
+
+-- Abuse control: a hard body-length cap plus a rolling rate limit
+-- (configurable via app_setting, defaults to 20 messages / 5 minutes per
+-- sender on a given conversation) — cheap, no external dependency, and
+-- consistent with how every other rate limit in this schema is done
+-- (wallet advisory locks, promo FOR UPDATE, …).
+insert into app_setting (key, value) values ('message_rate_limit_per_5min', '20') on conflict (key) do nothing;
+
+create or replace function send_message(p_conversation uuid, p_sender_role text, p_sender_id uuid, p_body text)
+returns uuid language plpgsql as
+$$
+declare
+  v_conv       conversation%rowtype;
+  v_res        reservation%rowtype;
+  v_driver_id  uuid;
+  v_recent     integer;
+  v_limit      integer;
+  v_id         uuid;
+  v_body       text := btrim(coalesce(p_body, ''));
+begin
+  select * into v_conv from conversation where id = p_conversation;
+  if not found then
+    raise exception 'Unknown conversation id' using errcode = 'DZ851';
+  end if;
+  select * into v_res from reservation where id = v_conv.reservation_id;
+  select driver_id into v_driver_id from trip where id = v_res.trip_id;
+
+  if p_sender_role = 'customer' and p_sender_id <> v_res.customer_id then
+    raise exception 'You are not a participant in this conversation' using errcode = 'DZ852';
+  elsif p_sender_role = 'driver' and (v_driver_id is null or p_sender_id <> v_driver_id) then
+    raise exception 'You are not a participant in this conversation' using errcode = 'DZ852';
+  elsif p_sender_role not in ('customer','driver') then
+    raise exception 'You are not a participant in this conversation' using errcode = 'DZ852';
+  end if;
+
+  if v_body = '' or char_length(v_body) > 2000 then
+    raise exception 'Message body cannot be empty' using errcode = 'DZ853';
+  end if;
+
+  select coalesce((select value from app_setting where key = 'message_rate_limit_per_5min')::int, 20) into v_limit;
+  select count(*) into v_recent from message
+  where conversation_id = p_conversation and sender_role = p_sender_role and sender_id = p_sender_id
+    and created_at > now() - interval '5 minutes';
+  if v_recent >= v_limit then
+    raise exception 'Too many messages sent in a short period — please slow down' using errcode = 'DZ854';
+  end if;
+
+  insert into message (conversation_id, sender_role, sender_id, body)
+  values (p_conversation, p_sender_role, p_sender_id, v_body)
+  returning id into v_id;
+
+  if p_sender_role = 'customer' then
+    perform notify_driver(v_driver_id, 'new_message', 'Nouveau message', v_body, jsonb_build_object('conversation_id', p_conversation));
+  else
+    perform notify_customer(v_res.customer_id, 'new_message', 'Nouveau message', v_body, jsonb_build_object('conversation_id', p_conversation));
+  end if;
+
+  return v_id;
+end;
+$$;
+
+create or replace function mark_conversation_read(p_conversation uuid, p_reader_role text)
+returns integer language plpgsql as
+$$
+declare v_n integer;
+begin
+  update message set read_at = now()
+  where conversation_id = p_conversation and read_at is null and sender_role <> p_reader_role;
+  get diagnostics v_n = row_count;
+  return v_n;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13W — CONTACT REVEAL (Task 11.3 — honest masked-calling scope)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- No PSTN/telephony vendor is integrated in this sandbox (same disclosed
+-- boundary as the mock payment gateway, Task 7.1) — there is no real
+-- "masked number" proxy call routing here. What IS implemented, honestly:
+--   - phone numbers are never embedded in the normal reservation/trip API
+--     responses the counterpart receives (verified in the API layer below);
+--   - "reservation-scoped communication" is the in-app messaging above;
+--   - an explicit, audited "reveal contact" action is the only way either
+--     party's real phone number ever reaches the other, and every reveal is
+--     logged (actor, target, reservation, timestamp) for abuse review.
+
+create table if not exists contact_reveal_log (
+  id             uuid primary key default gen_random_uuid(),
+  reservation_id uuid not null references reservation(id) on delete cascade,
+  requester_role text not null check (requester_role in ('customer','driver')),
+  requester_id   uuid not null,
+  revealed_phone text not null,
+  created_at     timestamptz not null default now()
+);
+
+create or replace function reveal_contact(p_reservation uuid, p_requester_role text, p_requester_id uuid)
+returns text language plpgsql as
+$$
+declare
+  v_res reservation%rowtype;
+  v_driver_id uuid;
+  v_phone text;
+begin
+  select * into v_res from reservation where id = p_reservation;
+  if not found then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+  select driver_id into v_driver_id from trip where id = v_res.trip_id;
+
+  if p_requester_role = 'customer' and p_requester_id = v_res.customer_id then
+    select phone into v_phone from driver where id = v_driver_id;
+  elsif p_requester_role = 'driver' and p_requester_id = v_driver_id then
+    select phone into v_phone from customer where id = v_res.customer_id;
+  else
+    raise exception 'Only the driver/customer of this reservation may request contact' using errcode = 'DZ861';
+  end if;
+
+  if v_phone is null then
+    raise exception 'Only the driver/customer of this reservation may request contact' using errcode = 'DZ861';
+  end if;
+
+  insert into contact_reveal_log (reservation_id, requester_role, requester_id, revealed_phone)
+  values (p_reservation, p_requester_role, p_requester_id, v_phone);
+
+  return v_phone;
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13X — SHAREABLE LIVE-TRIP LINK (Task 11.4)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- token_hash only (never the raw token) is stored server-side — same
+-- pattern as app_session — so a leaked database row can never itself be
+-- used as a valid share link.
+
+create table if not exists trip_share_token (
+  id             uuid primary key default gen_random_uuid(),
+  reservation_id uuid not null references reservation(id) on delete cascade,
+  token_hash     text not null unique,
+  expires_at     timestamptz not null,
+  revoked_at     timestamptz,
+  created_at     timestamptz not null default now()
+);
+create index if not exists idx_trip_share_token_res on trip_share_token (reservation_id);
+
+create or replace function create_share_token(p_reservation uuid, p_token_hash text, p_ttl_hours numeric default 24)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  if not exists (select 1 from reservation where id = p_reservation) then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+  insert into trip_share_token (reservation_id, token_hash, expires_at)
+  values (p_reservation, p_token_hash, now() + make_interval(hours => p_ttl_hours::int))
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function revoke_share_token(p_token_id uuid, p_reservation uuid)
+returns void language plpgsql as
+$$
+begin
+  update trip_share_token set revoked_at = now()
+  where id = p_token_id and reservation_id = p_reservation and revoked_at is null;
+  if not found then
+    raise exception 'Unknown or invalid share link' using errcode = 'DZ862';
+  end if;
+end;
+$$;
+
+-- Read-only public tracking payload: deliberately returns only what a
+-- stranger holding the link needs (trip status/ETA/driver's live position)
+-- — no names, no phone numbers, no payment/pricing information.
+create or replace function get_shared_trip_info(p_token_hash text)
+returns jsonb language plpgsql as
+$$
+declare
+  v_tok trip_share_token%rowtype;
+  v_res reservation%rowtype;
+  v_trip trip%rowtype;
+  v_loc  driver_last_location%rowtype;
+begin
+  select * into v_tok from trip_share_token where token_hash = p_token_hash;
+  if not found then
+    raise exception 'Unknown or invalid share link' using errcode = 'DZ862';
+  end if;
+  if v_tok.revoked_at is not null then
+    raise exception 'This share link has been revoked' using errcode = 'DZ864';
+  end if;
+  if v_tok.expires_at < now() then
+    raise exception 'This share link has expired' using errcode = 'DZ863';
+  end if;
+
+  select * into v_res from reservation where id = v_tok.reservation_id;
+  select * into v_trip from trip where id = v_res.trip_id;
+  select * into v_loc from driver_last_location where driver_id = v_trip.driver_id;
+
+  return jsonb_build_object(
+    'trip_status', v_trip.status,
+    'departure_at', v_trip.departure_at,
+    'arrival_eta', v_trip.arrival_eta,
+    'reservation_status', v_res.status,
+    'seats', v_res.seats,
+    'driver_location', case when v_trip.status = 'in_progress' and v_loc.driver_id is not null
+      then jsonb_build_object('lat', v_loc.gps_lat, 'lon', v_loc.gps_lon, 'recorded_at', v_loc.recorded_at)
+      else null end
+  );
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13Y — SOS / EMERGENCY (Task 11.5)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists emergency_contact (
+  id           uuid primary key default gen_random_uuid(),
+  customer_id  uuid not null references customer(id) on delete cascade,
+  full_name    text not null check (btrim(full_name) <> ''),
+  phone        text not null check (phone ~ '^\+?[0-9]{8,15}$'),
+  relationship text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists idx_emergency_contact_customer on emergency_contact (customer_id);
+
+create table if not exists sos_event (
+  id               uuid primary key default gen_random_uuid(),
+  reservation_id   uuid references reservation(id) on delete set null,
+  trip_id          uuid references trip(id) on delete set null,
+  triggered_by_role text not null check (triggered_by_role in ('customer','driver')),
+  triggered_by_id   uuid not null,
+  gps_lat          numeric(9,6) check (gps_lat is null or gps_lat between -90 and 90),
+  gps_lon          numeric(9,6) check (gps_lon is null or gps_lon between -180 and 180),
+  status           text not null default 'open' check (status in ('open','acknowledged','resolved')),
+  notes            text,
+  resolved_at      timestamptz,
+  resolved_by      uuid,
+  created_at       timestamptz not null default now()
+);
+create index if not exists idx_sos_event_status on sos_event (status, created_at desc);
+
+insert into app_setting (key, value) values ('sos_rate_limit_per_hour', '3') on conflict (key) do nothing;
+
+create or replace function trigger_sos(
+  p_reservation uuid, p_role text, p_id uuid, p_lat numeric default null, p_lon numeric default null, p_notes text default null
+)
+returns uuid language plpgsql as
+$$
+declare
+  v_res  reservation%rowtype;
+  v_trip_id uuid;
+  v_recent integer;
+  v_limit  integer;
+  v_id     uuid;
+begin
+  select coalesce((select value from app_setting where key = 'sos_rate_limit_per_hour')::int, 3) into v_limit;
+  select count(*) into v_recent from sos_event
+  where triggered_by_role = p_role and triggered_by_id = p_id and created_at > now() - interval '1 hour';
+  if v_recent >= v_limit then
+    raise exception 'Too many SOS triggers in a short period — please wait or call emergency services directly' using errcode = 'DZ872';
+  end if;
+
+  if p_reservation is not null then
+    select * into v_res from reservation where id = p_reservation;
+    v_trip_id := v_res.trip_id;
+  end if;
+
+  insert into sos_event (reservation_id, trip_id, triggered_by_role, triggered_by_id, gps_lat, gps_lon, notes)
+  values (p_reservation, v_trip_id, p_role, p_id, p_lat, p_lon, p_notes)
+  returning id into v_id;
+
+  perform notify_admins('sos_triggered', '🆘 Alerte SOS', 'Une alerte SOS a été déclenchée.',
+    jsonb_build_object('sos_event_id', v_id, 'reservation_id', p_reservation, 'trip_id', v_trip_id,
+                       'lat', p_lat, 'lon', p_lon));
+
+  return v_id;
+end;
+$$;
+
+create or replace function resolve_sos_event(p_event uuid, p_admin uuid, p_notes text default null)
+returns void language plpgsql as
+$$
+declare v_before jsonb;
+begin
+  select to_jsonb(s) into v_before from sos_event s where s.id = p_event;
+  update sos_event set status = 'resolved', resolved_at = now(), resolved_by = p_admin, notes = coalesce(p_notes, notes)
+  where id = p_event;
+  if not found then
+    raise exception 'Unknown SOS event id' using errcode = 'DZ871';
+  end if;
+  perform log_admin_action(p_admin, 'resolve_sos', 'sos_event', p_event::text, v_before,
+    jsonb_build_object('status', 'resolved'), p_notes);
+end;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13Z — SEARCH LOG (Task 12.2 "failed searches") + ANALYTICS (12.1/12.2)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+create table if not exists search_log (
+  id                 uuid primary key default gen_random_uuid(),
+  from_wilaya_id     smallint,
+  to_wilaya_id       smallint,
+  from_commune_id    integer,
+  to_commune_id      integer,
+  date_from          date,
+  date_to            date,
+  results_count      integer not null,
+  created_at         timestamptz not null default now()
+);
+create index if not exists idx_search_log_pair on search_log (from_wilaya_id, to_wilaya_id);
+create index if not exists idx_search_log_zero on search_log (created_at) where results_count = 0;
+
+-- p_from_wilaya/p_to_wilaya are `integer`, not `smallint` — same reasoning as
+-- resolve_daira/resolve_commune/submit_rating above: the management-api SQL
+-- transport inlines JS numbers as bare `integer` literals, and int4→int2 is
+-- only an assignment cast (not implicit), so a `smallint` parameter here made
+-- every call from DomainRepository.logSearch fail to resolve ("function does
+-- not exist") — found live while smoke-testing Task 10.4/12.2.
+drop function if exists log_search(smallint, smallint, integer, integer, date, date, integer);
+
+create or replace function log_search(
+  p_from_wilaya integer, p_to_wilaya integer, p_from_commune integer, p_to_commune integer,
+  p_date_from date, p_date_to date, p_results_count integer
+)
+returns void language plpgsql as
+$$
+begin
+  insert into search_log (from_wilaya_id, to_wilaya_id, from_commune_id, to_commune_id, date_from, date_to, results_count)
+  values (p_from_wilaya, p_to_wilaya, p_from_commune, p_to_commune, p_date_from, p_date_to, p_results_count);
+end;
+$$;
+
+-- Task 12.1 — dashboard summary over an optional date range (defaults to
+-- all time). Revenue/refunds are counted on PAYMENT activity in range;
+-- bookings/cancellations/no-shows are counted on RESERVATION creation in
+-- range; occupancy is averaged over trips whose departure falls in range.
+create or replace function admin_analytics_summary(p_from timestamptz default null, p_to timestamptz default null)
+returns jsonb language plpgsql as
+$$
+declare
+  v_from timestamptz := coalesce(p_from, '-infinity'::timestamptz);
+  v_to   timestamptz := coalesce(p_to, 'infinity'::timestamptz);
+  v_revenue numeric; v_refunds numeric; v_bookings integer; v_cancellations integer; v_no_shows integer;
+  v_occupancy numeric;
+begin
+  select coalesce(sum(amount), 0) into v_revenue from payment
+  where status in ('paid','partially_refunded','refunded') and created_at between v_from and v_to;
+
+  select coalesce(sum(refunded_amount), 0) into v_refunds from payment
+  where refunded_amount > 0 and updated_at between v_from and v_to;
+
+  select count(*) into v_bookings from reservation where created_at between v_from and v_to;
+  select count(*) into v_cancellations from reservation where status = 'cancelled' and updated_at between v_from and v_to;
+  select count(*) into v_no_shows from reservation where status = 'no_show' and updated_at between v_from and v_to;
+
+  select avg(100.0 * nb_active_reservations_seats / nullif(capacity, 0)) into v_occupancy
+  from (
+    select t.id, t.capacity,
+      coalesce((select sum(r.seats) from reservation r where r.trip_id = t.id and r.status in ('confirmed','completed')), 0) as nb_active_reservations_seats
+    from trip t where t.departure_at between v_from and v_to
+  ) occ;
+
+  return jsonb_build_object(
+    'revenue', v_revenue, 'refunds_total', v_refunds, 'bookings', v_bookings,
+    'cancellations', v_cancellations, 'no_shows', v_no_shows,
+    'occupancy_pct', round(coalesce(v_occupancy, 0), 1)
+  );
+end;
+$$;
+
+create or replace function admin_top_wilaya_pairs(p_limit integer default 10)
+returns table(from_wilaya text, to_wilaya text, reservations_count bigint, revenue numeric) language sql stable as
+$$
+  select wf.nom_fr, wt.nom_fr, count(*)::bigint, coalesce(sum(r.total_price), 0)
+  from reservation r
+  join wpoint pf on pf.id = r.pickup_wpoint_id
+  join wpoint pt on pt.id = r.dropoff_wpoint_id
+  join wilaya wf on wf.id = pf.wilaya_id
+  join wilaya wt on wt.id = pt.wilaya_id
+  where r.status <> 'cancelled'
+  group by wf.nom_fr, wt.nom_fr
+  order by count(*) desc
+  limit p_limit;
+$$;
+
+-- "WPoint pairs" are more granular than plain wilaya pairs: the same wilaya
+-- can appear as a different WPoint on different trajectories, so this
+-- distinguishes e.g. "Alger (via Ligne Est)" from "Alger (via Ligne Sud)".
+create or replace function admin_top_wpoint_pairs(p_limit integer default 10)
+returns table(from_wpoint text, to_wpoint text, reservations_count bigint) language sql stable as
+$$
+  select tjf.name || ' — ' || wf.nom_fr, tjt.name || ' — ' || wt.nom_fr, count(*)::bigint
+  from reservation r
+  join wpoint pf on pf.id = r.pickup_wpoint_id
+  join wpoint pt on pt.id = r.dropoff_wpoint_id
+  join wilaya wf on wf.id = pf.wilaya_id
+  join wilaya wt on wt.id = pt.wilaya_id
+  join trajectory tjf on tjf.id = pf.trajectory_id
+  join trajectory tjt on tjt.id = pt.trajectory_id
+  where r.status <> 'cancelled'
+  group by tjf.name, wf.nom_fr, tjt.name, wt.nom_fr
+  order by count(*) desc
+  limit p_limit;
+$$;
+
+create or replace function admin_trajectory_demand(p_limit integer default 10)
+returns table(trajectory_id uuid, trajectory_name text, reservations_count bigint, revenue numeric) language sql stable as
+$$
+  select tj.id, tj.name, count(r.id)::bigint, coalesce(sum(r.total_price), 0)
+  from trajectory tj
+  join trip t on t.trajectory_id = tj.id
+  left join reservation r on r.trip_id = t.id and r.status <> 'cancelled'
+  group by tj.id, tj.name
+  order by count(r.id) desc
+  limit p_limit;
+$$;
+
+create or replace function admin_driver_performance(p_limit integer default 50)
+returns table(driver_id uuid, full_name text, trips_count bigint, completed_trips bigint, avg_rating numeric, revenue numeric, no_show_count integer)
+language sql stable as
+$$
+  select d.id, d.full_name,
+    count(distinct t.id)::bigint,
+    count(distinct t.id) filter (where t.status = 'completed')::bigint,
+    round(avg(rt.stars), 2),
+    coalesce(sum(r.total_price) filter (where r.status in ('completed','confirmed')), 0),
+    d.no_show_count
+  from driver d
+  left join trip t on t.driver_id = d.id
+  left join reservation r on r.trip_id = t.id
+  left join rating rt on rt.reservation_id = r.id and rt.direction = 'customer_to_driver'
+  group by d.id, d.full_name, d.no_show_count
+  order by count(distinct t.id) desc
+  limit p_limit;
+$$;
+
+-- Task 12.2 — demand analytics: requested pickup/dropoff COMMUNES and
+-- WPoint pairs come straight from reservation (already captured by
+-- set_reservation_communes()/reserve()); "failed searches" and "popular
+-- trajectories" reuse search_log and admin_trajectory_demand() above.
+create or replace function admin_demand_pickup_communes(p_limit integer default 10)
+returns table(commune text, wilaya text, requests_count bigint) language sql stable as
+$$
+  select c.nom_fr, w.nom_fr, count(*)::bigint
+  from reservation r
+  join commune c on c.id = r.pickup_commune_id
+  join wilaya w on w.id = c.wilaya_id
+  group by c.nom_fr, w.nom_fr
+  order by count(*) desc
+  limit p_limit;
+$$;
+
+create or replace function admin_demand_dropoff_communes(p_limit integer default 10)
+returns table(commune text, wilaya text, requests_count bigint) language sql stable as
+$$
+  select c.nom_fr, w.nom_fr, count(*)::bigint
+  from reservation r
+  join commune c on c.id = r.dropoff_commune_id
+  join wilaya w on w.id = c.wilaya_id
+  group by c.nom_fr, w.nom_fr
+  order by count(*) desc
+  limit p_limit;
+$$;
+
+create or replace function admin_failed_searches(p_limit integer default 20)
+returns table(from_wilaya text, to_wilaya text, date_from date, date_to date, searched_count bigint, last_searched_at timestamptz)
+language sql stable as
+$$
+  select wf.nom_fr, wt.nom_fr, sl.date_from, sl.date_to, count(*)::bigint, max(sl.created_at)
+  from search_log sl
+  join wilaya wf on wf.id = sl.from_wilaya_id
+  join wilaya wt on wt.id = sl.to_wilaya_id
+  where sl.results_count = 0
+  group by wf.nom_fr, wt.nom_fr, sl.date_from, sl.date_to
+  order by count(*) desc
+  limit p_limit;
+$$;
+
+-- ───────────────────────────────────────────────────────────────────────────────
 -- SECTION 14 — PROCEDURES (CANCEL / CLOSE) + IMPORTER
 -- ───────────────────────────────────────────────────────────────────────────────
 
@@ -3516,10 +5193,16 @@ begin
                       then 'completed'::reservation_status
                       else 'no_show'::reservation_status end
     where r.trip_id = p_trip and r.status = 'confirmed'
-    returning r.id, r.customer_id, r.status
+    returning r.id, r.customer_id, r.status, r.code
   )
   insert into no_show_event (trip_id, reservation_id, customer_id, kind)
   select p_trip, id, customer_id, 'customer' from resolved where status = 'no_show';
+
+  -- Task 11.1 — "trip completion" notification.
+  perform notify_customer(r.customer_id, 'trip_completed', 'Voyage terminé',
+    'Votre voyage ' || r.code || ' est terminé. Merci d''avoir voyagé avec nous !',
+    jsonb_build_object('reservation_id', r.id, 'trip_id', p_trip))
+  from reservation r where r.trip_id = p_trip and r.status = 'completed';
 
   update reservation set status = 'cancelled'
   where trip_id = p_trip and status = 'pending';
@@ -3574,6 +5257,7 @@ declare
   n_d integer := 0;
   n_c integer := 0;
 begin
+ begin -- Task 12.5 — inner block so a failure can still be logged below
   if p_data is null or jsonb_typeof(p_data) <> 'object' then
     raise exception 'Invalid payload' using errcode = 'DZ001';
   end if;
@@ -3634,8 +5318,13 @@ begin
     end loop;
   end loop;
 
-  insert into import_log (nb_wilayas, nb_dairas, nb_communes, payload_bytes)
-  values (n_w, n_d, n_c, octet_length(p_data::text));
+  insert into import_log (nb_wilayas, nb_dairas, nb_communes, payload_bytes, success)
+  values (n_w, n_d, n_c, octet_length(p_data::text), true);
+ exception when others then
+  insert into import_log (nb_wilayas, nb_dairas, nb_communes, payload_bytes, success, error_details)
+  values (n_w, n_d, n_c, octet_length(coalesce(p_data::text, '')), false, sqlerrm);
+  raise;
+ end;
 end;
 $$;
 

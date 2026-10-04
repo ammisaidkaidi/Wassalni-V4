@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Link } from 'react-router-dom';
 import { api, apiUpload, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
+import { ConversationAction, RevealContactAction } from '../components/ReservationExtras';
+import SosButton from '../components/SosButton';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
 import WpointManager from '../components/WpointManager';
 import type {
@@ -24,6 +26,7 @@ import type {
   TripManifestRow,
   VehicleInspectionRow,
   VehicleRow,
+  WaitlistEntryRow,
   Wilaya,
   WpointRow,
 } from '../types';
@@ -97,7 +100,10 @@ export default function DriverPage() {
 
   return (
     <section>
-      <h1>Espace chauffeur</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
+        <h1>Espace chauffeur</h1>
+        <SosButton role="driver" />
+      </div>
       <div className="tabs">
         {TABS.map((t) => (
           <button key={t.id} className={`tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
@@ -386,6 +392,7 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
                     <th>Montée</th>
                     <th>Descente</th>
                     <th>Statut</th>
+                    <th>Contact</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -397,15 +404,59 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
                       <td>{m.pickup ?? '—'}</td>
                       <td>{m.dropoff ?? '—'}</td>
                       <td>{m.status}</td>
+                      <td style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <ConversationAction apiBase={`/api/driver/reservations/${m.id}`} myRole="driver" />
+                        <RevealContactAction apiBase={`/api/driver/reservations/${m.id}`} />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
+
+          <WaitlistPanel tripId={trip.id} />
         </>
       )}
     </div>
+  );
+}
+
+/** Task 10.2 — waitlist queue for this specific trip, driver-visible (read-only). */
+function WaitlistPanel({ tripId }: { tripId: string }) {
+  const [entries, setEntries] = useState<WaitlistEntryRow[]>([]);
+  useEffect(() => {
+    api<{ entries: WaitlistEntryRow[] }>(`/api/driver/trips/${tripId}/waitlist`)
+      .then((r) => setEntries(r.entries))
+      .catch(() => setEntries([]));
+  }, [tripId]);
+  if (entries.length === 0) return null;
+  return (
+    <>
+      <h3>Liste d'attente ({entries.length})</h3>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Client</th>
+              <th>Places</th>
+              <th>Statut</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((e) => (
+              <tr key={e.id}>
+                <td>{e.position}</td>
+                <td>{e.customer_name ?? '—'}</td>
+                <td>{e.seats}</td>
+                <td>{e.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 
@@ -1066,7 +1117,15 @@ function ParametresTab() {
   const [profile, setProfile] = useState<DriverProfileRow | null>(null);
   const [vehicle, setVehicle] = useState<VehicleRow | null>(null);
   const [profileForm, setProfileForm] = useState({ full_name: '', phone: '', email: '', address: '' });
-  const [vehicleForm, setVehicleForm] = useState({ matricule: '', seats: '4', make: '', model: '' });
+  const [vehicleForm, setVehicleForm] = useState({
+    matricule: '',
+    seats: '4',
+    make: '',
+    model: '',
+    wheelchair_accessible: false,
+    pets_allowed: true,
+    luggage_capacity: '',
+  });
   const [msg, setMsg] = useState('');
 
   const load = useCallback(async () => {
@@ -1086,6 +1145,9 @@ function ParametresTab() {
           seats: String(r.vehicle.seats),
           make: r.vehicle.make ?? '',
           model: r.vehicle.model ?? '',
+          wheelchair_accessible: r.vehicle.wheelchair_accessible ?? false,
+          pets_allowed: r.vehicle.pets_allowed ?? true,
+          luggage_capacity: r.vehicle.luggage_capacity != null ? String(r.vehicle.luggage_capacity) : '',
         });
       }
     } catch (e) {
@@ -1126,12 +1188,22 @@ function ParametresTab() {
         seats: Number(vehicleForm.seats),
         make: vehicleForm.make || null,
         model: vehicleForm.model || null,
+        wheelchair_accessible: vehicleForm.wheelchair_accessible,
+        pets_allowed: vehicleForm.pets_allowed,
+        luggage_capacity: vehicleForm.luggage_capacity !== '' ? Number(vehicleForm.luggage_capacity) : null,
       };
       if (vehicle) {
         await api('/api/driver/vehicle', { method: 'PATCH', body });
         setMsg('✔ Véhicule mis à jour');
       } else {
+        // Accessibility fields aren't accepted by the creation endpoint (only
+        // matricule/seats/make/model) — immediately follow up with a PATCH so
+        // they still take effect from the very first save, not just the next one.
         await api('/api/driver/vehicle', { method: 'POST', body });
+        await api('/api/driver/vehicle', {
+          method: 'PATCH',
+          body: { wheelchair_accessible: body.wheelchair_accessible, pets_allowed: body.pets_allowed, luggage_capacity: body.luggage_capacity },
+        });
         setMsg('✔ Véhicule enregistré');
       }
       await load();
@@ -1231,6 +1303,31 @@ function ParametresTab() {
           <label>
             Modèle
             <input value={vehicleForm.model} onChange={(e) => setVehicleForm({ ...vehicleForm, model: e.target.value })} />
+          </label>
+          <label>
+            Capacité bagages (optionnel)
+            <input
+              type="number"
+              min={0}
+              value={vehicleForm.luggage_capacity}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, luggage_capacity: e.target.value })}
+            />
+          </label>
+          <label style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={vehicleForm.wheelchair_accessible}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, wheelchair_accessible: e.target.checked })}
+            />
+            Accessible en fauteuil roulant
+          </label>
+          <label style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={vehicleForm.pets_allowed}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, pets_allowed: e.target.checked })}
+            />
+            Animaux acceptés
           </label>
           <button className="btn primary">{vehicle ? 'Mettre à jour' : 'Enregistrer'}</button>
         </form>

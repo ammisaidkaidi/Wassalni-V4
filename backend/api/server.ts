@@ -18,6 +18,8 @@ import { reservationsRoutes } from './routes/reservations';
 import { customerRoutes } from './routes/customer';
 import { paymentsRoutes } from './routes/payments';
 import { tripsRoutes } from './routes/trips';
+import { notificationsRoutes } from './routes/notifications';
+import { shareRoutes } from './routes/share';
 
 async function main(): Promise<void> {
   const cfg = loadApiConfig();
@@ -91,6 +93,12 @@ async function main(): Promise<void> {
   app.use('/api/customer', customerRoutes(repo));
   app.use('/api/driver', driverRoutes(db, repo));
   app.use('/api/admin', requireAdmin, adminRoutes(db, repo, auth));
+  // Shared inbox across every role (Task 11.1) — gated only by requireAuth
+  // inside the route module itself, not by a specific role.
+  app.use('/api/notifications', notificationsRoutes(repo));
+  // Public (no auth at all) live-trip tracking link (Task 11.4) — anyone
+  // holding the opaque, hashed token can view it, by design.
+  app.use('/api/share', shareRoutes(repo));
   // Public (unauthenticated) — this is where an external gateway's hosted
   // checkout page and webhook delivery would land; neither carries our own
   // session cookies, so each route authenticates itself via its own opaque
@@ -122,9 +130,28 @@ async function main(): Promise<void> {
   }, expiryIntervalMs);
   expiryTimer.unref();
 
+  // Task 13.1 — trip lifecycle scheduler: flips trips through
+  // scheduled → boarding → in_progress → completed on their own departure/
+  // arrival timestamps, and raises the reminder/boarding notifications that
+  // go with each transition. Same unref'd-interval, log-don't-crash pattern
+  // as the payment-intent sweep above; an admin can also force an
+  // out-of-band tick via POST /api/admin/scheduler/run-trip-lifecycle-tick.
+  const lifecycleIntervalMs = 60_000;
+  const lifecycleTimer = setInterval(() => {
+    repo
+      .runTripLifecycleTick()
+      .then((r) => {
+        const total = Object.values(r).reduce((a, b) => a + b, 0);
+        if (total > 0) console.log('⏱ Trip lifecycle tick:', r);
+      })
+      .catch((err) => console.error('✗ run_trip_lifecycle_tick failed:', err));
+  }, lifecycleIntervalMs);
+  lifecycleTimer.unref();
+
   const shutdown = (): void => {
     console.log('Shutting down…');
     clearInterval(expiryTimer);
+    clearInterval(lifecycleTimer);
     server.close(() => {
       conn.close().finally(() => process.exit(0));
     });

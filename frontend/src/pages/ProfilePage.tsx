@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { useAuth } from '../auth';
+import { EmergencyContactsCard, FavoritesCard, WaitlistCard } from '../components/CustomerExtras';
 import type { CommuneRow, CustomerProfileRow, Wilaya } from '../types';
 
 interface ProfileForm {
@@ -278,6 +279,10 @@ export default function ProfilePage() {
             </button>
           </form>
         </div>
+
+        <EmergencyContactsCard />
+        <FavoritesCard />
+        <WaitlistCard />
       </div>
     </section>
   );

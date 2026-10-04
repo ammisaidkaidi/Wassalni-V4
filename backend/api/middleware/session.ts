@@ -47,6 +47,42 @@ export const requireAdmin: RequestHandler = (req, _res, next) => {
   next();
 };
 
+/**
+ * Task 12.6 — granular admin roles, enforced server-side (never trust a
+ * client to merely hide a button). 'super_admin' always passes every check;
+ * every other role only passes the permissions explicitly listed for it
+ * below. Scope decision: applied to every NEW privileged route added in
+ * this batch plus a handful of the most sensitive pre-existing ones
+ * (wallet adjustment, payout actions, admin role assignment) — retrofitting
+ * literal every admin route that predates granular roles would be a much
+ * larger refactor than this task warrants; 'admin' (the old default role)
+ * keeps the exact same broad access it always had everywhere else.
+ */
+export const ADMIN_PERMISSIONS: Record<string, readonly string[]> = {
+  super_admin: ['*'],
+  admin: ['view', 'manage_trips', 'manage_drivers', 'manage_reservations', 'manage_payments', 'manage_payouts', 'manage_promo', 'manage_config'],
+  support: ['view', 'manage_reservations'],
+  finance: ['view', 'manage_payments', 'manage_payouts', 'manage_promo'],
+  operations: ['view', 'manage_trips', 'manage_drivers'],
+};
+
+export function hasAdminPermission(adminRole: string | null | undefined, permission: string): boolean {
+  const role = adminRole || 'admin'; // pre-granular-role admins behave as the broad 'admin' role
+  const perms = ADMIN_PERMISSIONS[role] ?? [];
+  return perms.includes('*') || perms.includes(permission);
+}
+
+export function requirePermission(permission: string): RequestHandler {
+  return (req, _res, next) => {
+    if (!req.user) return next(new ApiError(401, 'UNAUTHORIZED', 'Connexion requise'));
+    if (req.user.role !== 'admin') return next(new ApiError(403, 'FORBIDDEN', 'Accès administrateur requis'));
+    if (!hasAdminPermission(req.user.admin_role, permission)) {
+      return next(new ApiError(403, 'PERMISSION_DENIED', "Votre rôle administrateur ne permet pas cette action"));
+    }
+    next();
+  };
+}
+
 export const requireCustomer: RequestHandler = (req, _res, next) => {
   if (!req.user) return next(new ApiError(401, 'UNAUTHORIZED', 'Connexion requise'));
   if (!req.user.customer_id) {
