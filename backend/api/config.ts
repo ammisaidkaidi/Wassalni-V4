@@ -28,6 +28,13 @@ export interface ApiConfig {
    *  previously stored browser subscription becomes invalid on restart, so
    *  this must never be true in production. */
   vapidIsEphemeral: boolean;
+  /** Task 17.1/17.2 — SMS provider abstraction config. */
+  sms: {
+    /** Set once a real adapter is wired into api/sms.ts for this vendor (e.g. 'twilio', 'infobip'). Unset ⇒ sandbox mode: messages are logged + recorded in sms_log, never actually delivered to a handset. */
+    provider: string | undefined;
+    /** Per-phone-number ceiling on OTP SMS in a rolling 24h window — independent of the per-IP /api/auth limiter, because SMS has a real per-message cost and a different abuse shape (targeting one victim's phone from many IPs). */
+    otpMaxPerPhonePerDay: number;
+  };
 }
 
 function intEnv(name: string, def: number): number {
@@ -77,5 +84,9 @@ export function loadApiConfig(): ApiConfig {
     otpDevMode: !smtp.host,
     vapid,
     vapidIsEphemeral,
+    sms: {
+      provider: process.env.SMS_PROVIDER?.trim() || undefined,
+      otpMaxPerPhonePerDay: intEnv('SMS_OTP_MAX_PER_PHONE_PER_DAY', 10),
+    },
   };
 }

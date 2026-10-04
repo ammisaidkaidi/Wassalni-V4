@@ -31,6 +31,25 @@ export const DOMAIN_SCHEMA_STATEMENTS: string[] = [
   `create index if not exists idx_push_subscription_user on push_subscription (user_id)`,
   `alter table notification add column if not exists pushed_at timestamptz`,
   `create index if not exists idx_notification_unpushed on notification (created_at) where pushed_at is null`,
+  // Task 17.1/17.2 — SMS: identical to data/init/sql.txt's SECTION 13O,
+  // applied here too so an already-initialised database picks it up
+  // without a full `npm run db:init`.
+  `create table if not exists sms_log (
+     id                  uuid primary key default gen_random_uuid(),
+     user_id             uuid,
+     phone               text not null,
+     purpose             text not null check (purpose in ('notification', 'otp')),
+     notification_id     uuid references notification(id) on delete set null,
+     message             text not null,
+     status              text not null check (status in ('sent', 'failed')),
+     provider_message_id text,
+     error               text,
+     created_at          timestamptz not null default now()
+   )`,
+  `create index if not exists idx_sms_log_phone on sms_log (phone, purpose, created_at desc)`,
+  `create index if not exists idx_sms_log_user on sms_log (user_id)`,
+  `alter table notification add column if not exists sms_sent_at timestamptz`,
+  `create index if not exists idx_notification_unsmsed on notification (created_at) where sms_sent_at is null`,
 ];
 
 export async function ensureDomainSchema(conn: SupabaseConnection): Promise<void> {

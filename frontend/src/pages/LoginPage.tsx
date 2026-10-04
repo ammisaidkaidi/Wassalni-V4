@@ -8,6 +8,8 @@ interface Challenge {
   otp_required: true;
   otp_token: string;
   expires_in: number;
+  channel: 'email' | 'sms';
+  can_use_sms: boolean;
   dev_code?: string;
 }
 
@@ -60,13 +62,13 @@ export default function LoginPage() {
     }
   };
 
-  const resend = async (): Promise<void> => {
+  const resend = async (channel?: 'email' | 'sms'): Promise<void> => {
     setError('');
     setBusy(true);
     try {
       if (challenge)
         setChallenge(
-          await api<Challenge>('/api/auth/resend-2fa', { method: 'POST', body: { otp_token: challenge.otp_token } }),
+          await api<Challenge>('/api/auth/resend-2fa', { method: 'POST', body: { otp_token: challenge.otp_token, channel } }),
         );
       setCode('');
     } catch (err) {
@@ -113,7 +115,9 @@ export default function LoginPage() {
         </form>
       ) : (
         <form className="card" onSubmit={(e) => void submitCode(e)}>
-          <p className="muted">{t('login.codeSentTo', { email })}</p>
+          <p className="muted">
+            {challenge?.channel === 'sms' ? t('login.codeSentToSms') : t('login.codeSentTo', { email })}
+          </p>
           {challenge?.dev_code && (
             <p className="alert info" role="status">
               {t('login.devModeCode', { code: challenge.dev_code })}
@@ -140,6 +144,16 @@ export default function LoginPage() {
           <button type="button" className="btn ghost wide" disabled={busy} onClick={() => void resend()}>
             {t('login.resend')}
           </button>
+          {challenge?.can_use_sms && (
+            <button
+              type="button"
+              className="btn ghost wide"
+              disabled={busy}
+              onClick={() => void resend(challenge.channel === 'sms' ? 'email' : 'sms')}
+            >
+              {challenge.channel === 'sms' ? t('login.useEmailInstead') : t('login.useSmsInstead')}
+            </button>
+          )}
         </form>
       )}
       {error && (

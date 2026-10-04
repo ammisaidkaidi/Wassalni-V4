@@ -13,7 +13,8 @@ const registerSchema = z.object({
   // Task 9.4 — optional: credits whoever owns this code once the new customer completes their first trip.
   referral_code: z.string().trim().min(1).max(40).nullish(),
 });
-const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+const otpChannelSchema = z.enum(['email', 'sms']);
+const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1), channel: otpChannelSchema.optional() });
 const verifySchema = z.object({ otp_token: z.string().uuid(), code: z.string().regex(/^[0-9]{6}$/, 'code à 6 chiffres') });
 
 export function authRoutes(svc: AuthService, cfg: ApiConfig): Router {
@@ -31,15 +32,15 @@ export function authRoutes(svc: AuthService, cfg: ApiConfig): Router {
     '/login',
     wrap(async (req, res) => {
       const b = loginSchema.parse(req.body);
-      res.json(await svc.login(b.email, b.password));
+      res.json(await svc.login(b.email, b.password, b.channel));
     }),
   );
 
   router.post(
     '/resend-2fa',
     wrap(async (req, res) => {
-      const b = z.object({ otp_token: z.string().uuid() }).parse(req.body);
-      res.json(await svc.resendChallenge(b.otp_token));
+      const b = z.object({ otp_token: z.string().uuid(), channel: otpChannelSchema.optional() }).parse(req.body);
+      res.json(await svc.resendChallenge(b.otp_token, b.channel));
     }),
   );
 

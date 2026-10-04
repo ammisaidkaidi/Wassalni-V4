@@ -2,8 +2,11 @@ import type { ApiConfig } from '../config';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import { ApiError } from '../middleware/errors';
+import { countRecentSmsToPhone, otpSmsText, recordSmsLog, type SmsSender } from '../sms';
 import { hashPassword, randomToken, sha256, sixDigitCode, verifyPassword } from './passwords';
 import { otpEmailHtml, type Mailer } from './email';
+
+export type OtpChannel = 'email' | 'sms';
 
 export type AdminRole = 'super_admin' | 'admin' | 'support' | 'finance' | 'operations';
 
@@ -24,7 +27,11 @@ export interface LoginChallenge {
   otp_required: true;
   otp_token: string;
   expires_in: number;
-  /** Only present in dev mode (no SMTP configured). */
+  /** Task 17.2 — which channel this particular code was sent over. */
+  channel: OtpChannel;
+  /** Whether this account could switch to the SMS channel (has a phone on file, and SMS is actually available — see AuthService.smsChannelAvailable). */
+  can_use_sms: boolean;
+  /** Only present in dev mode (no SMTP configured) or whenever the channel is SMS (no real carrier is wired in this environment — see api/sms.ts). */
   dev_code?: string;
 }
 
@@ -32,9 +39,10 @@ const USER_COLS = 'id, email, full_name, phone, role, email_verified, customer_i
 
 
 /**
- * AuthService — accounts + login with 2FA (one-time code by email) + sessions.
- * Passwords: scrypt. OTP: 6 digits, salted SHA-256 at rest, 10 min expiry,
- * max 5 attempts. Sessions: opaque 64-hex token, only SHA-256 stored server-side.
+ * AuthService — accounts + login with 2FA (one-time code by email or SMS,
+ * Task 17.2) + sessions. Passwords: scrypt. OTP: 6 digits, salted SHA-256 at
+ * rest, 10 min expiry, max 5 attempts. Sessions: opaque 64-hex token, only
+ * SHA-256 stored server-side.
  */
 export class AuthService {
   constructor(
@@ -42,7 +50,31 @@ export class AuthService {
     private readonly repo: DomainRepository,
     private readonly cfg: ApiConfig,
     private readonly mailer: Mailer,
+    private readonly smsSender: SmsSender,
   ) {}
+
+  /** Task 17.2 — SMS is only offered as a real option once a non-sandbox provider is wired; in production, offering a sandbox-only "send" would silently never reach the user's phone. Dev/test always allows it so the flow is exercisable end-to-end. */
+  private smsChannelAvailable(): boolean {
+    return !!this.cfg.sms.provider || !this.cfg.isProduction;
+  }
+
+  /** Throws if `channel` can't actually be used for this account right now; otherwise returns the phone number to send to. */
+  private async assertSmsChannelAllowed(phone: string | null): Promise<string> {
+    if (!this.smsChannelAvailable()) {
+      throw new ApiError(400, 'SMS_CHANNEL_UNAVAILABLE', "L'envoi de code par SMS n'est pas disponible pour le moment — utilisez l'email.");
+    }
+    if (!phone) {
+      throw new ApiError(400, 'PHONE_REQUIRED', 'Aucun numéro de téléphone enregistré sur ce compte — utilisez l’email.');
+    }
+    // Task 17.2 abuse prevention — independent of the per-IP /api/auth rate
+    // limiter: caps how many OTP SMS a single phone number can receive in a
+    // day, regardless of which IP(s) the requests came from.
+    const recent = await countRecentSmsToPhone(this.db, phone, 'otp', 24);
+    if (recent >= this.cfg.sms.otpMaxPerPhonePerDay) {
+      throw new ApiError(429, 'SMS_OTP_DAILY_LIMIT', 'Trop de codes envoyés par SMS à ce numéro aujourd’hui — réessayez demain ou utilisez l’email.');
+    }
+    return phone;
+  }
 
   async register(input: { email: string; password: string; full_name: string; phone: string; referral_code?: string | null }): Promise<PublicUser> {
     const email = input.email.trim().toLowerCase();
@@ -71,14 +103,15 @@ export class AuthService {
   }
 
   /** Step 1: verify password → issue an emailed OTP challenge. */
-  async login(email: string, password: string): Promise<LoginChallenge> {
+  async login(email: string, password: string, channel: OtpChannel = 'email'): Promise<LoginChallenge> {
     const rows = await this.db.raw<{
       id: string;
       email: string;
+      phone: string | null;
       password_hash: string;
       locked_until: string | null;
       failed_attempts: number;
-    }>(`select id, email, password_hash, locked_until, failed_attempts from app_user where email = $1`, [
+    }>(`select id, email, phone, password_hash, locked_until, failed_attempts from app_user where email = $1`, [
       email.trim().toLowerCase(),
     ]);
     const user = rows[0];
@@ -97,19 +130,21 @@ export class AuthService {
       throw new ApiError(401, 'INVALID_CREDENTIALS', 'Email ou mot de passe incorrect');
     }
     await this.db.raw(`update app_user set failed_attempts = 0, locked_until = null where id = $1`, [user.id]);
-    return this.issueChallenge(user.id, user.email);
+    if (channel === 'sms') await this.assertSmsChannelAllowed(user.phone);
+    return this.issueChallenge(user.id, user.email, user.phone, channel);
   }
 
   /**
-   * Re-send the OTP for a pending challenge.
+   * Re-send the OTP for a pending challenge, optionally switching channel
+   * (Task 17.2 — e.g. "send by SMS instead" once the email hasn't arrived).
    * Task 14.3 — OTP abuse control: a minimum cooldown between resends, on
    * top of the generic per-IP /api/auth rate limit, so a single click-spam
    * (or someone else's IP sharing that limit) can't be used to bombard a
-   * victim's inbox with repeated codes.
+   * victim's inbox/phone with repeated codes.
    */
-  async resendChallenge(otpToken: string): Promise<LoginChallenge> {
-    const rows = await this.db.raw<{ user_id: string; email: string; created_at: string }>(
-      `select o.user_id, u.email, o.created_at from app_user_otp o join app_user u on u.id = o.user_id where o.id = $1`,
+  async resendChallenge(otpToken: string, requestedChannel?: OtpChannel): Promise<LoginChallenge> {
+    const rows = await this.db.raw<{ user_id: string; email: string; phone: string | null; channel: OtpChannel; created_at: string }>(
+      `select o.user_id, u.email, u.phone, o.channel, o.created_at from app_user_otp o join app_user u on u.id = o.user_id where o.id = $1`,
       [otpToken],
     );
     const row = rows[0];
@@ -119,7 +154,9 @@ export class AuthService {
     if (waitSeconds > 0) {
       throw new ApiError(429, 'OTP_RESEND_TOO_SOON', `Veuillez patienter ${waitSeconds}s avant de redemander un code`);
     }
-    return this.issueChallenge(row.user_id, row.email);
+    const channel = requestedChannel ?? row.channel;
+    if (channel === 'sms') await this.assertSmsChannelAllowed(row.phone);
+    return this.issueChallenge(row.user_id, row.email, row.phone, channel);
   }
 
   /** Step 2: verify the emailed code → create a session (returned token goes in an httpOnly cookie). */
@@ -291,20 +328,44 @@ export class AuthService {
     return rows[0];
   }
 
-  private async issueChallenge(userId: string, email: string): Promise<LoginChallenge> {
-    const { otpToken, code } = await this.issueOtp(userId);
-    await this.mailer.sendMail(email, 'Wassalni — votre code de connexion', otpEmailHtml(code));
+  private async issueChallenge(userId: string, email: string, phone: string | null, channel: OtpChannel): Promise<LoginChallenge> {
+    const { otpToken, code } = await this.issueOtp(userId, channel);
+    if (channel === 'sms') {
+      // Checked by every caller (login/resendChallenge) before reaching
+      // here via assertSmsChannelAllowed, so phone is guaranteed non-null —
+      // this guard only protects against a future caller forgetting to.
+      if (!phone) throw new ApiError(400, 'PHONE_REQUIRED', 'Aucun numéro de téléphone enregistré sur ce compte');
+      const message = otpSmsText(code, this.cfg.otpTtlMinutes);
+      const result = await this.smsSender.sendSms(phone, message);
+      await recordSmsLog(this.db, {
+        userId,
+        phone,
+        purpose: 'otp',
+        notificationId: null,
+        message,
+        status: result.ok ? 'sent' : 'failed',
+        providerMessageId: result.providerMessageId ?? null,
+        error: result.error ?? null,
+      });
+    } else {
+      await this.mailer.sendMail(email, 'Wassalni — votre code de connexion', otpEmailHtml(code));
+    }
     return {
       otp_required: true,
       otp_token: otpToken,
+      channel,
+      can_use_sms: !!phone && this.smsChannelAvailable(),
       expires_in: this.cfg.otpTtlMinutes * 60,
-      // Never leak the OTP in the API response outside local/dev use — even if
-      // otpDevMode is true (no SMTP configured), production must not echo it.
-      ...(this.cfg.otpDevMode && !this.cfg.isProduction ? { dev_code: code } : {}),
+      // Never leak the OTP in the API response outside local/dev use. SMS
+      // always goes through the sandbox in this environment (no real
+      // carrier wired — see api/sms.ts), so exposing it there too is the
+      // only way to actually test the flow; production never echoes it
+      // regardless of channel.
+      ...(!this.cfg.isProduction && (channel === 'sms' || this.cfg.otpDevMode) ? { dev_code: code } : {}),
     };
   }
 
-  private async issueOtp(userId: string): Promise<{ otpToken: string; code: string }> {
+  private async issueOtp(userId: string, channel: OtpChannel): Promise<{ otpToken: string; code: string }> {
     const salt = randomToken(8);
     const code = sixDigitCode();
     const hash = sha256(`${salt}:${code}`);
@@ -313,9 +374,9 @@ export class AuthService {
       [userId],
     );
     const rows = await this.db.raw<{ id: string }>(
-      `insert into app_user_otp (user_id, purpose, salt, code_hash, expires_at)
-       values ($1, 'login_2fa', $2, $3, now() + make_interval(mins => $4)) returning id`,
-      [userId, salt, hash, this.cfg.otpTtlMinutes],
+      `insert into app_user_otp (user_id, purpose, channel, salt, code_hash, expires_at)
+       values ($1, 'login_2fa', $2, $3, $4, now() + make_interval(mins => $5)) returning id`,
+      [userId, channel, salt, hash, this.cfg.otpTtlMinutes],
     );
     return { otpToken: rows[0].id, code };
   }

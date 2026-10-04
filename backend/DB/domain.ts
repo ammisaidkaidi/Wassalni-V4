@@ -2542,6 +2542,31 @@ export class DomainRepository {
     await this.db.raw(`update notification set pushed_at = now() where id in (${placeholders})`, uniqueIds);
   }
 
+  // ── SMS notification dispatch (Task 17.1) ───────────────────────────────────
+  // Fed by the exact same `notification` rows Task 11.1 already raises (see
+  // notify_customer/notify_driver call sites in data/init/sql.txt) — this
+  // only forwards a subset of event *types* to a second channel, it does
+  // not re-decide when an event happened.
+
+  /** Notifications of one of `types` that no SMS has been attempted for yet, joined to the recipient's phone (if any) on file. */
+  async listUnsmsedNotifications(types: string[], limit = 200): Promise<Array<NotificationRow & { phone: string | null }>> {
+    if (types.length === 0) return [];
+    const placeholders = types.map((_, i) => `$${i + 2}`).join(', ');
+    return this.db.raw(
+      `select n.*, u.phone from notification n
+         join app_user u on u.id = n.recipient_user_id
+        where n.sms_sent_at is null and n.type in (${placeholders})
+        order by n.created_at asc limit $1`,
+      [limit, ...types],
+    );
+  }
+  async markNotificationsSmsSent(ids: string[]): Promise<void> {
+    const uniqueIds = Array.from(new Set(ids));
+    if (uniqueIds.length === 0) return;
+    const placeholders = uniqueIds.map((_, i) => `$${i + 1}`).join(', ');
+    await this.db.raw(`update notification set sms_sent_at = now() where id in (${placeholders})`, uniqueIds);
+  }
+
   // ── In-app messaging (Task 11.2) ──────────────────────────────────────────
 
   async getOrCreateConversation(reservationId: string): Promise<string> {

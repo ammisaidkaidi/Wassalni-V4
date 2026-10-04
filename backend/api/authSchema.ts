@@ -46,6 +46,13 @@ export const AUTH_SCHEMA_STATEMENTS: string[] = [
      attempts    int not null default 0,
      created_at  timestamptz not null default now()
    )`,
+  // Task 17.2 — SMS as a 2FA delivery alternative to email. Same
+  // app_user_otp row/lifecycle either way (generation, expiry, attempt
+  // limit, consumption) — only the delivery channel differs, so this is a
+  // column, not a parallel table.
+  `alter table app_user_otp add column if not exists channel text not null default 'email'`,
+  `alter table app_user_otp drop constraint if exists app_user_otp_channel_check`,
+  `alter table app_user_otp add constraint app_user_otp_channel_check check (channel in ('email','sms'))`,
   `create table if not exists app_session (
      token_hash   text primary key,
      user_id      uuid not null references app_user(id) on delete cascade,

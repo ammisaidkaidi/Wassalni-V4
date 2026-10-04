@@ -3679,6 +3679,35 @@ create index if not exists idx_push_subscription_user on push_subscription (user
 alter table notification add column if not exists pushed_at timestamptz;
 create index if not exists idx_notification_unpushed on notification (created_at) where pushed_at is null;
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13O — SMS (Task 17.1 notifications + Task 17.2 OTP alternative)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- One row per SMS attempt, whichever of the two use cases triggered it:
+--  - purpose='notification': the Node-side dispatcher (api/smsDispatch.ts)
+--    forwarding a subset of `notification` rows (booking/approval/
+--    cancellation/reminders/payment events) — same non-duplicated-logic
+--    posture as push_subscription above, fed by the very same table.
+--  - purpose='otp': a login 2FA code sent over SMS instead of email
+--    (api/auth/authService.ts). Doubles as the per-phone rate-limit
+--    ledger for that flow (count recent purpose='otp' rows for a phone).
+create table if not exists sms_log (
+  id                  uuid primary key default gen_random_uuid(),
+  user_id             uuid,
+  phone               text not null,
+  purpose             text not null check (purpose in ('notification', 'otp')),
+  notification_id     uuid references notification(id) on delete set null,
+  message             text not null,
+  status              text not null check (status in ('sent', 'failed')),
+  provider_message_id text,
+  error               text,
+  created_at          timestamptz not null default now()
+);
+create index if not exists idx_sms_log_phone on sms_log (phone, purpose, created_at desc);
+create index if not exists idx_sms_log_user on sms_log (user_id);
+
+alter table notification add column if not exists sms_sent_at timestamptz;
+create index if not exists idx_notification_unsmsed on notification (created_at) where sms_sent_at is null;
+
 -- ── Wire notify_customer() into the reservation lifecycle events already
 -- implemented in earlier sections — booking request / approval / rejection
 -- / cancellation / trip completion (schedule change and price change are

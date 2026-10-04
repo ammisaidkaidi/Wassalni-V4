@@ -21,6 +21,8 @@ import { tripsRoutes } from './routes/trips';
 import { notificationsRoutes } from './routes/notifications';
 import { pushRoutes } from './routes/push';
 import { configurePushService, dispatchPendingPushNotifications } from './push';
+import { createSmsSender } from './sms';
+import { dispatchPendingSmsNotifications } from './smsDispatch';
 import { shareRoutes } from './routes/share';
 
 async function main(): Promise<void> {
@@ -39,7 +41,8 @@ async function main(): Promise<void> {
   const db = new DBHelper(conn);
   const repo = new DomainRepository(db);
   const mailer = createMailer(cfg);
-  const auth = new AuthService(db, repo, cfg, mailer);
+  const smsSender = createSmsSender(cfg);
+  const auth = new AuthService(db, repo, cfg, mailer, smsSender);
 
   console.log(`Mode: ${cfg.isProduction ? 'PRODUCTION' : 'development'}`);
   if (cfg.otpDevMode && !cfg.isProduction) {
@@ -56,6 +59,16 @@ async function main(): Promise<void> {
   }
   if (cfg.isProduction && !cfg.cookieSecure) {
     console.warn('⚠ PRODUCTION avec COOKIE_SECURE=false — les cookies de session ne seront pas marqués "secure". À utiliser uniquement derrière HTTPS.');
+  }
+  // Task 17.1/17.2 — SMS (notifications + 2FA alternative).
+  if (smsSender.mode === 'sandbox' && !cfg.isProduction) {
+    console.warn('⚠ SMS_PROVIDER non configuré — mode sandbox : les SMS sont loggués ici et journalisés dans sms_log, jamais livrés à un vrai téléphone.');
+  }
+  if (smsSender.mode === 'sandbox' && cfg.isProduction) {
+    console.warn(
+      '⚠ PRODUCTION sans SMS_PROVIDER configuré — aucun SMS (notifications ou 2FA) ne sera réellement livré ; ' +
+        'le canal SMS du 2FA est automatiquement désactivé (voir AuthService.smsChannelAvailable) tant que cette variable n’est pas renseignée dans backend/.env.',
+    );
   }
   // Task 16.2 — Web Push.
   configurePushService(cfg);
@@ -178,11 +191,28 @@ async function main(): Promise<void> {
   }, pushIntervalMs);
   pushTimer.unref();
 
+  // Task 17.1 — SMS notification dispatcher: same sweep pattern as the push
+  // dispatcher above, over the same `notification` rows, restricted to the
+  // booking/approval/cancellation/reminder/payment event types (see
+  // api/smsDispatch.ts's SMS_NOTIFICATION_TYPES allow-list).
+  const smsIntervalMs = 20_000;
+  const smsTimer = setInterval(() => {
+    dispatchPendingSmsNotifications(repo, db, smsSender)
+      .then((r) => {
+        if (r.notifications > 0) {
+          console.log(`⏱ SMS dispatch: ${r.sent} sent, ${r.failed} failed, ${r.skippedNoPhone} skipped (no phone), ${r.notifications} notifications processed`);
+        }
+      })
+      .catch((err) => console.error('✗ dispatchPendingSmsNotifications failed:', err));
+  }, smsIntervalMs);
+  smsTimer.unref();
+
   const shutdown = (): void => {
     console.log('Shutting down…');
     clearInterval(expiryTimer);
     clearInterval(lifecycleTimer);
     clearInterval(pushTimer);
+    clearInterval(smsTimer);
     server.close(() => {
       conn.close().finally(() => process.exit(0));
     });

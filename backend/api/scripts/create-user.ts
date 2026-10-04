@@ -9,6 +9,7 @@ import { AuthService } from '../auth/authService';
 import { createMailer } from '../auth/email';
 import { ensureAuthSchema } from '../authSchema';
 import { loadApiConfig } from '../config';
+import { createSmsSender } from '../sms';
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
     await conn.init();
     await ensureAuthSchema(conn);
     const db = new DBHelper(conn);
-    const svc = new AuthService(db, new DomainRepository(db), cfg, createMailer(cfg));
+    const svc = new AuthService(db, new DomainRepository(db), cfg, createMailer(cfg), createSmsSender(cfg));
     const user = await svc.createUser({
       email,
       password,

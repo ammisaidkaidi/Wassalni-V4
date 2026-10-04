@@ -1377,15 +1377,15 @@ Implement provider abstraction rather than coupling the domain to one vendor.
 
 Support:
 
-[ ] booking
+[x] booking
 
-[ ] approval
+[x] approval
 
-[ ] cancellation
+[x] cancellation
 
-[ ] reminders
+[x] reminders
 
-[ ] payment events
+[x] payment events
 
 TASK 17.2 — SMS OTP
 
@@ -1393,17 +1393,17 @@ Offer SMS as an authentication/2FA alternative where appropriate.
 
 Implement:
 
-[ ] OTP generation
+[x] OTP generation
 
-[ ] expiry
+[x] expiry
 
-[ ] retry limits
+[x] retry limits
 
-[ ] rate limiting
+[x] rate limiting
 
-[ ] verification
+[x] verification
 
-[ ] abuse prevention
+[x] abuse prevention
 
 PHASE 18 — BACKUP / RECOVERY
 
