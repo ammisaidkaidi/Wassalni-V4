@@ -106,8 +106,25 @@ async function main(): Promise<void> {
     console.log(`🚀 Wassalni API listening on http://0.0.0.0:${cfg.port}`);
   });
 
+  // Task 7.3 — periodic sweep of pending gateway payment intents whose
+  // 15-minute window lapsed without the customer completing checkout (or
+  // the webhook never arriving). Mirrors the no-show-strike interval
+  // pattern already used elsewhere in this file's sibling services; errors
+  // are logged, not fatal, so a single bad tick never takes the API down.
+  const expiryIntervalMs = 60_000;
+  const expiryTimer = setInterval(() => {
+    repo
+      .expireStalePaymentIntents()
+      .then((n) => {
+        if (n > 0) console.log(`⏱ Payment intents expired: ${n}`);
+      })
+      .catch((err) => console.error('✗ expire_stale_payment_intents failed:', err));
+  }, expiryIntervalMs);
+  expiryTimer.unref();
+
   const shutdown = (): void => {
     console.log('Shutting down…');
+    clearInterval(expiryTimer);
     server.close(() => {
       conn.close().finally(() => process.exit(0));
     });

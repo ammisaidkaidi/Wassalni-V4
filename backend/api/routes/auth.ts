@@ -10,6 +10,8 @@ const registerSchema = z.object({
   password: z.string().min(8, '8 caractères minimum'),
   full_name: z.string().trim().min(2, 'nom trop court'),
   phone: z.string().regex(/^\+?[0-9]{8,15}$/, 'numéro de téléphone invalide'),
+  // Task 9.4 — optional: credits whoever owns this code once the new customer completes their first trip.
+  referral_code: z.string().trim().min(1).max(40).nullish(),
 });
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
 const verifySchema = z.object({ otp_token: z.string().uuid(), code: z.string().regex(/^[0-9]{6}$/, 'code à 6 chiffres') });

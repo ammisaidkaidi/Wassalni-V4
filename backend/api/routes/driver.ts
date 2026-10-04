@@ -679,5 +679,28 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
     }),
   );
 
+  // ── Earnings / payouts (Task 8.2) — own ledger & summary only ──────────────
+
+  router.get(
+    '/earnings',
+    wrap(async (req, res) => {
+      res.json({ summary: await repo.driverEarningsSummary(req.user!.driver_id!) });
+    }),
+  );
+
+  router.get(
+    '/earnings/ledger',
+    wrap(async (req, res) => {
+      res.json({ ledger: await repo.listPayoutLedger(req.user!.driver_id!) });
+    }),
+  );
+
+  router.get(
+    '/earnings/payouts',
+    wrap(async (req, res) => {
+      res.json({ batches: await repo.listPayoutBatches(req.user!.driver_id!) });
+    }),
+  );
+
   return router;
 }

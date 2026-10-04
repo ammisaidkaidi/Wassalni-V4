@@ -7,7 +7,7 @@ import { WILAYA_CENTROIDS } from './wilayaCentroids';
 export type TripStatus = 'scheduled' | 'in_progress' | 'completed' | 'cancelled';
 export type ReservationStatus = 'pending' | 'confirmed' | 'completed' | 'cancelled' | 'no_show';
 export type PaymentMethod = 'cash' | 'cib' | 'edahabia' | 'bank_transfer' | 'card';
-export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'partially_refunded';
+export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'partially_refunded' | 'expired';
 
 export interface CreateTripParams {
   trajectoryId: string;
@@ -108,27 +108,38 @@ export interface PaymentViewRow {
   gateway: string | null;
   gateway_transaction_id: string | null;
   failure_reason: string | null;
+  expires_at: string | null;
 }
 
+/** Task 7.4 — a refund ledger row still waiting on a human (exclusively the
+ *  cash-payment case; a gateway refund auto-executes and never appears
+ *  here). Source: v_refund_due (refund table, status='pending'). */
 export interface RefundDueRow {
+  refund_id: string;
+  payment_id: string;
   reservation_id: string;
+  refund_due: string;
+  status: RefundStatus;
+  policy_pct: string | null;
+  initiated_by: 'system' | 'admin';
+  created_at: string;
   reservation_code: string;
   customer_name: string;
   customer_phone: string;
-  refund_due: string;
 }
 
+export type RefundStatus = 'pending' | 'processing' | 'succeeded' | 'failed';
+
 /**
- * Payment-level refund worklist row (Task 1.4) — one actionable row per
- * still-refundable payment, instead of RefundDueRow's one row per
- * reservation. Lets the admin UI put a "Rembourser" button directly next to
- * the exact payment it applies to, with the reservation/customer context
- * that was previously only visible by cross-referencing the payments table.
+ * Payment-level refund worklist row (Task 1.4, reworked for Task 7.4) — one
+ * row per refund *ledger entry* (not just "any cancelled+paid reservation",
+ * which stopped being a correct heuristic once partial-refund policies
+ * existed) with the trip/customer context the admin UI needs.
  */
 export interface RefundWorklistRow {
+  refund_id: string;
   payment_id: string;
   payment_code: string;
-  payment_status: string;
   reservation_id: string;
   reservation_code: string;
   customer_name: string;
@@ -136,11 +147,162 @@ export interface RefundWorklistRow {
   trip_code: string;
   departure_at: string;
   amount: string;
-  refunded_amount: string;
-  refund_due: string;
+  status: RefundStatus;
+  policy_pct: string | null;
+  initiated_by: 'system' | 'admin';
+  gateway: string | null;
+  failure_reason: string | null;
+  created_at: string;
+  processed_at: string | null;
+}
+
+export interface PayoutLedgerRow {
+  id: string;
+  driver_id: string;
+  trip_id: string | null;
+  reservation_id: string | null;
+  payment_id: string | null;
+  entry_type: 'earning' | 'refund_adjustment';
+  gross_amount: string;
+  commission_pct: string;
+  commission_amount: string;
+  net_amount: string;
+  payout_batch_id: string | null;
+  created_at: string;
+  reservation_code?: string | null;
+  trip_code?: string | null;
+}
+
+export interface PayoutBatchRow {
+  id: string;
+  driver_id: string;
+  driver_name?: string;
+  period_start: string;
+  period_end: string;
+  total_amount: string;
+  status: 'pending' | 'paid' | 'failed';
+  reference: string | null;
+  created_at: string;
   paid_at: string | null;
 }
 
+export interface DriverEarningsSummary {
+  gross_revenue: string;
+  commission: string;
+  refunds: string;
+  net_earnings: string;
+  pending_payout: string;
+  paid_out: string;
+}
+
+
+// ── Wallet (Task 9.3) ─────────────────────────────────────────────────────────
+
+export type WalletEntryType = 'refund_credit' | 'promo_credit' | 'referral_credit' | 'booking_debit' | 'admin_adjustment';
+
+export interface WalletEntryRow {
+  id: string;
+  customer_id: string;
+  entry_type: WalletEntryType;
+  amount: string;
+  reservation_id: string | null;
+  reference_id: string | null;
+  description: string | null;
+  created_at: string;
+}
+
+// ── Promo codes (Task 9.2) ───────────────────────────────────────────────────
+
+export interface PromoCodeRow {
+  id: string;
+  code: string;
+  discount_type: 'percentage' | 'fixed';
+  discount_value: string;
+  min_amount: string;
+  max_uses_total: number | null;
+  max_uses_per_customer: number;
+  starts_at: string | null;
+  expires_at: string | null;
+  active: boolean;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface PromoRedemptionRow {
+  id: string;
+  promo_code_id: string;
+  code?: string;
+  customer_id: string;
+  reservation_id: string | null;
+  discount_amount: string;
+  created_at: string;
+}
+
+// ── Referral program (Task 9.4) ──────────────────────────────────────────────
+
+export interface ReferralSummary {
+  referral_code: string;
+  referred_by_customer_id: string | null;
+  total_referred: number;
+  total_rewarded: string;
+}
+
+export interface ReferralRewardRow {
+  id: string;
+  referrer_id: string;
+  referred_id: string;
+  referred_name?: string;
+  trigger_reservation_id: string | null;
+  reward_amount: string;
+  status: 'pending' | 'paid';
+  created_at: string;
+}
+
+// ── PDF receipts (Task 9.5) ──────────────────────────────────────────────────
+
+export interface ReceiptHeader {
+  id: string;
+  code: string;
+  seats: number;
+  total_price: string;
+  currency: string;
+  created_at: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone: string;
+  trip_code: string;
+  departure_at: string;
+  trajectory_name: string;
+}
+
+export interface ReceiptPaymentLine {
+  id: string;
+  code: string;
+  amount: string;
+  refunded_amount: string;
+  currency: string;
+  method: PaymentMethod;
+  status: PaymentStatus;
+  paid_at: string | null;
+  created_at: string;
+}
+
+export interface ReceiptRefundLine {
+  id: string;
+  payment_id: string;
+  payment_code: string;
+  amount: string;
+  status: RefundStatus;
+  initiated_by: 'system' | 'admin';
+  created_at: string;
+  processed_at: string | null;
+}
+
+export interface ReceiptData {
+  header: ReceiptHeader;
+  payments: ReceiptPaymentLine[];
+  refunds: ReceiptRefundLine[];
+}
 
 export interface CustomerRow {
   id: string;
@@ -485,6 +647,24 @@ export const DOMAIN_ERRORS: Readonly<Record<string, string>> = {
   DZ731: 'Unknown payment gateway transaction',
   DZ732: 'Webhook signature verification failed',
   DZ733: 'Payment intent has already been resolved',
+  DZ741: 'Unknown refund id',
+  DZ742: 'Refund is not in a pending/processing state',
+  DZ743: 'A failure reason is required to mark a refund as failed',
+  DZ744: 'Only a failed refund can be retried',
+  DZ751: 'Unknown promo code',
+  DZ752: 'Promo code is not active',
+  DZ753: 'Promo code is not within its valid date range',
+  DZ754: 'Reservation amount is below the promo code minimum',
+  DZ755: 'Promo code total usage limit reached',
+  DZ756: 'You have already used this promo code the maximum number of times',
+  DZ761: 'Wallet credit/debit amount must be positive',
+  DZ762: 'Insufficient wallet balance',
+  DZ771: 'Unknown referral code',
+  DZ772: 'You cannot refer yourself',
+  DZ773: 'This account already has a referrer on file',
+  DZ781: 'Unknown payout batch id',
+  DZ782: 'Payout batch has already been marked as paid',
+  DZ783: 'No unbatched payout ledger entries in that period for this driver',
 };
 
 export interface DomainErrorInfo {
@@ -1348,12 +1528,40 @@ export class DomainRepository {
     await this.db.callScalar('settle_payment', paymentId);
   }
 
-  async refundPayment(paymentId: string, amount?: number | string | null): Promise<void> {
-    await this.db.callScalar('refund_payment', paymentId, amount ?? null);
+  /**
+   * Task 7.4 — admin manual/override refund. Now routed through
+   * apply_refund() (initiated_by='admin') instead of calling refund_payment()
+   * directly, so every refund — however it originates — ends up in the one
+   * audit ledger. Resolves a pre-existing system-generated 'pending' cash
+   * refund if one exists for this payment, otherwise creates+immediately
+   * executes a fresh one (admin action = treated as already confirmed/done).
+   */
+  async refundPayment(paymentId: string, amount: number | string | null | undefined, adminId: string): Promise<string> {
+    const id = await this.db.callScalar<string>('apply_refund', paymentId, amount ?? null, 'admin', adminId, null);
+    if (!id) throw new Error('apply_refund returned no id');
+    return id;
+  }
+
+  async failRefund(refundId: string, adminId: string, reason: string): Promise<void> {
+    await this.db.callScalar('fail_refund', refundId, adminId, reason);
+  }
+
+  async retryRefund(refundId: string, adminId: string): Promise<string> {
+    const id = await this.db.callScalar<string>('retry_refund', refundId, adminId);
+    if (!id) throw new Error('retry_refund returned no id');
+    return id;
   }
 
   async listReservations(where?: Where, limit?: number): Promise<ReservationViewRow[]> {
     return this.db.select<ReservationViewRow>('v_reservation', { where, orderBy: 'created_at desc', limit });
+  }
+
+  /** Bare ownership check (customer_id) without pulling the whole v_reservation join — used by routes that need to authorize before acting (e.g. promo-code redemption, wallet payment). */
+  async getReservationOwner(reservationId: string): Promise<{ customer_id: string; status: string; total_price: string } | null> {
+    return this.db.selectOne<{ customer_id: string; status: string; total_price: string }>('reservation', {
+      columns: ['customer_id', 'status', 'total_price'],
+      where: { id: reservationId },
+    });
   }
 
   async getReservation(reservationId: string): Promise<ReservationViewRow | null> {
@@ -1364,37 +1572,34 @@ export class DomainRepository {
     return this.db.select<PaymentViewRow>('v_payment', { where, orderBy: 'created_at desc', limit });
   }
 
-  /** Cancelled reservations that still have money to give back. */
+  /** Refund ledger rows still awaiting a human (cash refunds only — see v_refund_due). */
   async refundsDue(): Promise<RefundDueRow[]> {
     return this.db.select<RefundDueRow>('v_refund_due');
   }
 
   /**
-   * Payment-level refund worklist — same business rule v_refund_due already
-   * encodes (cancelled reservation + a payment still holding a refundable
-   * balance), just expressed per-payment so each row carries the exact
-   * payment_id the admin needs to act on, plus trip/customer context.
-   * payment_refund_consistency already guarantees amount > refunded_amount
-   * whenever status is 'paid'/'partially_refunded' — the extra filter below
-   * is a defensive no-op, not a second source of truth for that rule.
+   * Payment-level refund worklist (Task 1.4, reworked for Task 7.4) — one
+   * row per refund *ledger entry* of any status, newest first, with the
+   * trip/customer context the admin UI needs to act on it (complete/fail/
+   * retry). Replaces the old "any cancelled+paid reservation" heuristic,
+   * which stopped being correct once partial-refund policies existed.
    */
-  async refundWorklist(): Promise<RefundWorklistRow[]> {
+  async refundWorklist(status?: string): Promise<RefundWorklistRow[]> {
     return this.db.raw<RefundWorklistRow>(
-      `select p.id as payment_id, p.code as payment_code, p.status as payment_status,
-              r.id as reservation_id, r.code as reservation_code,
+      `select rf.id as refund_id, rf.payment_id, p.code as payment_code,
+              rf.reservation_id, r.code as reservation_code,
               cs.full_name as customer_name, cs.phone as customer_phone,
               tr.code as trip_code, tr.departure_at,
-              p.amount, p.refunded_amount,
-              (p.amount - p.refunded_amount) as refund_due,
-              p.paid_at
-         from payment p
-         join reservation r on r.id = p.reservation_id
-         join customer cs   on cs.id = r.customer_id
-         join trip tr       on tr.id = r.trip_id
-        where r.status = 'cancelled'
-          and p.status in ('paid', 'partially_refunded')
-          and p.amount - p.refunded_amount > 0
-        order by p.paid_at nulls last, p.created_at`,
+              rf.amount, rf.status, rf.policy_pct, rf.initiated_by, rf.gateway,
+              rf.failure_reason, rf.created_at, rf.processed_at
+         from refund rf
+         join payment p      on p.id = rf.payment_id
+         join reservation r  on r.id = rf.reservation_id
+         join customer cs    on cs.id = r.customer_id
+         join trip tr        on tr.id = r.trip_id
+        where ($1::text is null or rf.status = $1)
+        order by rf.created_at desc`,
+      [status ?? null],
     );
   }
 
@@ -1672,16 +1877,232 @@ export class DomainRepository {
     return id;
   }
 
-  /** An existing still-open (pending) gateway intent for this reservation, if any — avoids piling up duplicate checkout sessions on repeated clicks. */
+  /**
+   * An existing still-open (pending, not yet expired) gateway intent for
+   * this reservation, if any — avoids piling up duplicate checkout sessions
+   * on repeated clicks. Task 7.3: a 'pending' row whose expires_at has
+   * already passed is stale (expire_stale_payment_intents() just hasn't
+   * swept it yet) and must not be reused — treat it as if it weren't open.
+   */
   async findOpenGatewayIntent(reservationId: string): Promise<PaymentViewRow | null> {
     const rows = await this.db.raw<PaymentViewRow>(
       `select v.* from v_payment v
         join payment p on p.id = v.id
         where p.reservation_id = $1 and v.status = 'pending' and v.gateway_transaction_id is not null
+          and (p.expires_at is null or p.expires_at > now())
         order by v.created_at desc limit 1`,
       [reservationId],
     );
     return rows[0] ?? null;
+  }
+
+  /** Task 7.3 — sweep expired pending gateway intents; returns how many were expired. Called on a server-side interval. */
+  async expireStalePaymentIntents(): Promise<number> {
+    const n = await this.db.callScalar<number>('expire_stale_payment_intents');
+    return n ?? 0;
+  }
+
+  /** Task 7.4 — preview the cancellation-refund percentage that would apply to a trip right now (read-only; same function cancel_reservation() itself uses). */
+  async cancellationRefundPctPreview(tripId: string): Promise<number> {
+    // Deliberately does NOT pass a 2nd arg: the SQL function defaults p_at
+    // to now() itself — explicitly passing null here would override that
+    // default with an actual NULL and make every comparison inside the
+    // function (NULL >= x) silently false, always returning 0%.
+    const pct = await this.db.callScalar<string>('cancellation_refund_pct', tripId);
+    return pct != null ? Number(pct) : 0;
+  }
+
+  // ── Driver payout ledger (Task 8.1 / 8.2 / 8.3) ───────────────────────────────
+
+  async driverEarningsSummary(driverId: string): Promise<DriverEarningsSummary> {
+    const rows = await this.db.raw<DriverEarningsSummary>('select * from driver_earnings_summary($1)', [driverId]);
+    return (
+      rows[0] ?? { gross_revenue: '0', commission: '0', refunds: '0', net_earnings: '0', pending_payout: '0', paid_out: '0' }
+    );
+  }
+
+  async listPayoutLedger(driverId: string, limit = 200): Promise<PayoutLedgerRow[]> {
+    return this.db.raw<PayoutLedgerRow>(
+      `select pl.*, r.code as reservation_code, tr.code as trip_code
+         from payout_ledger pl
+         left join reservation r on r.id = pl.reservation_id
+         left join trip tr       on tr.id = pl.trip_id
+        where pl.driver_id = $1
+        order by pl.created_at desc
+        limit $2`,
+      [driverId, limit],
+    );
+  }
+
+  async listPayoutBatches(driverId?: string): Promise<PayoutBatchRow[]> {
+    return this.db.raw<PayoutBatchRow>(
+      `select pb.*, d.full_name as driver_name
+         from payout_batch pb
+         join driver d on d.id = pb.driver_id
+        where $1::uuid is null or pb.driver_id = $1
+        order by pb.created_at desc`,
+      [driverId ?? null],
+    );
+  }
+
+  async createPayoutBatch(driverId: string, periodStart: string, periodEnd: string): Promise<string> {
+    const id = await this.db.callScalar<string>('create_payout_batch', driverId, periodStart, periodEnd);
+    if (!id) throw new Error('create_payout_batch returned no id');
+    return id;
+  }
+
+  async markPayoutBatchPaid(batchId: string, reference: string): Promise<void> {
+    await this.db.callScalar('mark_payout_batch_paid', batchId, reference);
+  }
+
+  // ── Wallet (Task 9.3) ──────────────────────────────────────────────────────
+
+  async walletBalance(customerId: string): Promise<string> {
+    const v = await this.db.callScalar<string>('wallet_balance', customerId);
+    return v ?? '0';
+  }
+
+  async walletHistory(customerId: string, limit = 100): Promise<WalletEntryRow[]> {
+    return this.db.select<WalletEntryRow>('wallet_entry', { where: { customer_id: customerId }, orderBy: 'created_at desc', limit });
+  }
+
+  /** Admin-only manual adjustment — positive amount credits, negative amount debits (atomically, via wallet_debit so an overdraft is still impossible). */
+  async adjustWallet(customerId: string, amount: number, description: string): Promise<string> {
+    if (amount === 0) throw new Error('amount must be non-zero');
+    const id =
+      amount > 0
+        ? await this.db.callScalar<string>('wallet_credit', customerId, 'admin_adjustment', amount, null, null, description)
+        : await this.db.callScalar<string>('wallet_debit', customerId, Math.abs(amount), 'admin_adjustment', null, null, description);
+    if (!id) throw new Error('wallet adjustment returned no id');
+    return id;
+  }
+
+  /** Task 9.3 — pay a reservation (fully or the given amount) straight from the customer's wallet. Returns the new payment id. */
+  async payReservationWithWallet(reservationId: string, amount?: number | null): Promise<string> {
+    const id = await this.db.callScalar<string>('pay_reservation_with_wallet', reservationId, amount ?? null);
+    if (!id) throw new Error('pay_reservation_with_wallet returned no id');
+    return id;
+  }
+
+  // ── Promo codes (Task 9.2) ────────────────────────────────────────────────
+
+  async listPromoCodes(): Promise<PromoCodeRow[]> {
+    return this.db.select<PromoCodeRow>('promo_code', { orderBy: 'created_at desc' });
+  }
+
+  async createPromoCode(p: {
+    code: string;
+    discountType: 'percentage' | 'fixed';
+    discountValue: number;
+    minAmount?: number;
+    maxUsesTotal?: number | null;
+    maxUsesPerCustomer?: number;
+    startsAt?: string | null;
+    expiresAt?: string | null;
+    createdBy: string;
+  }): Promise<string> {
+    const row = await this.db.insert<{ id: string }>('promo_code', {
+      code: p.code.toUpperCase().trim(),
+      discount_type: p.discountType,
+      discount_value: p.discountValue,
+      min_amount: p.minAmount ?? 0,
+      max_uses_total: p.maxUsesTotal ?? null,
+      max_uses_per_customer: p.maxUsesPerCustomer ?? 1,
+      starts_at: p.startsAt ?? null,
+      expires_at: p.expiresAt ?? null,
+      created_by: p.createdBy,
+    });
+    return row.id;
+  }
+
+  async setPromoCodeActive(id: string, active: boolean): Promise<void> {
+    await this.db.update('promo_code', { active }, { id });
+  }
+
+  /** Task 9.2 — validates + redeems a promo code for a customer, crediting the discount to their wallet. basis_amount is the reservation's total_price. */
+  async redeemPromoCode(customerId: string, code: string, basisAmount: number, reservationId?: string | null): Promise<string> {
+    const id = await this.db.callScalar<string>('redeem_promo_code', customerId, code, basisAmount, reservationId ?? null);
+    if (!id) throw new Error('redeem_promo_code returned no id');
+    return id;
+  }
+
+  // ── Referral program (Task 9.4) ───────────────────────────────────────────
+
+  async getReferralSummary(customerId: string): Promise<ReferralSummary> {
+    const rows = await this.db.raw<{ referral_code: string; referred_by_customer_id: string | null }>(
+      'select referral_code, referred_by_customer_id from customer where id = $1',
+      [customerId],
+    );
+    if (!rows[0]) throw new Error('Customer not found');
+    const agg = await this.db.raw<{ total_referred: string; total_rewarded: string }>(
+      `select count(*)::int as total_referred, coalesce(sum(reward_amount), 0) as total_rewarded
+         from referral_reward where referrer_id = $1`,
+      [customerId],
+    );
+    return {
+      referral_code: rows[0].referral_code,
+      referred_by_customer_id: rows[0].referred_by_customer_id,
+      total_referred: Number(agg[0]?.total_referred ?? 0),
+      total_rewarded: agg[0]?.total_rewarded ?? '0',
+    };
+  }
+
+  async listReferralRewards(customerId: string): Promise<ReferralRewardRow[]> {
+    return this.db.raw<ReferralRewardRow>(
+      `select rr.*, cs.full_name as referred_name
+         from referral_reward rr
+         join customer cs on cs.id = rr.referred_id
+        where rr.referrer_id = $1
+        order by rr.created_at desc`,
+      [customerId],
+    );
+  }
+
+  /** Task 9.4 — attach a new customer to a referrer by code (called once, right after signup, if they entered one). */
+  async attributeReferral(newCustomerId: string, code: string): Promise<void> {
+    await this.db.callScalar('attribute_referral', newCustomerId, code);
+  }
+
+  // ── Dynamic pricing suggestions (Task 9.1) ────────────────────────────────
+
+  /** Read-only suggestion — never writes; admin must explicitly apply it via sp_set_trip_price(). */
+  async suggestTripPrice(tripId: string, fromWpointId: string, toWpointId: string): Promise<string> {
+    const price = await this.db.callScalar<string>('suggest_trip_price', tripId, fromWpointId, toWpointId);
+    if (price == null) throw new Error('suggest_trip_price returned no value');
+    return price;
+  }
+
+  // ── PDF receipts (Task 9.5) ──────────────────────────────────────────────────
+
+  /** Everything a receipt needs, in one round trip: reservation/trip/customer header + every payment + every refund against it. Generated on the fly — nothing is persisted as a file. */
+  async getReceiptData(reservationId: string): Promise<ReceiptData | null> {
+    const headerRows = await this.db.raw<ReceiptHeader>(
+      `select r.id, r.code, r.seats, r.total_price, r.currency, r.created_at,
+              r.customer_id, cs.full_name as customer_name, cs.phone as customer_phone,
+              t.code as trip_code, t.departure_at, tj.name as trajectory_name
+         from reservation r
+         join customer cs    on cs.id = r.customer_id
+         join trip t          on t.id = r.trip_id
+         join trajectory tj   on tj.id = t.trajectory_id
+        where r.id = $1`,
+      [reservationId],
+    );
+    const header = headerRows[0];
+    if (!header) return null;
+
+    const payments = await this.db.raw<ReceiptPaymentLine>(
+      `select id, code, amount, refunded_amount, currency, method, status, paid_at, created_at
+         from payment where reservation_id = $1 order by created_at`,
+      [reservationId],
+    );
+    const refunds = await this.db.raw<ReceiptRefundLine>(
+      `select rf.id, rf.payment_id, p.code as payment_code, rf.amount, rf.status, rf.initiated_by, rf.created_at, rf.processed_at
+         from refund rf join payment p on p.id = rf.payment_id
+        where rf.reservation_id = $1 order by rf.created_at`,
+      [reservationId],
+    );
+
+    return { header, payments, refunds };
   }
 
   async getPaymentByGatewayTransactionId(transactionId: string): Promise<PaymentViewRow | null> {

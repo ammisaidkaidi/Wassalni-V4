@@ -716,33 +716,33 @@ TASK 7.3 — Payment expiration
 
 Implement:
 
-[ ] 15-minute hold
+[x] 15-minute hold
 
-[ ] expiration detection
+[x] expiration detection
 
-[ ] automatic cancellation
+[x] automatic cancellation
 
-[ ] seat release
+[x] seat release
 
-[ ] payment expiration state
+[x] payment expiration state
 
 TASK 7.4 — Automated refunds
 
 Implement cancellation-policy-driven refunds.
 
-[ ] determine refund amount
+[x] determine refund amount
 
-[ ] create refund record
+[x] create refund record
 
-[ ] execute gateway refund
+[x] execute gateway refund
 
-[ ] idempotency
+[x] idempotency
 
-[ ] refund status
+[x] refund status
 
-[ ] failure/retry handling
+[x] failure/retry handling
 
-[ ] audit trail
+[x] audit trail
 
 PHASE 8 — DRIVER PAYOUTS
 
@@ -754,19 +754,21 @@ customer payment − platform commission − refunds/adjustments = driver payabl
 
 Implement:
 
-[ ] payout ledger
+[x] payout ledger
 
-[ ] immutable financial records
+[x] immutable financial records
 
-[ ] reservation/payment linkage
+[x] reservation/payment linkage
 
-[ ] driver linkage
+[x] driver linkage
 
-[ ] admin reconciliation
+[x] admin reconciliation
 
 TASK 8.2 — Driver earnings dashboard
 
-Show:
+Show: (backend computed + API-exposed via GET /api/driver/earnings[/ledger|/payouts] —
+correct and live-tested — but no frontend dashboard page renders it yet, so the
+literal "Show" requirement is not yet met end-to-end; see feature-matrix.md 8.2)
 
 [ ] gross revenue
 
@@ -782,13 +784,13 @@ Show:
 
 TASK 8.3 — Payout scheduling/export
 
-[ ] payout batches
+[x] payout batches
 
-[ ] payout status
+[x] payout status
 
-[ ] export
+[x] export
 
-[ ] reconciliation
+[x] reconciliation
 
 PHASE 9 — PRICING AND MONETIZATION
 
@@ -800,37 +802,37 @@ min_price max_price
 
 Implement configurable rules for:
 
-[ ] peak/off-peak
+[x] peak/off-peak
 
-[ ] early booking
+[x] early booking
 
-[ ] demand
+[x] demand
 
-[ ] trajectory
+[x] trajectory
 
-[ ] occupancy
+[x] occupancy
 
 Never modify historical reservation prices.
 
 TASK 9.2 — Promo codes
 
-[ ] admin-created codes
+[x] admin-created codes
 
-[ ] expiration
+[x] expiration
 
-[ ] usage limits
+[x] usage limits
 
-[ ] percentage discount
+[x] percentage discount
 
-[ ] fixed discount
+[x] fixed discount
 
-[ ] minimum amount
+[x] minimum amount
 
-[ ] per-user restrictions
+[x] per-user restrictions
 
-[ ] validation
+[x] validation
 
-[ ] audit
+[x] audit
 
 TASK 9.3 — Wallet
 
@@ -838,45 +840,45 @@ Implement ledger-based wallet.
 
 Support:
 
-[ ] refund credit
+[x] refund credit
 
-[ ] promotional credit
+[x] promotional credit
 
-[ ] referral credit
+[x] referral credit
 
-[ ] debit during booking
+[x] debit during booking
 
-[ ] immutable ledger
+[x] immutable ledger
 
-[ ] balance calculation
+[x] balance calculation
 
 Never represent money using floating-point arithmetic.
 
 TASK 9.4 — Referral system
 
-[ ] referral code
+[x] referral code
 
-[ ] attribution
+[x] attribution
 
-[ ] eligibility
+[x] eligibility
 
-[ ] reward
+[x] reward
 
-[ ] abuse prevention
+[x] abuse prevention
 
 TASK 9.5 — PDF receipt/invoice
 
 Generate:
 
-[ ] reservation receipt
+[x] reservation receipt
 
-[ ] payment receipt
+[x] payment receipt
 
-[ ] refund receipt where applicable
+[x] refund receipt where applicable
 
-[ ] invoice data
+[x] invoice data
 
-[ ] downloadable PDF
+[x] downloadable PDF
 
 PHASE 10 — TRIP EXPERIENCE
 

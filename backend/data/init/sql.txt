@@ -37,6 +37,8 @@ do $$ begin create type payment_method     as enum ('cash','cib','edahabia','ban
 exception when duplicate_object then null; end $$;
 do $$ begin create type payment_status     as enum ('pending','paid','failed','refunded','partially_refunded');
 exception when duplicate_object then null; end $$;
+-- Task 7.3 — a gateway checkout session that nobody completed in time.
+alter type payment_status add value if not exists 'expired';
 
 
 -- ───────────────────────────────────────────────────────────────────────────────
@@ -368,6 +370,22 @@ create table if not exists payment (
 
 alter table payment add column if not exists refunded_amount numeric(12,2) not null default 0;
 
+-- Task 7.3 — only ever set for a gateway-created intent (create_payment_intent),
+-- never for cash/manual payments (which have no "complete within N minutes"
+-- concept — the driver collects cash whenever the trip actually happens).
+alter table payment add column if not exists expires_at timestamptz;
+
+-- Amending payment_refund_consistency to also allow the new 'expired'
+-- status (zero refunded_amount, same bucket as pending/paid/failed) — a
+-- plain `create table if not exists` cannot alter an already-deployed
+-- table's constraint, so it must be dropped and re-added explicitly here.
+alter table payment drop constraint if exists payment_refund_consistency;
+alter table payment add constraint payment_refund_consistency check (
+     (status = 'refunded'           and refunded_amount = amount)
+  or (status = 'partially_refunded' and refunded_amount > 0 and refunded_amount < amount)
+  or (status in ('pending','paid','failed','expired') and refunded_amount = 0)
+);
+
 create table if not exists import_log (
   id            bigint generated always as identity primary key,
   ran_at        timestamptz not null default now(),
@@ -457,7 +475,25 @@ select * from (values
   ('DZ723','RATING_RATER_MISMATCH',         'DomainError',                 'Rater does not match this reservation'),
   ('DZ731','PAYMENT_INTENT_NOT_FOUND',      'DomainError',                 'Unknown payment gateway transaction'),
   ('DZ732','PAYMENT_WEBHOOK_SIGNATURE_INVALID','DomainError',              'Webhook signature verification failed'),
-  ('DZ733','PAYMENT_INTENT_NOT_PENDING',    'DomainError',                 'Payment intent has already been resolved (not pending)')
+  ('DZ733','PAYMENT_INTENT_NOT_PENDING',    'DomainError',                 'Payment intent has already been resolved (not pending)'),
+  ('DZ741','REFUND_NOT_FOUND',              'DomainError',                 'Unknown refund id'),
+  ('DZ742','REFUND_NOT_PENDING',            'DomainError',                 'Refund is not in a pending/processing state'),
+  ('DZ743','REFUND_FAILURE_REASON_REQUIRED','DomainError',                 'A failure reason is required to mark a refund as failed'),
+  ('DZ744','REFUND_NOT_FAILED',             'DomainError',                 'Only a failed refund can be retried'),
+  ('DZ751','PROMO_CODE_NOT_FOUND',          'DomainError',                 'Unknown promo code'),
+  ('DZ752','PROMO_CODE_INACTIVE',           'DomainError',                 'Promo code is not active'),
+  ('DZ753','PROMO_CODE_NOT_VALID_NOW',      'DomainError',                 'Promo code is not within its valid date range'),
+  ('DZ754','PROMO_CODE_MIN_AMOUNT',         'DomainError',                 'Reservation amount is below the promo code minimum'),
+  ('DZ755','PROMO_CODE_EXHAUSTED',          'DomainError',                 'Promo code total usage limit reached'),
+  ('DZ756','PROMO_CODE_ALREADY_USED',       'DomainError',                 'You have already used this promo code the maximum number of times'),
+  ('DZ761','WALLET_INVALID_AMOUNT',         'DomainError',                 'Wallet credit/debit amount must be positive'),
+  ('DZ762','WALLET_INSUFFICIENT_BALANCE',   'DomainError',                 'Insufficient wallet balance'),
+  ('DZ771','REFERRAL_CODE_NOT_FOUND',       'DomainError',                 'Unknown referral code'),
+  ('DZ772','REFERRAL_SELF',                 'DomainError',                 'You cannot refer yourself'),
+  ('DZ773','REFERRAL_ALREADY_ATTRIBUTED',   'DomainError',                 'This account already has a referrer on file'),
+  ('DZ781','PAYOUT_BATCH_NOT_FOUND',        'DomainError',                 'Unknown payout batch id'),
+  ('DZ782','PAYOUT_BATCH_ALREADY_PAID',     'DomainError',                 'Payout batch has already been marked as paid'),
+  ('DZ783','PAYOUT_BATCH_EMPTY',            'DomainError',                 'No unbatched payout ledger entries in that period for this driver')
 ) as t(sqlstate, code_name, ts_equivalent, description);
 
 
@@ -1392,15 +1428,45 @@ $$;
 create or replace function cancel_reservation(p_reservation uuid)
 returns void language plpgsql as
 $$
+declare
+  v_res reservation%rowtype;
+  v_pct numeric;
+  v_pay record;
+  v_remaining numeric;
+  v_amt numeric;
 begin
   update reservation set status = 'cancelled'
-  where id = p_reservation and status in ('pending','confirmed');
-  if not found then
+  where id = p_reservation and status in ('pending','confirmed')
+  returning * into v_res;
+
+  if v_res.id is null then
     if exists (select 1 from reservation where id = p_reservation) then
       raise exception 'Invalid reservation transition' using errcode = 'DZ402';
     else
       raise exception 'Reservation not found' using errcode = 'DZ401';
     end if;
+  end if;
+
+  -- Task 7.4 — cancellation-policy-driven refund. This path means the
+  -- CUSTOMER's own specific booking is being cancelled (by themselves, or
+  -- by an admin/driver acting on their behalf) — the standard
+  -- time-to-departure refund policy applies. Contrast
+  -- trg_trip_cancel_cascade below, which always refunds 100% because that
+  -- path means the PLATFORM pulled the whole trip — never the customer's
+  -- choice or fault.
+  v_pct := cancellation_refund_pct(v_res.trip_id, now());
+  if v_pct > 0 then
+    for v_pay in
+      select id, amount, refunded_amount from payment
+      where reservation_id = p_reservation and status in ('paid','partially_refunded')
+      for update
+    loop
+      v_remaining := v_pay.amount - v_pay.refunded_amount;
+      v_amt := round(v_remaining * v_pct / 100.0, 2);
+      if v_amt > 0 then
+        perform apply_refund(v_pay.id, v_amt, 'system', null, v_pct);
+      end if;
+    end loop;
   end if;
 end;
 $$;
@@ -1534,11 +1600,32 @@ $$;
 create or replace function trg_trip_cancel_cascade()
 returns trigger language plpgsql as
 $$
+declare
+  v_pay record;
+  v_remaining numeric;
 begin
   if new.status = 'cancelled' and old.status <> 'cancelled' then
     update reservation
     set status = 'cancelled'
     where trip_id = new.id and status in ('pending','confirmed');
+
+    -- Task 7.4 — the whole TRIP was pulled by the platform (admin
+    -- cancellation, driver no-show via record_driver_no_show, …), not by
+    -- individual customer choice, so every reservation swept up by this
+    -- cascade gets a full 100% refund of whatever remains paid, regardless
+    -- of how close to departure this happens — cancellation_refund_pct()'s
+    -- time-based policy deliberately does not apply on this path.
+    for v_pay in
+      select p.id as payment_id, p.amount, p.refunded_amount, r.id as reservation_id
+      from reservation r
+      join payment p on p.reservation_id = r.id and p.status in ('paid','partially_refunded')
+      where r.trip_id = new.id and r.status = 'cancelled'
+    loop
+      v_remaining := v_pay.amount - v_pay.refunded_amount;
+      if v_remaining > 0 then
+        perform apply_refund(v_pay.payment_id, v_remaining, 'system', null, 100);
+      end if;
+    end loop;
   end if;
   return null;
 end;
@@ -2414,8 +2501,11 @@ $$
 declare v_id uuid;
 begin
   v_id := record_payment(p_reservation, p_amount, p_method, p_gateway_transaction_id);
+  -- Task 7.3 — 15-minute hold: only a gateway-tagged intent ever expires
+  -- (cash/manual payments have no "complete within N minutes" concept).
   update payment
-     set gateway = p_gateway, gateway_transaction_id = p_gateway_transaction_id, updated_at = now()
+     set gateway = p_gateway, gateway_transaction_id = p_gateway_transaction_id,
+         expires_at = now() + interval '15 minutes', updated_at = now()
    where id = v_id;
   return v_id;
 end;
@@ -2505,6 +2595,883 @@ begin
   end;
 
   return v_result;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13F — PAYMENT EXPIRATION (Task 7.3)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+-- Detects every gateway checkout session whose 15-minute hold has lapsed
+-- unpaid, marks it 'expired' (payment expiration state), and — only if the
+-- reservation it belongs to is STILL 'pending' (nothing else confirmed/paid
+-- it in the meantime) — cancels that reservation, releasing the held seat.
+-- Reuses cancel_reservation() as-is (no duplicated cancellation/refund
+-- logic): if the same reservation happened to already collect a separate
+-- successful payment before this particular checkout attempt lapsed, that
+-- money is still correctly handled by cancel_reservation()'s own
+-- cancellation-policy refund (Task 7.4). Safe to call repeatedly/concurrently
+-- (`for update skip locked`) — see server.ts for the periodic caller.
+create or replace function expire_stale_payment_intents()
+returns integer language plpgsql as
+$$
+declare
+  v_rec   record;
+  v_count integer := 0;
+begin
+  for v_rec in
+    select id, reservation_id from payment
+    where status = 'pending' and expires_at is not null and expires_at < now()
+    for update skip locked
+  loop
+    update payment set status = 'expired', updated_at = now() where id = v_rec.id;
+    v_count := v_count + 1;
+
+    if exists (select 1 from reservation where id = v_rec.reservation_id and status = 'pending') then
+      perform cancel_reservation(v_rec.reservation_id);
+    end if;
+  end loop;
+  return v_count;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13G — DRIVER PAYOUT LEDGER (Task 8.1 / 8.2 / 8.3)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+insert into app_setting (key, value) values ('platform_commission_pct', '15')
+on conflict (key) do nothing;
+
+-- Batches are created first (empty) and reservation-level ledger entries are
+-- assigned into one once computed — see create_payout_batch() below.
+create table if not exists payout_batch (
+  id           uuid primary key default gen_random_uuid(),
+  driver_id    uuid not null references driver(id) on delete cascade,
+  period_start timestamptz not null,
+  period_end   timestamptz not null check (period_end > period_start),
+  total_amount numeric(12,2) not null default 0,
+  status       text not null default 'pending' check (status in ('pending','paid','failed')),
+  reference    text,
+  created_at   timestamptz not null default now(),
+  paid_at      timestamptz
+);
+create index if not exists idx_payout_batch_driver on payout_batch (driver_id, created_at desc);
+
+-- Immutable financial ledger: customer payment − platform commission −
+-- refunds/adjustments = driver payable amount. Rows are never updated after
+-- insert (except to stamp a payout_batch_id once, see create_payout_batch)
+-- — a correction is always a NEW offsetting row (entry_type =
+-- 'refund_adjustment'), never an edit of a past 'earning' row, so the full
+-- history always reconciles.
+create table if not exists payout_ledger (
+  id                 uuid primary key default gen_random_uuid(),
+  driver_id          uuid not null references driver(id) on delete cascade,
+  trip_id            uuid references trip(id) on delete set null,
+  reservation_id     uuid references reservation(id) on delete set null,
+  payment_id         uuid references payment(id) on delete set null,
+  entry_type         text not null check (entry_type in ('earning','refund_adjustment')),
+  gross_amount       numeric(12,2) not null default 0,
+  commission_pct     numeric(5,2) not null default 0,
+  commission_amount  numeric(12,2) not null default 0,
+  net_amount         numeric(12,2) not null, -- driver payable delta; negative for a refund_adjustment
+  payout_batch_id    uuid references payout_batch(id) on delete set null,
+  created_at         timestamptz not null default now()
+);
+create index if not exists idx_payout_ledger_driver     on payout_ledger (driver_id, created_at desc);
+create index if not exists idx_payout_ledger_reservation on payout_ledger (reservation_id);
+create index if not exists idx_payout_ledger_batch       on payout_ledger (payout_batch_id);
+
+-- Fires once a reservation is actually delivered (Task 5.3/5.1 already
+-- guarantee a reservation only reaches 'completed' once fully paid — see
+-- sp_close_trip) — a single, reservation-level "earning" entry records what
+-- the driver is owed for that booking, net of the platform's commission.
+create or replace function trg_reservation_completed_earning()
+returns trigger language plpgsql as
+$$
+declare
+  v_driver uuid;
+  v_gross  numeric;
+  v_pct    numeric;
+  v_commission numeric;
+begin
+  select driver_id into v_driver from trip where id = new.trip_id;
+  if v_driver is null then
+    return null; -- no assigned driver on this trip — nothing to pay out
+  end if;
+
+  v_gross := amount_paid(new.id);
+  if v_gross <= 0 then
+    return null;
+  end if;
+
+  select coalesce((select value from app_setting where key = 'platform_commission_pct')::numeric, 15) into v_pct;
+  v_commission := round(v_gross * v_pct / 100.0, 2);
+
+  insert into payout_ledger (driver_id, trip_id, reservation_id, entry_type, gross_amount, commission_pct, commission_amount, net_amount)
+  values (v_driver, new.trip_id, new.id, 'earning', v_gross, v_pct, v_commission, v_gross - v_commission);
+
+  return null;
+end;
+$$;
+
+drop trigger if exists trg_reservation_completed_earning on reservation;
+create trigger trg_reservation_completed_earning
+  after update of status on reservation
+  for each row
+  when (new.status = 'completed' and old.status is distinct from 'completed')
+  execute function trg_reservation_completed_earning();
+
+-- Called by apply_refund() below whenever money is actually given back on a
+-- reservation that was already paid out to its driver (a post-completion
+-- goodwill/dispute refund) — claws back only the driver's net share of the
+-- refunded amount, never the platform's own commission on it (the platform
+-- does not retroactively un-earn commission it already took).
+create or replace function record_payout_refund_clawback(p_reservation uuid, p_payment uuid, p_refund_amount numeric)
+returns void language plpgsql as
+$$
+declare
+  v_driver uuid;
+  v_trip   uuid;
+  v_pct    numeric;
+begin
+  select driver_id, trip_id, commission_pct into v_driver, v_trip, v_pct
+    from payout_ledger where reservation_id = p_reservation and entry_type = 'earning'
+    order by created_at desc limit 1;
+  if v_driver is null then
+    return; -- no prior earning recorded for this reservation — nothing to claw back
+  end if;
+
+  insert into payout_ledger (driver_id, trip_id, reservation_id, payment_id, entry_type,
+                              gross_amount, commission_pct, commission_amount, net_amount)
+  values (v_driver, v_trip, p_reservation, p_payment, 'refund_adjustment',
+          -p_refund_amount, v_pct, -round(p_refund_amount * v_pct / 100.0, 2),
+          -round(p_refund_amount * (1 - v_pct / 100.0), 2));
+end;
+$$;
+
+-- Driver earnings dashboard (Task 8.2) — gross / commission / refunds / net
+-- / pending (unbatched or batched-but-not-yet-paid) / paid-out, all derived
+-- straight from the immutable ledger, never a second source of truth.
+create or replace function driver_earnings_summary(p_driver uuid)
+returns table (
+  gross_revenue   numeric,
+  commission      numeric,
+  refunds         numeric,
+  net_earnings    numeric,
+  pending_payout  numeric,
+  paid_out        numeric
+) language sql stable as
+$$
+  select
+    coalesce(sum(gross_amount) filter (where entry_type = 'earning'), 0) as gross_revenue,
+    coalesce(sum(commission_amount) filter (where entry_type = 'earning'), 0) as commission,
+    coalesce(-sum(gross_amount) filter (where entry_type = 'refund_adjustment'), 0) as refunds,
+    coalesce(sum(net_amount), 0) as net_earnings,
+    coalesce(sum(net_amount) filter (where payout_batch_id is null
+      or payout_batch_id in (select id from payout_batch where status <> 'paid')), 0) as pending_payout,
+    coalesce(sum(net_amount) filter (where payout_batch_id in (select id from payout_batch where status = 'paid')), 0) as paid_out
+  from payout_ledger
+  where driver_id = p_driver;
+$$;
+
+-- Task 8.3 — groups every still-unbatched ledger entry for a driver within
+-- a period into one payout batch (a stable unit admins mark paid/export) —
+-- entries are stamped with the batch id once, never re-batched or edited.
+create or replace function create_payout_batch(p_driver uuid, p_period_start timestamptz, p_period_end timestamptz)
+returns uuid language plpgsql as
+$$
+declare
+  v_total numeric;
+  v_batch uuid;
+begin
+  select coalesce(sum(net_amount), 0) into v_total
+    from payout_ledger
+   where driver_id = p_driver and payout_batch_id is null
+     and created_at >= p_period_start and created_at < p_period_end;
+
+  if not exists (
+    select 1 from payout_ledger
+     where driver_id = p_driver and payout_batch_id is null
+       and created_at >= p_period_start and created_at < p_period_end
+  ) then
+    raise exception 'No unbatched payout ledger entries in that period for this driver' using errcode = 'DZ783';
+  end if;
+
+  insert into payout_batch (driver_id, period_start, period_end, total_amount)
+  values (p_driver, p_period_start, p_period_end, v_total)
+  returning id into v_batch;
+
+  update payout_ledger set payout_batch_id = v_batch
+   where driver_id = p_driver and payout_batch_id is null
+     and created_at >= p_period_start and created_at < p_period_end;
+
+  return v_batch;
+end;
+$$;
+
+create or replace function mark_payout_batch_paid(p_batch uuid, p_reference text)
+returns void language plpgsql as
+$$
+declare v_status text;
+begin
+  select status into v_status from payout_batch where id = p_batch for update;
+  if v_status is null then
+    raise exception 'Payout batch not found' using errcode = 'DZ781';
+  end if;
+  if v_status = 'paid' then
+    raise exception 'Payout batch has already been marked as paid' using errcode = 'DZ782';
+  end if;
+  update payout_batch set status = 'paid', reference = p_reference, paid_at = now() where id = p_batch;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13H — CANCELLATION-POLICY-DRIVEN AUTOMATED REFUNDS (Task 7.4)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+insert into app_setting (key, value) values
+  ('refund_policy_full_hours', '24'),
+  ('refund_policy_partial_hours', '2'),
+  ('refund_policy_partial_pct', '50')
+on conflict (key) do nothing;
+
+-- Single source of truth for "how much of what's already been paid is
+-- refundable, given how close to departure this is happening" — used
+-- identically by cancel_reservation() below and by the customer-facing
+-- cancellation preview route. Admin-configurable via app_setting (reuses
+-- the Task 5.3 key/value table, no schema change). Pure/stable: never
+-- mutates anything, so it is also safe to call just for a preview.
+create or replace function cancellation_refund_pct(p_trip uuid, p_at timestamptz default now())
+returns numeric language plpgsql stable as
+$$
+declare
+  v_departure timestamptz;
+  v_hours     numeric;
+  v_full_h    numeric;
+  v_partial_h numeric;
+  v_partial_p numeric;
+begin
+  select departure_at into v_departure from trip where id = p_trip;
+  if v_departure is null then
+    return 0;
+  end if;
+  v_hours := extract(epoch from (v_departure - p_at)) / 3600.0;
+
+  select coalesce((select value from app_setting where key = 'refund_policy_full_hours')::numeric, 24) into v_full_h;
+  select coalesce((select value from app_setting where key = 'refund_policy_partial_hours')::numeric, 2) into v_partial_h;
+  select coalesce((select value from app_setting where key = 'refund_policy_partial_pct')::numeric, 50) into v_partial_p;
+
+  if v_hours >= v_full_h then return 100;
+  elsif v_hours >= v_partial_h then return v_partial_p;
+  else return 0;
+  end if;
+end;
+$$;
+
+-- Append-only audit trail of every refund attempt, automatic or manual. At
+-- most one in-flight (pending/processing) row per payment at a time (see
+-- uq_refund_payment_inflight below) — a retry after a failure always
+-- inserts a FRESH row rather than mutating the failed one, so the full
+-- history (including past failures) always survives.
+create table if not exists refund (
+  id                uuid primary key default gen_random_uuid(),
+  payment_id        uuid not null references payment(id) on delete cascade,
+  reservation_id    uuid not null references reservation(id) on delete cascade,
+  amount            numeric(12,2) not null check (amount > 0),
+  policy_pct        numeric(5,2),
+  status            text not null default 'pending' check (status in ('pending','processing','succeeded','failed')),
+  initiated_by      text not null check (initiated_by in ('system','admin')),
+  admin_id          uuid,
+  gateway           text,
+  gateway_refund_id text,
+  failure_reason    text,
+  created_at        timestamptz not null default now(),
+  processed_at      timestamptz
+);
+create index if not exists idx_refund_payment on refund (payment_id, created_at desc);
+create index if not exists idx_refund_status  on refund (status);
+create unique index if not exists uq_refund_payment_inflight on refund (payment_id) where status in ('pending','processing');
+
+-- The ONLY function allowed to create/execute/resolve a refund — both the
+-- automatic path (cancellation policy, below) and the manual admin-override
+-- path (POST /api/admin/payments/:id/refund) go through here, so every
+-- refund however it originates ends up in the one audit ledger.
+--   - gateway payment               → executed immediately (the mock/
+--     sandbox gateway always accepts a refund synchronously — see the
+--     Task 7.1/7.2 scope note on mockGateway.ts) → 'succeeded' right away.
+--   - cash payment, system-initiated → left 'pending': a human still has to
+--     hand the cash back, so this is what the admin "Paiements" refund
+--     worklist (v_refund_due) shows until resolved.
+--   - cash payment, admin-initiated  → 'succeeded' immediately (the admin
+--     is asserting the cash has already been handed over — including
+--     resolving/completing a pre-existing system-generated 'pending' row,
+--     never creating a conflicting duplicate for the same payment).
+create or replace function apply_refund(
+  p_payment      uuid,
+  p_amount       numeric,
+  p_initiated_by text,
+  p_admin        uuid default null,
+  p_policy_pct   numeric default null
+) returns uuid language plpgsql as
+$$
+declare
+  v_pay      payment%rowtype;
+  v_remaining numeric;
+  v_existing refund%rowtype;
+  v_id       uuid;
+  v_gw_ref   text;
+  v_amt      numeric;
+begin
+  select * into v_pay from payment where id = p_payment for update;
+  if not found then
+    raise exception 'Payment not found' using errcode = 'DZ501';
+  end if;
+  if v_pay.status not in ('paid','partially_refunded') then
+    raise exception 'Invalid payment transition' using errcode = 'DZ502';
+  end if;
+
+  v_remaining := v_pay.amount - v_pay.refunded_amount;
+  v_amt := coalesce(p_amount, v_remaining);
+  if v_amt <= 0 or v_amt > v_remaining then
+    raise exception 'Invalid refund amount' using errcode = 'DZ505';
+  end if;
+
+  select * into v_existing from refund
+    where payment_id = p_payment and status in ('pending','processing')
+    order by created_at desc limit 1 for update;
+
+  if found then
+    v_id := v_existing.id;
+    if v_pay.gateway is not null or p_initiated_by = 'admin' then
+      v_gw_ref := case when v_pay.gateway is not null then 'RFD-' || substr(encode(gen_random_bytes(10), 'hex'), 1, 20) else null end;
+      update refund set status = 'succeeded', amount = v_amt,
+             gateway_refund_id = coalesce(gateway_refund_id, v_gw_ref),
+             admin_id = coalesce(p_admin, admin_id), processed_at = now()
+       where id = v_id;
+      perform refund_payment(p_payment, v_amt);
+      perform record_payout_refund_clawback(v_pay.reservation_id, p_payment, v_amt);
+    end if;
+    -- system re-firing on an already-pending cash refund: idempotent no-op.
+    return v_id;
+  end if;
+
+  insert into refund (payment_id, reservation_id, amount, policy_pct, status, initiated_by, admin_id, gateway)
+  values (p_payment, v_pay.reservation_id, v_amt, p_policy_pct, 'pending', p_initiated_by, p_admin, v_pay.gateway)
+  returning id into v_id;
+
+  if v_pay.gateway is not null or p_initiated_by = 'admin' then
+    v_gw_ref := case when v_pay.gateway is not null then 'RFD-' || substr(encode(gen_random_bytes(10), 'hex'), 1, 20) else null end;
+    update refund set status = 'succeeded', gateway_refund_id = v_gw_ref, processed_at = now() where id = v_id;
+    perform refund_payment(p_payment, v_amt);
+    perform record_payout_refund_clawback(v_pay.reservation_id, p_payment, v_amt);
+  end if;
+
+  return v_id;
+end;
+$$;
+
+create or replace function fail_refund(p_refund uuid, p_admin uuid, p_reason text)
+returns void language plpgsql as
+$$
+declare v_status text;
+begin
+  if p_reason is null or btrim(p_reason) = '' then
+    raise exception 'Failure reason required' using errcode = 'DZ743';
+  end if;
+  select status into v_status from refund where id = p_refund for update;
+  if v_status is null then
+    raise exception 'Refund not found' using errcode = 'DZ741';
+  end if;
+  if v_status not in ('pending','processing') then
+    raise exception 'Refund is not pending/processing' using errcode = 'DZ742';
+  end if;
+  update refund set status = 'failed', failure_reason = btrim(p_reason), admin_id = p_admin, processed_at = now()
+   where id = p_refund;
+end;
+$$;
+
+-- A fresh attempt (new row) rather than mutating the failed one, so the
+-- original failure stays on the permanent record (audit trail).
+create or replace function retry_refund(p_refund uuid, p_admin uuid default null)
+returns uuid language plpgsql as
+$$
+declare
+  v_ref refund%rowtype;
+begin
+  select * into v_ref from refund where id = p_refund for update;
+  if v_ref.id is null then
+    raise exception 'Refund not found' using errcode = 'DZ741';
+  end if;
+  if v_ref.status <> 'failed' then
+    raise exception 'Only a failed refund can be retried' using errcode = 'DZ744';
+  end if;
+  return apply_refund(v_ref.payment_id, v_ref.amount, 'admin', coalesce(p_admin, v_ref.admin_id), v_ref.policy_pct);
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13I — CUSTOMER WALLET (Task 9.3)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Single internal ledger that refund credits, promo credits, and referral
+-- credits all deposit into, and that a reservation can be paid from —
+-- replacing what would otherwise be three separate ad-hoc "credit" systems.
+
+do $$ begin alter type payment_method add value if not exists 'wallet'; exception when duplicate_object then null; end $$;
+
+create table if not exists wallet_entry (
+  id             uuid primary key default gen_random_uuid(),
+  customer_id    uuid not null references customer(id) on delete cascade,
+  entry_type     text not null check (entry_type in ('refund_credit','promo_credit','referral_credit','booking_debit','admin_adjustment')),
+  amount         numeric(12,2) not null check (amount <> 0), -- positive = credit, negative = debit
+  reservation_id uuid references reservation(id) on delete set null,
+  reference_id   uuid, -- loosely-typed pointer (refund.id / promo_redemption.id / referral_reward.id); no FK since the target table varies by entry_type
+  description    text,
+  created_at     timestamptz not null default now()
+);
+create index if not exists idx_wallet_entry_customer on wallet_entry (customer_id, created_at desc);
+
+create or replace function wallet_balance(p_customer uuid)
+returns numeric language sql stable as
+$$
+  select coalesce(sum(amount), 0) from wallet_entry where customer_id = p_customer;
+$$;
+
+create or replace function wallet_credit(
+  p_customer    uuid,
+  p_entry_type  text,
+  p_amount      numeric,
+  p_reservation uuid default null,
+  p_reference   uuid default null,
+  p_description text default null
+)
+returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  if p_amount is null or p_amount <= 0 then
+    raise exception 'Wallet credit/debit amount must be positive' using errcode = 'DZ761';
+  end if;
+  if p_entry_type not in ('refund_credit','promo_credit','referral_credit','admin_adjustment') then
+    raise exception 'Invalid wallet credit entry type' using errcode = 'DZ001';
+  end if;
+
+  insert into wallet_entry (customer_id, entry_type, amount, reservation_id, reference_id, description)
+  values (p_customer, p_entry_type, p_amount, p_reservation, p_reference, p_description)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+-- Serializes concurrent debits against the SAME customer (pg_advisory_xact_lock,
+-- released automatically at statement end since each RPC call is its own
+-- implicit transaction) so two simultaneous spends can never both pass the
+-- balance check and together overdraw the wallet.
+create or replace function wallet_debit(
+  p_customer    uuid,
+  p_amount      numeric,
+  p_entry_type  text default 'booking_debit',
+  p_reservation uuid default null,
+  p_reference   uuid default null,
+  p_description text default null
+)
+returns uuid language plpgsql as
+$$
+declare v_id uuid; v_balance numeric;
+begin
+  if p_amount is null or p_amount <= 0 then
+    raise exception 'Wallet credit/debit amount must be positive' using errcode = 'DZ761';
+  end if;
+  if p_entry_type not in ('booking_debit','admin_adjustment') then
+    raise exception 'Invalid wallet debit entry type' using errcode = 'DZ001';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_customer::text, 0));
+
+  select wallet_balance(p_customer) into v_balance;
+  if v_balance < p_amount then
+    raise exception 'Insufficient wallet balance' using errcode = 'DZ762';
+  end if;
+
+  insert into wallet_entry (customer_id, entry_type, amount, reservation_id, reference_id, description)
+  values (p_customer, p_entry_type, -p_amount, p_reservation, p_reference, p_description)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+-- Pays (fully or partially) a reservation straight out of the customer's
+-- wallet balance — reuses record_payment()/settle_payment() exactly like
+-- any other method so v_payment / amount_paid() / refund plumbing all keep
+-- working unmodified, then mirrors the online-gateway auto-confirm rule
+-- (Section 13, gateway_apply_payment_event) since wallet funds are already
+-- "captured" the instant they leave the wallet, same as a captured card.
+create or replace function pay_reservation_with_wallet(p_reservation uuid, p_amount numeric default null)
+returns uuid language plpgsql as
+$$
+declare
+  v_res     reservation%rowtype;
+  v_amt     numeric;
+  v_payment uuid;
+begin
+  select * into v_res from reservation where id = p_reservation for update;
+  if not found then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+  if v_res.status = 'cancelled' then
+    raise exception 'Cancelled reservation is not payable' using errcode = 'DZ403';
+  end if;
+
+  v_amt := coalesce(p_amount, greatest(v_res.total_price - amount_paid(p_reservation), 0));
+  if v_amt <= 0 then
+    raise exception 'Payment amount must be > 0' using errcode = 'DZ001';
+  end if;
+
+  v_payment := record_payment(p_reservation, v_amt, 'wallet', null);
+  perform wallet_debit(v_res.customer_id, v_amt, 'booking_debit', p_reservation, v_payment,
+                        'Paiement réservation ' || v_res.code);
+  perform settle_payment(v_payment);
+
+  if amount_paid(p_reservation) >= v_res.total_price and v_res.status = 'pending' then
+    begin
+      perform confirm_reservation(p_reservation);
+    exception when others then
+      null; -- capacity gone meanwhile — payment still recorded, same as the gateway path; admin follow-up
+    end;
+  end if;
+
+  return v_payment;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13J — PROMO CODES (Task 9.2)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- A promo code never mutates a trip/reservation price directly (that would
+-- duplicate pricing logic and corrupt the price history) — redeeming one
+-- always deposits its discount as a wallet credit instead, which the
+-- customer then spends like any other wallet balance.
+
+create table if not exists promo_code (
+  id                    uuid primary key default gen_random_uuid(),
+  code                  text not null unique check (btrim(code) <> ''),
+  discount_type         text not null check (discount_type in ('percentage','fixed')),
+  discount_value        numeric(12,2) not null check (discount_value > 0),
+  min_amount            numeric(12,2) not null default 0 check (min_amount >= 0),
+  max_uses_total        integer check (max_uses_total is null or max_uses_total > 0),
+  max_uses_per_customer integer not null default 1 check (max_uses_per_customer > 0),
+  starts_at             timestamptz,
+  expires_at            timestamptz,
+  active                boolean not null default true,
+  created_by            uuid,
+  created_at            timestamptz not null default now(),
+  constraint promo_code_percentage_range check (discount_type <> 'percentage' or discount_value <= 100),
+  constraint promo_code_date_range check (starts_at is null or expires_at is null or starts_at < expires_at)
+);
+
+create table if not exists promo_redemption (
+  id              uuid primary key default gen_random_uuid(),
+  promo_code_id   uuid not null references promo_code(id) on delete cascade,
+  customer_id     uuid not null references customer(id) on delete cascade,
+  reservation_id  uuid references reservation(id) on delete set null,
+  discount_amount numeric(12,2) not null check (discount_amount > 0),
+  created_at      timestamptz not null default now()
+);
+create index if not exists idx_promo_redemption_code     on promo_redemption (promo_code_id);
+create index if not exists idx_promo_redemption_customer on promo_redemption (customer_id);
+
+-- Validates + computes the discount without redeeming anything — the SELECT
+-- ... FOR UPDATE on promo_code below is what actually serializes two
+-- concurrent redemptions of the SAME code against max_uses_total (the lock
+-- is released the instant this statement's implicit transaction ends).
+create or replace function compute_promo_discount(p_code text, p_basis_amount numeric, p_customer uuid)
+returns table(promo_id uuid, discount_amount numeric) language plpgsql as
+$$
+declare
+  v_promo         promo_code%rowtype;
+  v_uses_total    int;
+  v_uses_customer int;
+  v_amt           numeric;
+begin
+  select * into v_promo from promo_code where code = upper(btrim(p_code)) for update;
+  if not found then
+    raise exception 'Unknown promo code' using errcode = 'DZ751';
+  end if;
+  if not v_promo.active then
+    raise exception 'Promo code is not active' using errcode = 'DZ752';
+  end if;
+  if (v_promo.starts_at is not null and now() < v_promo.starts_at)
+     or (v_promo.expires_at is not null and now() > v_promo.expires_at) then
+    raise exception 'Promo code is not within its valid date range' using errcode = 'DZ753';
+  end if;
+  if p_basis_amount < v_promo.min_amount then
+    raise exception 'Reservation amount is below the promo code minimum' using errcode = 'DZ754';
+  end if;
+  if v_promo.max_uses_total is not null then
+    select count(*) into v_uses_total from promo_redemption where promo_code_id = v_promo.id;
+    if v_uses_total >= v_promo.max_uses_total then
+      raise exception 'Promo code total usage limit reached' using errcode = 'DZ755';
+    end if;
+  end if;
+  select count(*) into v_uses_customer from promo_redemption
+    where promo_code_id = v_promo.id and customer_id = p_customer;
+  if v_uses_customer >= v_promo.max_uses_per_customer then
+    raise exception 'You have already used this promo code the maximum number of times' using errcode = 'DZ756';
+  end if;
+
+  if v_promo.discount_type = 'percentage' then
+    v_amt := round(p_basis_amount * v_promo.discount_value / 100.0, 2);
+  else
+    v_amt := v_promo.discount_value;
+  end if;
+  v_amt := least(v_amt, p_basis_amount);
+
+  return query select v_promo.id, v_amt;
+end;
+$$;
+
+create or replace function redeem_promo_code(p_customer uuid, p_code text, p_basis_amount numeric, p_reservation uuid default null)
+returns uuid language plpgsql as
+$$
+declare
+  v_promo_id   uuid;
+  v_discount   numeric;
+  v_redemption uuid;
+begin
+  select promo_id, discount_amount into v_promo_id, v_discount
+    from compute_promo_discount(p_code, p_basis_amount, p_customer);
+
+  insert into promo_redemption (promo_code_id, customer_id, reservation_id, discount_amount)
+  values (v_promo_id, p_customer, p_reservation, v_discount)
+  returning id into v_redemption;
+
+  perform wallet_credit(p_customer, 'promo_credit', v_discount, p_reservation, v_redemption,
+                         'Code promo ' || upper(btrim(p_code)));
+
+  return v_redemption;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13K — REFERRAL PROGRAM (Task 9.4)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+alter table customer add column if not exists referral_code text unique;
+alter table customer add column if not exists referred_by_customer_id uuid references customer(id) on delete set null;
+
+create or replace function trg_customer_referral_code()
+returns trigger language plpgsql as
+$$
+begin
+  if new.referral_code is null then
+    new.referral_code := 'REF-' || lpad(nextval('seq_business_code')::text, 6, '0');
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_customer_referral_code on customer;
+create trigger trg_customer_referral_code
+  before insert on customer
+  for each row execute function trg_customer_referral_code();
+
+-- Backfill any pre-existing customer rows (this column didn't exist for them).
+update customer set referral_code = 'REF-' || lpad(nextval('seq_business_code')::text, 6, '0')
+ where referral_code is null;
+
+create table if not exists referral_reward (
+  id                     uuid primary key default gen_random_uuid(),
+  referrer_id            uuid not null references customer(id) on delete cascade,
+  referred_id            uuid not null references customer(id) on delete cascade,
+  trigger_reservation_id uuid references reservation(id) on delete set null,
+  reward_amount          numeric(12,2) not null check (reward_amount > 0),
+  status                 text not null default 'paid' check (status in ('pending','paid')),
+  created_at             timestamptz not null default now(),
+  unique (referrer_id, referred_id)
+);
+
+insert into app_setting (key, value) values ('referral_reward_amount', '200')
+on conflict (key) do nothing;
+
+-- Called once, right after a new customer account is created, if they
+-- entered someone else's referral code at signup.
+create or replace function attribute_referral(p_new_customer uuid, p_code text)
+returns void language plpgsql as
+$$
+declare v_referrer uuid; v_already uuid;
+begin
+  select id into v_referrer from customer where referral_code = upper(btrim(p_code));
+  if v_referrer is null then
+    raise exception 'Unknown referral code' using errcode = 'DZ771';
+  end if;
+  if v_referrer = p_new_customer then
+    raise exception 'You cannot refer yourself' using errcode = 'DZ772';
+  end if;
+  select referred_by_customer_id into v_already from customer where id = p_new_customer;
+  if v_already is not null then
+    raise exception 'This account already has a referrer on file' using errcode = 'DZ773';
+  end if;
+  update customer set referred_by_customer_id = v_referrer where id = p_new_customer;
+end;
+$$;
+
+-- Rewards the REFERRER (not the new customer) the instant the referred
+-- customer's first-ever completed trip lands — never on signup itself,
+-- so a referral can't be farmed without an actual paying trip happening.
+create or replace function trg_referral_reward_on_first_completed_trip()
+returns trigger language plpgsql as
+$$
+declare
+  v_referrer        uuid;
+  v_prior_completed int;
+  v_amount          numeric;
+begin
+  select referred_by_customer_id into v_referrer from customer where id = new.customer_id;
+  if v_referrer is null then
+    return null;
+  end if;
+
+  select count(*) into v_prior_completed
+    from reservation where customer_id = new.customer_id and status = 'completed' and id <> new.id;
+  if v_prior_completed > 0 then
+    return null; -- not their first completed trip
+  end if;
+
+  if exists (select 1 from referral_reward where referrer_id = v_referrer and referred_id = new.customer_id) then
+    return null; -- already rewarded (defensive; the unique constraint also guarantees this)
+  end if;
+
+  select coalesce((select value from app_setting where key = 'referral_reward_amount')::numeric, 200) into v_amount;
+
+  insert into referral_reward (referrer_id, referred_id, trigger_reservation_id, reward_amount, status)
+  values (v_referrer, new.customer_id, new.id, v_amount, 'paid');
+
+  perform wallet_credit(v_referrer, 'referral_credit', v_amount, new.id, null,
+                         'Parrainage — premier trajet terminé par le filleul');
+
+  return null;
+end;
+$$;
+
+drop trigger if exists trg_referral_reward_on_first_completed_trip on reservation;
+create trigger trg_referral_reward_on_first_completed_trip
+  after update of status on reservation
+  for each row
+  when (new.status = 'completed' and old.status is distinct from 'completed')
+  execute function trg_referral_reward_on_first_completed_trip();
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13L — DYNAMIC PRICING SUGGESTIONS (Task 9.1)
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Admin-reviewed only: suggest_trip_price() never writes anything by
+-- itself — an admin must explicitly apply it via the existing
+-- sp_set_trip_price() procedure (Section 10), so no new write path or
+-- duplicated price-mutation logic is introduced here.
+
+alter table trajectory add column if not exists price_multiplier numeric(4,2) not null default 1.0 check (price_multiplier > 0);
+
+insert into app_setting (key, value) values
+  ('pricing_peak_multiplier',            '1.15'),
+  ('pricing_offpeak_multiplier',         '0.9'),
+  ('pricing_early_booking_days',         '7'),
+  ('pricing_early_booking_multiplier',   '0.92'),
+  ('pricing_high_demand_occupancy_pct',  '70'),
+  ('pricing_high_demand_multiplier',     '1.2'),
+  ('pricing_low_demand_occupancy_pct',   '20'),
+  ('pricing_low_demand_multiplier',      '0.9')
+on conflict (key) do nothing;
+
+create or replace function suggest_trip_price(p_trip uuid, p_from_wpoint uuid, p_to_wpoint uuid)
+returns numeric language plpgsql as
+$$
+declare
+  v_trip      trip%rowtype;
+  v_base      numeric;
+  v_min       numeric;
+  v_max       numeric;
+  v_mult      numeric := 1.0;
+  v_traj_mult numeric;
+  v_dow       int;
+  v_hour      int;
+  v_peak      numeric;
+  v_offpeak   numeric;
+  v_early_days numeric;
+  v_early_mult numeric;
+  v_booked    int;
+  v_occ_pct   numeric;
+  v_high_occ  numeric;
+  v_high_mult numeric;
+  v_low_occ   numeric;
+  v_low_mult  numeric;
+  v_price     numeric;
+begin
+  select * into v_trip from trip where id = p_trip;
+  if not found then
+    raise exception 'Trip not found' using errcode = 'DZ301';
+  end if;
+
+  -- Base price: an explicit trip-level override if set, else the
+  -- trajectory's default template, else the trip's flat fallback —
+  -- exactly the same fallback chain amount_paid()/checkout already rely on.
+  select price, min_price, max_price into v_base, v_min, v_max
+    from trip_price where trip_id = p_trip and from_wpoint_id = p_from_wpoint and to_wpoint_id = p_to_wpoint;
+  if not found then
+    select price, min_price, max_price into v_base, v_min, v_max
+      from default_trip_price
+      where trajectory_id = v_trip.trajectory_id and from_wpoint_id = p_from_wpoint and to_wpoint_id = p_to_wpoint;
+  end if;
+  if v_base is null then
+    v_base := v_trip.seat_price;
+  end if;
+
+  select price_multiplier into v_traj_mult from trajectory where id = v_trip.trajectory_id;
+  v_mult := v_mult * coalesce(v_traj_mult, 1.0);
+
+  v_dow  := extract(dow  from v_trip.departure_at)::int; -- 0=Sunday..6=Saturday
+  v_hour := extract(hour from v_trip.departure_at)::int;
+  select coalesce((select value from app_setting where key = 'pricing_peak_multiplier')::numeric, 1.15) into v_peak;
+  select coalesce((select value from app_setting where key = 'pricing_offpeak_multiplier')::numeric, 0.9) into v_offpeak;
+  -- Peak: weekday rush hours, or a Thu/Fri evening departure (pre-weekend travel).
+  if v_hour between 7 and 9 or v_hour between 16 and 19 or (v_dow in (4,5) and v_hour >= 17) then
+    v_mult := v_mult * v_peak;
+  elsif v_hour < 6 or v_hour >= 22 then
+    v_mult := v_mult * v_offpeak;
+  end if;
+
+  select coalesce((select value from app_setting where key = 'pricing_early_booking_days')::numeric, 7) into v_early_days;
+  select coalesce((select value from app_setting where key = 'pricing_early_booking_multiplier')::numeric, 0.92) into v_early_mult;
+  if v_trip.departure_at - now() >= (v_early_days || ' days')::interval then
+    v_mult := v_mult * v_early_mult;
+  end if;
+
+  select coalesce(sum(seats), 0) into v_booked
+    from reservation where trip_id = p_trip and status in ('pending','confirmed');
+  v_occ_pct := case when v_trip.capacity > 0 then 100.0 * v_booked / v_trip.capacity else 0 end;
+
+  select coalesce((select value from app_setting where key = 'pricing_high_demand_occupancy_pct')::numeric, 70) into v_high_occ;
+  select coalesce((select value from app_setting where key = 'pricing_high_demand_multiplier')::numeric, 1.2) into v_high_mult;
+  select coalesce((select value from app_setting where key = 'pricing_low_demand_occupancy_pct')::numeric, 20) into v_low_occ;
+  select coalesce((select value from app_setting where key = 'pricing_low_demand_multiplier')::numeric, 0.9) into v_low_mult;
+
+  if v_occ_pct >= v_high_occ then
+    v_mult := v_mult * v_high_mult;
+  elsif v_occ_pct <= v_low_occ then
+    v_mult := v_mult * v_low_mult;
+  end if;
+
+  v_price := round(v_base * v_mult, 2);
+  if v_min is not null and v_price < v_min then v_price := v_min; end if;
+  if v_max is not null and v_price > v_max then v_price := v_max; end if;
+
+  return v_price;
 end;
 $$;
 
@@ -2768,19 +3735,33 @@ select p.id,
        tr.code      as trip_code,
        p.gateway,
        p.gateway_transaction_id,
-       p.failure_reason
+       p.failure_reason,
+       p.expires_at
 from payment p
 join reservation r on r.id = p.reservation_id
 join customer cs   on cs.id = r.customer_id
 join trip tr       on tr.id = r.trip_id;
 
+-- Task 7.4 redefinition: "refund due" now means a refund ledger row the
+-- system has already policy-computed but which still needs a human to
+-- actually hand the money back (exclusively the cash-payment case — a
+-- gateway refund auto-executes immediately and never appears here). This
+-- replaces the old Task-1.4 heuristic ("any cancelled reservation with
+-- amount_paid > 0"), which became incorrect once partial-refund policies
+-- existed (a deliberately non-refundable late-cancellation remainder would
+-- otherwise show up here forever).
+-- `create or replace view` cannot rename/reorder an existing view's
+-- columns (only append new ones) — an explicit drop is required since the
+-- column shape genuinely changes here.
+drop view if exists v_refund_due;
 create or replace view v_refund_due as
-select r.id as reservation_id, r.code as reservation_code,
-       cs.full_name as customer_name, cs.phone as customer_phone,
-       amount_paid(r.id) as refund_due
-from reservation r
-join customer cs on cs.id = r.customer_id
-where r.status = 'cancelled' and amount_paid(r.id) > 0;
+select rf.id as refund_id, rf.payment_id, rf.reservation_id, rf.amount as refund_due,
+       rf.status, rf.policy_pct, rf.initiated_by, rf.created_at,
+       r.code as reservation_code, cs.full_name as customer_name, cs.phone as customer_phone
+from refund rf
+join reservation r on r.id = rf.reservation_id
+join customer cs   on cs.id = r.customer_id
+where rf.status = 'pending';
 
 
 -- ───────────────────────────────────────────────────────────────────────────────

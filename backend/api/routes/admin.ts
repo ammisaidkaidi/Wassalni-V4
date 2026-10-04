@@ -5,6 +5,7 @@ import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import type { AuthService } from '../auth/authService';
 import { ApiError, wrap } from '../middleware/errors';
+import { streamReceiptPdf } from '../services/receipt';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -76,6 +77,22 @@ const paymentSchema = z.object({
   reference: z.string().optional(),
 });
 const refundSchema = z.object({ amount: z.number().positive().optional() });
+const payoutBatchSchema = z.object({
+  driver_id: z.string().uuid(),
+  period_start: z.string().datetime({ offset: true }).or(z.string().min(8)),
+  period_end: z.string().datetime({ offset: true }).or(z.string().min(8)),
+});
+const markPaidSchema = z.object({ reference: z.string().min(1).max(200) });
+const promoCodeSchema = z.object({
+  code: z.string().trim().min(3).max(40),
+  discount_type: z.enum(['percentage', 'fixed']),
+  discount_value: z.number().positive(),
+  min_amount: z.number().min(0).optional(),
+  max_uses_total: z.number().int().positive().nullish(),
+  max_uses_per_customer: z.number().int().positive().optional().default(1),
+  starts_at: z.string().nullish(),
+  expires_at: z.string().nullish(),
+});
 const locationSchema = z.object({
   gps_lat: z.number().min(-90).max(90),
   gps_lon: z.number().min(-180).max(180),
@@ -401,6 +418,27 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
       res.json({ ok: true });
     }),
   );
+  // Task 9.1 — dynamic pricing suggestion: read-only GET, explicit admin-
+  // reviewed POST to apply (reuses sp_set_trip_price(), never a separate
+  // write path).
+  router.get(
+    '/trips/:id/suggested-price',
+    wrap(async (req, res) => {
+      const q = z.object({ from_wpoint_id: z.string().uuid(), to_wpoint_id: z.string().uuid() }).parse(req.query);
+      const price = await repo.suggestTripPrice(uuidParam(req.params.id), q.from_wpoint_id, q.to_wpoint_id);
+      res.json({ suggested_price: price });
+    }),
+  );
+  router.post(
+    '/trips/:id/apply-suggested-price',
+    wrap(async (req, res) => {
+      const b = z.object({ from_wpoint_id: z.string().uuid(), to_wpoint_id: z.string().uuid() }).parse(req.body);
+      const tripId = uuidParam(req.params.id);
+      const price = await repo.suggestTripPrice(tripId, b.from_wpoint_id, b.to_wpoint_id);
+      await repo.setTripPrice({ tripId, fromWpointId: b.from_wpoint_id, toWpointId: b.to_wpoint_id, price: Number(price) });
+      res.json({ ok: true, applied_price: price });
+    }),
+  );
   router.post(
     '/trips/:id/cancel',
     wrap(async (req, res) => {
@@ -472,6 +510,27 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     }),
   );
 
+  // Task 9.3 — view/adjust a customer's wallet (support/goodwill credits, corrections).
+  router.get(
+    '/customers/:id/wallet',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const [balance, history] = await Promise.all([repo.walletBalance(id), repo.walletHistory(id)]);
+      res.json({ balance, history });
+    }),
+  );
+  router.post(
+    '/customers/:id/wallet/adjust',
+    wrap(async (req, res) => {
+      const b = z
+        .object({ amount: z.number().refine((n) => n !== 0, 'amount must be non-zero'), description: z.string().min(1).max(500) })
+        .parse(req.body);
+      const id = uuidParam(req.params.id);
+      const entryId = await repo.adjustWallet(id, b.amount, b.description);
+      res.status(201).json({ ok: true, entry_id: entryId, balance: await repo.walletBalance(id) });
+    }),
+  );
+
   // ── reservations ─────────────────────────────────────────────────────────────
   router.get(
     '/reservations',
@@ -526,8 +585,20 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/payments/:id/refund',
     wrap(async (req, res) => {
       const b = refundSchema.parse(req.body ?? {});
-      await repo.refundPayment(uuidParam(req.params.id), b.amount ?? null);
-      res.json({ ok: true });
+      const refundId = await repo.refundPayment(uuidParam(req.params.id), b.amount ?? null, req.user!.id);
+      res.json({ ok: true, refund_id: refundId });
+    }),
+  );
+  // Task 9.5 — admin can pull the receipt for any payment's reservation.
+  router.get(
+    '/payments/:id/receipt.pdf',
+    wrap(async (req, res) => {
+      const paymentId = uuidParam(req.params.id);
+      const payment = await db.selectOne<{ reservation_id: string }>('payment', { columns: ['reservation_id'], where: { id: paymentId } });
+      if (!payment) throw new ApiError(404, 'NOT_FOUND', 'Paiement introuvable');
+      const data = await repo.getReceiptData(payment.reservation_id);
+      if (!data) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      streamReceiptPdf(res, data);
     }),
   );
   router.get(
@@ -538,8 +609,111 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
   );
   router.get(
     '/refunds-worklist',
+    wrap(async (req, res) => {
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      res.json({ worklist: await repo.refundWorklist(status) });
+    }),
+  );
+  // Alias matching the Task 7.4 naming convention used elsewhere ("/refunds*").
+  router.get(
+    '/refunds',
+    wrap(async (req, res) => {
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      res.json({ refunds: await repo.refundWorklist(status) });
+    }),
+  );
+  router.post(
+    '/refunds/:id/fail',
+    wrap(async (req, res) => {
+      const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Échec manuel (admin)';
+      await repo.failRefund(uuidParam(req.params.id), req.user!.id, reason);
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/refunds/:id/retry',
+    wrap(async (req, res) => {
+      const newId = await repo.retryRefund(uuidParam(req.params.id), req.user!.id);
+      res.json({ ok: true, refund_id: newId });
+    }),
+  );
+
+  // ── Promo codes (Task 9.2) ───────────────────────────────────────────────────
+
+  router.get(
+    '/promo-codes',
     wrap(async (_req, res) => {
-      res.json({ worklist: await repo.refundWorklist() });
+      res.json({ promo_codes: await repo.listPromoCodes() });
+    }),
+  );
+  router.post(
+    '/promo-codes',
+    wrap(async (req, res) => {
+      const b = promoCodeSchema.parse(req.body);
+      const id = await repo.createPromoCode({
+        code: b.code,
+        discountType: b.discount_type,
+        discountValue: b.discount_value,
+        minAmount: b.min_amount,
+        maxUsesTotal: b.max_uses_total ?? null,
+        maxUsesPerCustomer: b.max_uses_per_customer,
+        startsAt: b.starts_at ?? null,
+        expiresAt: b.expires_at ?? null,
+        createdBy: req.user!.id,
+      });
+      res.status(201).json({ id });
+    }),
+  );
+  router.post(
+    '/promo-codes/:id/activate',
+    wrap(async (req, res) => {
+      await repo.setPromoCodeActive(uuidParam(req.params.id), true);
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    '/promo-codes/:id/deactivate',
+    wrap(async (req, res) => {
+      await repo.setPromoCodeActive(uuidParam(req.params.id), false);
+      res.json({ ok: true });
+    }),
+  );
+
+  // ── Driver payouts (Task 8.1 / 8.2 / 8.3) ────────────────────────────────────
+
+  router.get(
+    '/drivers/:id/earnings',
+    wrap(async (req, res) => {
+      res.json({ summary: await repo.driverEarningsSummary(uuidParam(req.params.id)) });
+    }),
+  );
+  router.get(
+    '/drivers/:id/earnings/ledger',
+    wrap(async (req, res) => {
+      res.json({ ledger: await repo.listPayoutLedger(uuidParam(req.params.id)) });
+    }),
+  );
+  router.get(
+    '/payout-batches',
+    wrap(async (req, res) => {
+      const driverId = typeof req.query.driver_id === 'string' ? uuidParam(req.query.driver_id) : undefined;
+      res.json({ batches: await repo.listPayoutBatches(driverId) });
+    }),
+  );
+  router.post(
+    '/payout-batches',
+    wrap(async (req, res) => {
+      const b = payoutBatchSchema.parse(req.body ?? {});
+      const id = await repo.createPayoutBatch(b.driver_id, b.period_start, b.period_end);
+      res.status(201).json({ batches: await repo.listPayoutBatches(b.driver_id), batch_id: id });
+    }),
+  );
+  router.post(
+    '/payout-batches/:id/mark-paid',
+    wrap(async (req, res) => {
+      const b = markPaidSchema.parse(req.body ?? {});
+      await repo.markPayoutBatchPaid(uuidParam(req.params.id), b.reference);
+      res.json({ ok: true });
     }),
   );
 

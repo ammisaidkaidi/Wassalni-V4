@@ -24,12 +24,14 @@
  *    cancel race, payment race. (No expiration race: Task 7.3 — payment
  *    holds/expiry — doesn't exist yet, so there's nothing to race there.)
  */
+import { Writable } from 'node:stream';
 import { loadDbConfig } from '../config';
 import { SupabaseConnection } from '../connection';
 import { DBHelper } from '../DBHelper';
 import { DomainRepository, explainDomainError } from '../domain';
 import { searchTrips } from '../../api/services/tripSearch';
 import { GATEWAY_NAME, generateEventId, generateTransactionId } from '../../api/payments/mockGateway';
+import { streamReceiptPdf } from '../../api/services/receipt';
 
 let pass = 0;
 let fail = 0;
@@ -86,6 +88,7 @@ async function main(): Promise<void> {
   const createdTripIds: string[] = [];
   const createdDriverIds: string[] = [];
   const createdVehicleIds: string[] = [];
+  const createdPromoCodeIds: string[] = [];
   let originalNoShowThreshold: number | null = null;
   let trajectoryId: string | null = null;
 
@@ -992,6 +995,535 @@ async function main(): Promise<void> {
     } else {
       bad('6.4: listFraudSignals()', JSON.stringify(fraudSignals));
     }
+
+    // ── Task 7.3: payment expiration ────────────────────────────────────────
+    console.log('\n=== Task 7.3: payment intent expiration ===');
+    const expDriver = await mkTestDriver(10);
+    const expCustomer = await mkCustomer(10);
+    const tripExp = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 3 * 3600 * 1000),
+      capacity: 4,
+      seatPrice: 500,
+      driverId: expDriver,
+    });
+    createdTripIds.push(tripExp);
+    await repo.populateTripStops(tripExp);
+    await repo.publishTrip(tripExp);
+    await repo.setTripPrice({ tripId: tripExp, fromWpointId: wpA, toWpointId: wpB, price: 500 });
+
+    const resExp = await repo.reserve({ tripId: tripExp, customerId: expCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const txnExp = generateTransactionId();
+    const paymentExp = await repo.createGatewayPaymentIntent({
+      reservationId: resExp,
+      amount: 500,
+      method: 'cib',
+      gateway: GATEWAY_NAME,
+      gatewayTransactionId: txnExp,
+    });
+    const freshExpiry = await db.raw<{ expires_at: string }>('select expires_at from payment where id = $1', [paymentExp]);
+    if (freshExpiry[0]?.expires_at) {
+      ok('7.3: create_payment_intent() sets expires_at (~15 min from now)');
+    } else {
+      bad('7.3: expires_at after create_payment_intent', JSON.stringify(freshExpiry[0]));
+    }
+    // Backdate it to simulate a lapsed 15-minute window.
+    await db.raw('update payment set expires_at = now() - interval \'1 minute\' where id = $1', [paymentExp]);
+    const staleButUnswept = await repo.findOpenGatewayIntent(resExp);
+    if (staleButUnswept === null) {
+      ok('7.3: findOpenGatewayIntent ignores a pending-but-already-expired intent (freshness filter)');
+    } else {
+      bad('7.3: findOpenGatewayIntent freshness filter', JSON.stringify(staleButUnswept));
+    }
+    // Note: if a live backend server is running against this same database
+    // with its own expire_stale_payment_intents() interval (Section
+    // api/server.ts), it may win the race and sweep this row first — that's
+    // not a bug (same function, same effect), so we only assert the count
+    // is non-negative here and verify the actual outcome below regardless
+    // of which caller performed the sweep.
+    const expiredCount = await repo.expireStalePaymentIntents();
+    if (expiredCount >= 0) {
+      ok(`7.3: expireStalePaymentIntents() runs cleanly (${expiredCount} stale intent(s) swept by this call)`);
+    } else {
+      bad('7.3: expireStalePaymentIntents() count', String(expiredCount));
+    }
+    const expPaymentRow = await db.raw<{ status: string }>('select status from payment where id = $1', [paymentExp]);
+    const expResRow = await db.raw<{ status: string }>('select status from reservation where id = $1', [resExp]);
+    if (expPaymentRow[0]?.status === 'expired' && expResRow[0]?.status === 'cancelled') {
+      ok('7.3: expired intent flips payment to expired and cancels the still-pending reservation');
+    } else {
+      bad('7.3: post-sweep state', JSON.stringify({ payment: expPaymentRow[0], reservation: expResRow[0] }));
+    }
+
+    // ── Task 7.4: cancellation-policy-driven refund ledger ──────────────────
+    console.log('\n=== Task 7.4: automated refund ledger ===');
+    const refDriver = await mkTestDriver(11);
+    const refCustomer = await mkCustomer(11);
+
+    // Far departure (>= refund_policy_full_hours) ⇒ 100% refund.
+    const tripFar = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 72 * 3600 * 1000),
+      capacity: 4,
+      seatPrice: 400,
+      driverId: refDriver,
+    });
+    createdTripIds.push(tripFar);
+    await repo.populateTripStops(tripFar);
+    await repo.publishTrip(tripFar);
+    await repo.setTripPrice({ tripId: tripFar, fromWpointId: wpA, toWpointId: wpB, price: 400 });
+
+    const pctFar = await repo.cancellationRefundPctPreview(tripFar);
+    if (Number(pctFar) === 100) {
+      ok('7.4: cancellation_refund_pct() = 100% for a departure far in the future');
+    } else {
+      bad('7.4: cancellation_refund_pct (far)', String(pctFar));
+    }
+
+    // Cash payment, cancelled far from departure ⇒ refund created but left 'pending' (needs a human).
+    const resCash = await repo.reserve({ tripId: tripFar, customerId: refCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payCash = await repo.recordPayment({ reservationId: resCash, amount: 400, method: 'cash' });
+    await repo.settlePayment(payCash);
+    await repo.confirmReservation(resCash);
+    await repo.cancelReservation(resCash);
+    const cashRefundRows = await db.raw<{ id: string; status: string; initiated_by: string }>(
+      'select id, status, initiated_by from refund where payment_id = $1',
+      [payCash],
+    );
+    if (cashRefundRows[0]?.status === 'pending' && cashRefundRows[0]?.initiated_by === 'system') {
+      ok("7.4: cancelling a reservation with a cash payment creates a 'pending' system-initiated refund (needs a human)");
+    } else {
+      bad('7.4: cash refund row after cancel', JSON.stringify(cashRefundRows[0]));
+    }
+    const dueList = await repo.refundsDue();
+    if (dueList.some((r) => r.refund_id === cashRefundRows[0]?.id)) {
+      ok('7.4: v_refund_due / refundsDue() lists the pending cash refund');
+    } else {
+      bad('7.4: refundsDue() should include the pending cash refund', JSON.stringify(dueList.map((r) => r.refund_id)));
+    }
+    await expectErr('7.4: failRefund() without a reason is rejected', () => repo.db.callScalar('fail_refund', cashRefundRows[0].id, null, ''), 'DZ743');
+
+    // Admin directly resolves the still-pending system refund (the manual
+    // "Rembourser" admin action — payments/:id/refund route).
+    const adminResolvedId = await repo.refundPayment(payCash, null, null as unknown as string);
+    const resolvedRow = await db.raw<{ status: string; id: string }>('select id, status from refund where id = $1', [adminResolvedId]);
+    if (resolvedRow[0]?.id === cashRefundRows[0].id && resolvedRow[0]?.status === 'succeeded') {
+      ok('7.4: admin manually resolving a still-pending system refund (apply_refund admin) marks it succeeded immediately');
+    } else {
+      bad('7.4: admin refund resolution', JSON.stringify(resolvedRow[0]));
+    }
+    const worklist = await repo.refundWorklist();
+    if (worklist.some((w) => w.payment_id === payCash && w.status === 'succeeded')) {
+      ok('7.4: refundWorklist() reflects the final succeeded state');
+    } else {
+      bad('7.4: refundWorklist() final state', JSON.stringify(worklist.filter((w) => w.payment_id === payCash)));
+    }
+
+    // A SEPARATE cash refund exercises the fail -> retry path: retry_refund()
+    // always re-applies as an admin action, so it resolves to succeeded
+    // immediately too (never leaves a second row dangling in 'pending').
+    const resCash2 = await repo.reserve({ tripId: tripFar, customerId: refCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payCash2 = await repo.recordPayment({ reservationId: resCash2, amount: 400, method: 'cash' });
+    await repo.settlePayment(payCash2);
+    await repo.confirmReservation(resCash2);
+    await repo.cancelReservation(resCash2);
+    const cashRefund2 = (await db.raw<{ id: string }>('select id from refund where payment_id = $1', [payCash2]))[0];
+    await repo.failRefund(cashRefund2.id, null as unknown as string, 'Caisse fermée aujourd\u2019hui');
+    const retriedId = await repo.retryRefund(cashRefund2.id, null as unknown as string);
+    const retriedRow = await db.raw<{ status: string }>('select status from refund where id = $1', [retriedId]);
+    if (retriedId && retriedId !== cashRefund2.id && retriedRow[0]?.status === 'succeeded') {
+      ok('7.4: retryRefund() inserts a NEW row (audit trail preserved) and resolves it immediately (retry = admin action)');
+    } else {
+      bad('7.4: retryRefund() result', JSON.stringify({ retriedId, status: retriedRow[0]?.status }));
+    }
+    const payCash2Row = await db.raw<{ status: string }>('select status from payment where id = $1', [payCash2]);
+    if (payCash2Row[0]?.status === 'refunded') {
+      ok('7.4: the underlying payment flips to refunded once its retried refund succeeds');
+    } else {
+      bad('7.4: payment status after retried refund', JSON.stringify(payCash2Row[0]));
+    }
+
+    // Gateway payment, cancelled far from departure ⇒ auto-succeeds immediately (no human needed).
+    const resGwRefund = await repo.reserve({ tripId: tripFar, customerId: refCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const txnGwRefund = generateTransactionId();
+    const payGwRefund = await repo.createGatewayPaymentIntent({
+      reservationId: resGwRefund,
+      amount: 400,
+      method: 'cib',
+      gateway: GATEWAY_NAME,
+      gatewayTransactionId: txnGwRefund,
+    });
+    await repo.applyGatewayPaymentEvent({
+      paymentId: payGwRefund,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: generateEventId(),
+      eventType: 'payment.succeeded',
+      signatureValid: true,
+      rawPayload: {},
+    });
+    await repo.cancelReservation(resGwRefund);
+    const gwRefundRow = await db.raw<{ status: string }>('select status from refund where payment_id = $1', [payGwRefund]);
+    const gwPaymentRow = await db.raw<{ status: string }>('select status from payment where id = $1', [payGwRefund]);
+    if (gwRefundRow[0]?.status === 'succeeded' && gwPaymentRow[0]?.status === 'refunded') {
+      ok('7.4: a gateway-paid reservation cancelled far from departure auto-succeeds its refund (no human needed)');
+    } else {
+      bad('7.4: gateway auto-refund', JSON.stringify({ refund: gwRefundRow[0], payment: gwPaymentRow[0] }));
+    }
+
+    // Close departure (< refund_policy_partial_hours) ⇒ 0% — no refund row at all.
+    const tripClose = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 30 * 60 * 1000),
+      capacity: 4,
+      seatPrice: 400,
+      driverId: refDriver,
+    });
+    createdTripIds.push(tripClose);
+    await repo.populateTripStops(tripClose);
+    await repo.publishTrip(tripClose);
+    await repo.setTripPrice({ tripId: tripClose, fromWpointId: wpA, toWpointId: wpB, price: 400 });
+    const pctClose = await repo.cancellationRefundPctPreview(tripClose);
+    if (Number(pctClose) === 0) {
+      ok('7.4: cancellation_refund_pct() = 0% for a departure under the partial-refund threshold');
+    } else {
+      bad('7.4: cancellation_refund_pct (close)', String(pctClose));
+    }
+    const resNoRefund = await repo.reserve({ tripId: tripClose, customerId: refCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payNoRefund = await repo.recordPayment({ reservationId: resNoRefund, amount: 400, method: 'cash' });
+    await repo.settlePayment(payNoRefund);
+    await repo.cancelReservation(resNoRefund);
+    const noRefundRows = await db.raw('select id from refund where payment_id = $1', [payNoRefund]);
+    if (noRefundRows.length === 0) {
+      ok('7.4: cancelling a reservation inside the 0%-refund window creates no refund row at all');
+    } else {
+      bad('7.4: unexpected refund row inside 0% window', JSON.stringify(noRefundRows));
+    }
+
+    // Trip-level cascade (Section 13 trg_trip_cancel_cascade) always refunds 100%, regardless of proximity to departure.
+    const resTripCascade = await repo.reserve({ tripId: tripClose, customerId: refCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payTripCascade = await repo.recordPayment({ reservationId: resTripCascade, amount: 400, method: 'cash' });
+    await repo.settlePayment(payTripCascade);
+    await repo.cancelTrip(tripClose);
+    const cascadeRefundRow = await db.raw<{ amount: string }>('select amount from refund where payment_id = $1', [payTripCascade]);
+    if (cascadeRefundRow[0] && Number(cascadeRefundRow[0].amount) === 400) {
+      ok('7.4: a platform-initiated trip cancellation always refunds 100%, even inside the normally-0% window');
+    } else {
+      bad('7.4: trip-cascade 100% refund', JSON.stringify(cascadeRefundRow[0]));
+    }
+
+    // ── Task 8.1 / 8.2 / 8.3: driver payout ledger ──────────────────────────
+    console.log('\n=== Task 8.1/8.2/8.3: driver payout ledger ===');
+    const payoutDriver = await mkTestDriver(12);
+    const payoutCustomer = await mkCustomer(12);
+    const tripPayout = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 2 * 3600 * 1000), // start_trip/sp_close_trip don't check departure timing, only status
+      capacity: 4,
+      seatPrice: 1000,
+      driverId: payoutDriver,
+    });
+    createdTripIds.push(tripPayout);
+    await repo.populateTripStops(tripPayout);
+    await repo.publishTrip(tripPayout);
+    await repo.setTripPrice({ tripId: tripPayout, fromWpointId: wpA, toWpointId: wpB, price: 1000 });
+
+    const resPayout = await repo.reserve({ tripId: tripPayout, customerId: payoutCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payPayout = await repo.recordPayment({ reservationId: resPayout, amount: 1000, method: 'cash' });
+    await repo.settlePayment(payPayout);
+    await repo.confirmReservation(resPayout);
+    await repo.startTrip(tripPayout);
+    await repo.closeTrip(tripPayout);
+
+    const resPayoutStatus = await db.raw<{ status: string }>('select status from reservation where id = $1', [resPayout]);
+    if (resPayoutStatus[0]?.status === 'completed') {
+      ok('8.1: a fully-paid confirmed reservation is marked completed when its trip closes');
+    } else {
+      bad('8.1: reservation status after trip close', JSON.stringify(resPayoutStatus[0]));
+    }
+    const earningRows = await db.raw<{ gross_amount: string; commission_pct: string; commission_amount: string; net_amount: string }>(
+      "select gross_amount, commission_pct, commission_amount, net_amount from payout_ledger where reservation_id = $1 and entry_type = 'earning'",
+      [resPayout],
+    );
+    if (earningRows[0] && Number(earningRows[0].gross_amount) === 1000 && Number(earningRows[0].commission_pct) === 15 && Number(earningRows[0].commission_amount) === 150 && Number(earningRows[0].net_amount) === 850) {
+      ok('8.1: trg_reservation_completed_earning() records gross/commission(15%)/net correctly on completion');
+    } else {
+      bad('8.1: earning ledger row', JSON.stringify(earningRows[0]));
+    }
+
+    const earningsSummary = await repo.driverEarningsSummary(payoutDriver);
+    if (Number(earningsSummary.gross_revenue) === 1000 && Number(earningsSummary.net_earnings) === 850 && Number(earningsSummary.pending_payout) === 850) {
+      ok('8.2: driverEarningsSummary() aggregates gross/net/pending correctly for a single completed trip');
+    } else {
+      bad('8.2: driverEarningsSummary()', JSON.stringify(earningsSummary));
+    }
+
+    await expectErr(
+      '8.3: createPayoutBatch() rejects a period with no unbatched entries',
+      () => repo.createPayoutBatch(payoutDriver, new Date(Date.now() + 365 * 86400000).toISOString(), new Date(Date.now() + 366 * 86400000).toISOString()),
+      'DZ783',
+    );
+    const batchId = await repo.createPayoutBatch(payoutDriver, new Date(Date.now() - 365 * 86400000).toISOString(), new Date(Date.now() + 1 * 86400000).toISOString());
+    const ledgerAfterBatch = await repo.listPayoutLedger(payoutDriver);
+    if (ledgerAfterBatch.every((l) => l.payout_batch_id === batchId || l.entry_type !== 'earning')) {
+      ok('8.3: createPayoutBatch() stamps every unbatched earning entry with the new batch id');
+    } else {
+      bad('8.3: ledger entries after batching', JSON.stringify(ledgerAfterBatch));
+    }
+    await repo.markPayoutBatchPaid(batchId, `TEST-REF-${tag}`);
+    const batches = await repo.listPayoutBatches(payoutDriver);
+    const paidBatch = batches.find((b) => b.id === batchId);
+    if (paidBatch?.status === 'paid' && paidBatch.reference === `TEST-REF-${tag}`) {
+      ok('8.3: markPayoutBatchPaid() marks the batch paid with its reference');
+    } else {
+      bad('8.3: payout batch after marking paid', JSON.stringify(paidBatch));
+    }
+    await expectErr('8.3: marking an already-paid batch paid again is rejected', () => repo.markPayoutBatchPaid(batchId, 'dup'), 'DZ782');
+
+    const earningsAfterPayout = await repo.driverEarningsSummary(payoutDriver);
+    if (Number(earningsAfterPayout.paid_out) === 850 && Number(earningsAfterPayout.pending_payout) === 0) {
+      ok('8.2: driverEarningsSummary() moves the amount from pending_payout to paid_out once batched+paid');
+    } else {
+      bad('8.2: earnings summary after payout', JSON.stringify(earningsAfterPayout));
+    }
+
+    // A post-completion admin refund claws back only the driver's net share, never the platform's commission.
+    const clawbackRefundId = await repo.refundPayment(payPayout, null, null as unknown as string);
+    const clawbackRow = await db.raw<{ net_amount: string; gross_amount: string }>(
+      "select gross_amount, net_amount from payout_ledger where reservation_id = $1 and entry_type = 'refund_adjustment'",
+      [resPayout],
+    );
+    if (clawbackRow[0] && Number(clawbackRow[0].gross_amount) === -1000 && Number(clawbackRow[0].net_amount) === -850) {
+      ok('8.1: a post-completion refund claws back exactly the driver\u2019s net share (not the platform\u2019s commission)');
+    } else {
+      bad('8.1: refund clawback ledger row', JSON.stringify({ clawbackRefundId, row: clawbackRow[0] }));
+    }
+
+    // ── Task 9.1: dynamic pricing suggestions ───────────────────────────────
+    console.log('\n=== Task 9.1: dynamic pricing suggestions ===');
+    const pricingDriver = await mkTestDriver(13);
+    const tripPricing = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 10 * 24 * 3600 * 1000), // >= early-booking-days → early-booking discount applies
+      capacity: 10,
+      seatPrice: 1000,
+      driverId: pricingDriver,
+    });
+    createdTripIds.push(tripPricing);
+    await repo.populateTripStops(tripPricing);
+    await repo.publishTrip(tripPricing);
+    await repo.setTripPrice({ tripId: tripPricing, fromWpointId: wpA, toWpointId: wpB, price: 1000, minPrice: 800, maxPrice: 1100 });
+
+    const suggestion1 = await repo.suggestTripPrice(tripPricing, wpA, wpB);
+    if (Number(suggestion1) > 0) {
+      ok(`9.1: suggestTripPrice() returns a positive suggestion (${suggestion1}) for a normal segment`);
+    } else {
+      bad('9.1: suggestTripPrice() base case', String(suggestion1));
+    }
+
+    // Force an extreme trajectory multiplier so the suggestion must hit the trip_price max_price clamp.
+    await db.raw('update trajectory set price_multiplier = 5.0 where id = $1', [trajectoryId]);
+    const suggestionClamped = await repo.suggestTripPrice(tripPricing, wpA, wpB);
+    if (Number(suggestionClamped) === 1100) {
+      ok('9.1: suggestTripPrice() clamps to the segment\u2019s max_price under an extreme multiplier');
+    } else {
+      bad('9.1: suggestTripPrice() clamp', String(suggestionClamped));
+    }
+    await db.raw('update trajectory set price_multiplier = 1.0 where id = $1', [trajectoryId]);
+
+    // Mirrors what the admin "apply suggested price" route does — reuses sp_set_trip_price(), no separate write path.
+    await repo.setTripPrice({ tripId: tripPricing, fromWpointId: wpA, toWpointId: wpB, price: Number(suggestion1), minPrice: 800, maxPrice: 1100 });
+    const appliedPriceRow = await db.raw<{ price: string }>('select price from trip_price where trip_id = $1 and from_wpoint_id = $2 and to_wpoint_id = $3', [
+      tripPricing,
+      wpA,
+      wpB,
+    ]);
+    if (Number(appliedPriceRow[0]?.price) === Number(suggestion1)) {
+      ok('9.1: applying a suggested price writes through the existing sp_set_trip_price() (no duplicated write path)');
+    } else {
+      bad('9.1: applied price row', JSON.stringify(appliedPriceRow[0]));
+    }
+
+    // ── Task 9.3: customer wallet ────────────────────────────────────────────
+    console.log('\n=== Task 9.3: customer wallet ===');
+    const walletCustomer = await mkCustomer(14);
+    const walletDriver = await mkTestDriver(14);
+    const balanceZero = await repo.walletBalance(walletCustomer);
+    if (Number(balanceZero) === 0) {
+      ok('9.3: a brand-new customer has a 0 wallet balance');
+    } else {
+      bad('9.3: initial wallet balance', balanceZero);
+    }
+    await expectErr('9.3: wallet_debit() with insufficient balance is rejected', () => repo.payReservationWithWallet('00000000-0000-0000-0000-000000000000', 100), 'DZ401');
+    const adjustId = await repo.adjustWallet(walletCustomer, 2000, 'TEST credit');
+    const balanceAfterAdjust = await repo.walletBalance(walletCustomer);
+    if (adjustId && Number(balanceAfterAdjust) === 2000) {
+      ok('9.3: admin adjustWallet() credits the balance');
+    } else {
+      bad('9.3: wallet balance after admin credit', JSON.stringify({ adjustId, balanceAfterAdjust }));
+    }
+
+    const tripWallet = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 5 * 3600 * 1000),
+      capacity: 4,
+      seatPrice: 500,
+      driverId: walletDriver,
+    });
+    createdTripIds.push(tripWallet);
+    await repo.populateTripStops(tripWallet);
+    await repo.publishTrip(tripWallet);
+    await repo.setTripPrice({ tripId: tripWallet, fromWpointId: wpA, toWpointId: wpB, price: 500 });
+    const resWallet = await repo.reserve({ tripId: tripWallet, customerId: walletCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const walletPaymentId = await repo.payReservationWithWallet(resWallet);
+    const walletResStatus = await db.raw<{ status: string }>('select status from reservation where id = $1', [resWallet]);
+    const balanceAfterPay = await repo.walletBalance(walletCustomer);
+    if (walletPaymentId && walletResStatus[0]?.status === 'confirmed' && Number(balanceAfterPay) === 1500) {
+      ok('9.3: pay_reservation_with_wallet() pays in full, auto-confirms the reservation, and debits the wallet');
+    } else {
+      bad('9.3: wallet payment result', JSON.stringify({ walletResStatus: walletResStatus[0], balanceAfterPay }));
+    }
+    await expectErr('9.3: wallet_debit() rejects an overdraft', () => repo.adjustWallet(walletCustomer, -100000, 'TEST overdraft'), 'DZ762');
+
+    // ── Task 9.2: promo codes ────────────────────────────────────────────────
+    console.log('\n=== Task 9.2: promo codes ===');
+    const promoAdminId = (await db.raw<{ id: string }>('select gen_random_uuid() as id'))[0].id;
+    const promoFixedId = await repo.createPromoCode({
+      code: `TESTFIX${tag}`,
+      discountType: 'fixed',
+      discountValue: 100,
+      minAmount: 200,
+      maxUsesTotal: 5, // high enough that the per-customer limit (below) is what trips, not the total
+      maxUsesPerCustomer: 1,
+      createdBy: promoAdminId,
+    });
+    createdPromoCodeIds.push(promoFixedId);
+    await expectErr('9.2: unknown promo code is rejected', () => repo.redeemPromoCode(walletCustomer, `NOPE${tag}`, 1000), 'DZ751');
+    await expectErr('9.2: redeeming below the minimum amount is rejected', () => repo.redeemPromoCode(walletCustomer, `TESTFIX${tag}`, 100), 'DZ754');
+    const balanceBeforePromo = await repo.walletBalance(walletCustomer);
+    const redemptionId = await repo.redeemPromoCode(walletCustomer, `TESTFIX${tag}`, 1000, resWallet);
+    const balanceAfterPromo = await repo.walletBalance(walletCustomer);
+    if (redemptionId && Number(balanceAfterPromo) - Number(balanceBeforePromo) === 100) {
+      ok('9.2: redeemPromoCode() credits the fixed discount amount to the wallet');
+    } else {
+      bad('9.2: promo redemption wallet credit', JSON.stringify({ balanceBeforePromo, balanceAfterPromo }));
+    }
+    await expectErr('9.2: a customer cannot reuse a single-use promo code', () => repo.redeemPromoCode(walletCustomer, `TESTFIX${tag}`, 1000), 'DZ756');
+
+    const promoPctId = await repo.createPromoCode({
+      code: `TESTPCT${tag}`,
+      discountType: 'percentage',
+      discountValue: 10,
+      maxUsesTotal: 1,
+      createdBy: promoAdminId,
+    });
+    createdPromoCodeIds.push(promoPctId);
+    await repo.redeemPromoCode(walletCustomer, `TESTPCT${tag}`, 1000);
+    await expectErr('9.2: a percentage promo exhausted at max_uses_total is rejected for a second customer', () => repo.redeemPromoCode(payoutCustomer, `TESTPCT${tag}`, 1000), 'DZ755');
+
+    await repo.setPromoCodeActive(promoPctId, false);
+    await expectErr('9.2: an admin-deactivated promo code is rejected', () => repo.redeemPromoCode(payoutCustomer, `TESTPCT${tag}`, 1000), 'DZ752');
+
+    // ── Task 9.4: referral program ───────────────────────────────────────────
+    console.log('\n=== Task 9.4: referral program ===');
+    const referrer = await mkCustomer(15);
+    const referred = await mkCustomer(16);
+    const referrerCodeRow = await db.raw<{ referral_code: string }>('select referral_code from customer where id = $1', [referrer]);
+    const referrerCode = referrerCodeRow[0]?.referral_code;
+    if (referrerCode && referrerCode.startsWith('REF-')) {
+      ok(`9.4: every customer gets an auto-generated referral_code (${referrerCode})`);
+    } else {
+      bad('9.4: auto-generated referral_code', JSON.stringify(referrerCodeRow[0]));
+    }
+    await expectErr('9.4: referring yourself is rejected', () => repo.attributeReferral(referrer, referrerCode!), 'DZ772');
+    await expectErr('9.4: an unknown referral code is rejected', () => repo.attributeReferral(referred, `REF-NOPE${tag}`), 'DZ771');
+    await repo.attributeReferral(referred, referrerCode!);
+    await expectErr('9.4: a customer cannot be attributed a referrer twice', () => repo.attributeReferral(referred, referrerCode!), 'DZ773');
+
+    const referralDriver = await mkTestDriver(15);
+    const mkCompletedTrip = async (): Promise<string> => {
+      const id = await repo.createTrip({
+        trajectoryId: trajectoryId!,
+        departureAt: new Date(Date.now() + 2 * 3600 * 1000), // start_trip/sp_close_trip don't check departure timing, only status
+        capacity: 4,
+        seatPrice: 300,
+        driverId: referralDriver,
+      });
+      createdTripIds.push(id);
+      await repo.populateTripStops(id);
+      await repo.publishTrip(id);
+      await repo.setTripPrice({ tripId: id, fromWpointId: wpA, toWpointId: wpB, price: 300 });
+      return id;
+    };
+    const tripRef1 = await mkCompletedTrip();
+    const resRef1 = await repo.reserve({ tripId: tripRef1, customerId: referred, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payRef1 = await repo.recordPayment({ reservationId: resRef1, amount: 300, method: 'cash' });
+    await repo.settlePayment(payRef1);
+    await repo.confirmReservation(resRef1);
+    await repo.startTrip(tripRef1);
+
+    const referrerBalanceBefore = await repo.walletBalance(referrer);
+    await repo.closeTrip(tripRef1);
+    const referrerBalanceAfterFirst = await repo.walletBalance(referrer);
+    const rewardRows = await db.raw<{ reward_amount: string }>('select reward_amount from referral_reward where referrer_id = $1 and referred_id = $2', [
+      referrer,
+      referred,
+    ]);
+    if (rewardRows[0] && Number(referrerBalanceAfterFirst) - Number(referrerBalanceBefore) === Number(rewardRows[0].reward_amount)) {
+      ok(`9.4: the referrer is credited ${rewardRows[0].reward_amount} on the referred customer's FIRST completed trip`);
+    } else {
+      bad('9.4: referral reward on first completed trip', JSON.stringify({ referrerBalanceBefore, referrerBalanceAfterFirst, rewardRows }));
+    }
+
+    const tripRef2 = await mkCompletedTrip();
+    const resRef2 = await repo.reserve({ tripId: tripRef2, customerId: referred, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const payRef2 = await repo.recordPayment({ reservationId: resRef2, amount: 300, method: 'cash' });
+    await repo.settlePayment(payRef2);
+    await repo.confirmReservation(resRef2);
+    await repo.startTrip(tripRef2);
+    const referrerBalanceBeforeSecond = await repo.walletBalance(referrer);
+    await repo.closeTrip(tripRef2);
+    const referrerBalanceAfterSecond = await repo.walletBalance(referrer);
+    if (Number(referrerBalanceAfterSecond) === Number(referrerBalanceBeforeSecond)) {
+      ok('9.4: no second referral reward on a SUBSEQUENT completed trip by the same referred customer');
+    } else {
+      bad('9.4: unexpected second referral reward', JSON.stringify({ referrerBalanceBeforeSecond, referrerBalanceAfterSecond }));
+    }
+
+    const referralSummary = await repo.getReferralSummary(referrer);
+    if (referralSummary.total_referred === 1 && Number(referralSummary.total_rewarded) === Number(rewardRows[0].reward_amount)) {
+      ok('9.4: getReferralSummary() reports total_referred/total_rewarded correctly');
+    } else {
+      bad('9.4: getReferralSummary()', JSON.stringify(referralSummary));
+    }
+
+    // ── Task 9.5: PDF receipts ───────────────────────────────────────────────
+    console.log('\n=== Task 9.5: PDF receipts ===');
+    const receiptData = await repo.getReceiptData(resWallet);
+    if (receiptData && receiptData.header.code && receiptData.payments.length >= 1) {
+      ok('9.5: getReceiptData() returns a header + payment lines for a paid reservation');
+    } else {
+      bad('9.5: getReceiptData()', JSON.stringify(receiptData));
+    }
+    if (receiptData) {
+      const chunks: Buffer[] = [];
+      const fakeRes = new Writable({
+        write(chunk, _enc, cb) {
+          chunks.push(Buffer.from(chunk));
+          cb();
+        },
+      }) as unknown as import('express').Response;
+      (fakeRes as unknown as { setHeader: () => void }).setHeader = () => undefined;
+      await new Promise<void>((resolve) => {
+        fakeRes.on('finish', resolve);
+        streamReceiptPdf(fakeRes, receiptData);
+      });
+      const pdfBytes = Buffer.concat(chunks);
+      if (pdfBytes.subarray(0, 4).toString('latin1') === '%PDF' && pdfBytes.length > 500) {
+        ok(`9.5: streamReceiptPdf() produces a valid PDF stream (${pdfBytes.length} bytes)`);
+      } else {
+        bad('9.5: generated receipt bytes', `${pdfBytes.length} bytes, header=${pdfBytes.subarray(0, 8).toString('latin1')}`);
+      }
+    }
   } finally {
     console.log('\n=== Cleanup ===');
     // NOTE: the management-api transport inlines $n params as scalars/jsonb
@@ -1043,8 +1575,16 @@ async function main(): Promise<void> {
         console.log('  - removed trajectory + wpoints');
       }
       if (createdCustomerIds.length) {
+        // wallet_entry / promo_redemption / referral_reward all cascade on
+        // customer delete; payout_ledger/payout_batch cascade on the
+        // throwaway driver deletes above.
         await db.raw(`delete from customer where id in (${uuidList(createdCustomerIds)})`);
         console.log(`  - removed ${createdCustomerIds.length} customer(s)`);
+      }
+      if (createdPromoCodeIds.length) {
+        // Not reachable via any other table's cascade — must be removed explicitly.
+        await db.raw(`delete from promo_code where id in (${uuidList(createdPromoCodeIds)})`);
+        console.log(`  - removed ${createdPromoCodeIds.length} test promo code(s)`);
       }
       console.log('✔ all test rows removed');
     } catch (err) {
@@ -1053,6 +1593,7 @@ async function main(): Promise<void> {
       console.error(`  tripIds=${JSON.stringify(createdTripIds)}`);
       console.error(`  vehicleIds=${JSON.stringify(createdVehicleIds)}`);
       console.error(`  customerIds=${JSON.stringify(createdCustomerIds)}`);
+      console.error(`  promoCodeIds=${JSON.stringify(createdPromoCodeIds)}`);
       fail++;
     }
     await conn.close().catch(() => undefined);

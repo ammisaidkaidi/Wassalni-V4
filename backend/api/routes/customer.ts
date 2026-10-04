@@ -84,5 +84,44 @@ export function customerRoutes(repo: DomainRepository): Router {
     }),
   );
 
+  // ── Wallet (Task 9.3) — own balance / history only ──────────────────────────
+
+  router.get(
+    '/wallet',
+    wrap(async (req, res) => {
+      const customerId = req.user!.customer_id!;
+      const [balance, history] = await Promise.all([repo.walletBalance(customerId), repo.walletHistory(customerId)]);
+      res.json({ balance, history });
+    }),
+  );
+
+  // ── Promo codes (Task 9.2) ───────────────────────────────────────────────────
+
+  router.post(
+    '/promo-codes/redeem',
+    wrap(async (req, res) => {
+      const b = z.object({ code: z.string().trim().min(1), reservation_id: z.string().uuid() }).parse(req.body);
+      const customerId = req.user!.customer_id!;
+      const reservation = await repo.getReservationOwner(b.reservation_id);
+      if (!reservation) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (reservation.customer_id !== customerId) throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      const basisAmount = Number(reservation.total_price);
+      const redemptionId = await repo.redeemPromoCode(customerId, b.code, basisAmount, b.reservation_id);
+      const balance = await repo.walletBalance(customerId);
+      res.status(201).json({ ok: true, redemption_id: redemptionId, wallet_balance: balance });
+    }),
+  );
+
+  // ── Referral program (Task 9.4) ─────────────────────────────────────────────
+
+  router.get(
+    '/referral',
+    wrap(async (req, res) => {
+      const customerId = req.user!.customer_id!;
+      const [summary, rewards] = await Promise.all([repo.getReferralSummary(customerId), repo.listReferralRewards(customerId)]);
+      res.json({ ...summary, rewards });
+    }),
+  );
+
   return router;
 }

@@ -40,7 +40,7 @@ export class AuthService {
     private readonly mailer: Mailer,
   ) {}
 
-  async register(input: { email: string; password: string; full_name: string; phone: string }): Promise<PublicUser> {
+  async register(input: { email: string; password: string; full_name: string; phone: string; referral_code?: string | null }): Promise<PublicUser> {
     const email = input.email.trim().toLowerCase();
     const fullName = input.full_name.trim();
     const phone = input.phone.trim();
@@ -54,6 +54,15 @@ export class AuthService {
        returning ${USER_COLS}`,
       [email, passwordHash, fullName, phone, customerId],
     );
+    // Task 9.4 — optional referral attribution. Non-fatal: a mistyped/
+    // unknown code must never block account creation, it's just lost.
+    if (input.referral_code && input.referral_code.trim()) {
+      try {
+        await this.repo.attributeReferral(customerId, input.referral_code.trim());
+      } catch {
+        // swallow (DZ771/DZ772/DZ773) — the account is still created normally.
+      }
+    }
     return rows[0];
   }
 

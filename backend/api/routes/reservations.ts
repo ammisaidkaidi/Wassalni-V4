@@ -5,6 +5,7 @@ import type { DomainRepository, PaymentMethod } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
 import { GATEWAY_NAME, generateTransactionId } from '../payments/mockGateway';
 import { requireAuth, requireCustomer } from '../middleware/session';
+import { streamReceiptPdf } from '../services/receipt';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -220,6 +221,70 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
         });
       }
       res.status(201).json({ checkout_url: `/api/payments/checkout/${transactionId}`, transaction_id: transactionId });
+    }),
+  );
+
+  // Task 9.3 — pay (fully or partially) straight from the customer's wallet
+  // balance, no gateway round-trip. pay_reservation_with_wallet() itself
+  // enforces sufficient balance and auto-confirms the reservation once
+  // fully paid, exactly like a successful gateway webhook would.
+  router.post(
+    '/:id/pay-wallet',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const b = z.object({ amount: z.number().positive().optional() }).parse(req.body ?? {});
+      const row = await db.selectOne<{ id: string; customer_id: string; status: string }>('reservation', {
+        columns: ['id', 'customer_id', 'status'],
+        where: { id },
+      });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      if (row.status === 'cancelled') {
+        throw new ApiError(409, 'NOT_PAYABLE', 'Une réservation annulée ne peut pas être payée');
+      }
+      const paymentId = await repo.payReservationWithWallet(id, b.amount ?? null);
+      const balance = await repo.walletBalance(req.user!.customer_id!);
+      res.status(201).json({ ok: true, payment_id: paymentId, wallet_balance: balance });
+    }),
+  );
+
+  // Task 7.4 — read-only preview of the cancellation-refund percentage that
+  // would currently apply, so the UI can warn the customer before they
+  // confirm ("annuler maintenant ne rembourse que 50%", etc.) — uses the
+  // exact same cancellation_refund_pct() function cancel_reservation() does.
+  router.get(
+    '/:id/cancellation-preview',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const row = await db.selectOne<{ id: string; customer_id: string; trip_id: string }>('reservation', {
+        columns: ['id', 'customer_id', 'trip_id'],
+        where: { id },
+      });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      const refundPct = await repo.cancellationRefundPctPreview(row.trip_id);
+      res.json({ refund_pct: refundPct });
+    }),
+  );
+
+  // Task 9.5 — own receipt, generated on the fly (nothing stored on disk).
+  router.get(
+    '/:id/receipt.pdf',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const data = await repo.getReceiptData(id);
+      if (!data) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (data.header.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      streamReceiptPdf(res, data);
     }),
   );
 
