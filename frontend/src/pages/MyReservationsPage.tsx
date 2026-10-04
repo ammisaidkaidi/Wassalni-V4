@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { ApiError, api, fmtDateTime } from '../api';
+import { ApiError, api, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import type { PaymentRow, ReservationEtaResult, ReservationRow, RatingStatus } from '../types';
 
@@ -76,6 +76,84 @@ function PayOnlineAction({ reservationId, onSettled }: { reservationId: string; 
       </button>
       {msg && <span className="muted small">{msg}</span>}
     </span>
+  );
+}
+
+/** Task 9.3 — pay the still-open balance straight from the customer's wallet, no gateway round-trip. */
+function PayWithWalletAction({ reservationId, onSettled }: { reservationId: string; onSettled: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const pay = async (): Promise<void> => {
+    setBusy(true);
+    setMsg('');
+    try {
+      await api(`/api/reservations/${reservationId}/pay-wallet`, { method: 'POST', body: {} });
+      setMsg('✔ Payé avec le portefeuille');
+      onSettled();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+      <button className="btn ghost small" disabled={busy} onClick={() => void pay()}>
+        💼 Payer avec le portefeuille
+      </button>
+      {msg && <span className="muted small">{msg}</span>}
+    </span>
+  );
+}
+
+/** Task 9.2 — redeem a promo code against this reservation's total; the discount is credited to the wallet. */
+function PromoCodeAction({ reservationId, onSettled }: { reservationId: string; onSettled: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const submit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (!code.trim()) return;
+    setBusy(true);
+    setMsg('');
+    try {
+      await api('/api/customer/promo-codes/redeem', { method: 'POST', body: { code: code.trim(), reservation_id: reservationId } });
+      setMsg('✔ Code appliqué — crédité sur votre portefeuille');
+      setCode('');
+      setOpen(false);
+      onSettled();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open)
+    return (
+      <span>
+        <button className="btn ghost small" onClick={() => setOpen(true)}>
+          🏷️ Code promo
+        </button>
+        {msg && <span className="muted small"> {msg}</span>}
+      </span>
+    );
+
+  return (
+    <form className="form-inline" onSubmit={(e) => void submit(e)}>
+      {msg && <span className="alert error small">{msg}</span>}
+      <input placeholder="CODE" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} />
+      <button className="btn primary small" disabled={busy}>
+        Appliquer
+      </button>
+      <button type="button" className="btn ghost small" onClick={() => setOpen(false)}>
+        Annuler
+      </button>
+    </form>
   );
 }
 
@@ -268,6 +346,15 @@ export default function MyReservationsPage() {
                 <span>⏳ Reste à payer : {Number(r.balance_due).toLocaleString('fr-DZ')} {r.currency}</span>
               )}
               {r.status !== 'cancelled' && Number(r.balance_due) > 0 && <PayOnlineAction reservationId={r.id} onSettled={() => void load()} />}
+              {r.status !== 'cancelled' && Number(r.balance_due) > 0 && (
+                <PayWithWalletAction reservationId={r.id} onSettled={() => void load()} />
+              )}
+              {r.status !== 'cancelled' && Number(r.balance_due) > 0 && <PromoCodeAction reservationId={r.id} onSettled={() => void load()} />}
+              {Number(r.amount_paid) > 0 && (
+                <a className="btn ghost small" href={fileUrl(`/api/reservations/${r.id}/receipt.pdf`)} target="_blank" rel="noreferrer">
+                  📄 Reçu PDF
+                </a>
+              )}
               {r.refund_status !== 'none' && (
                 <span>
                   ↩ Remboursé {r.refund_status === 'full' ? 'intégralement' : 'partiellement'} :{' '}

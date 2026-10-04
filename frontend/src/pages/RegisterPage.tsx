@@ -4,7 +4,7 @@ import { api } from '../api';
 
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const [form, setForm] = useState({ full_name: '', email: '', phone: '', password: '' });
+  const [form, setForm] = useState({ full_name: '', email: '', phone: '', password: '', referral_code: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -13,7 +13,10 @@ export default function RegisterPage() {
     setError('');
     setBusy(true);
     try {
-      await api('/api/auth/register', { method: 'POST', body: form });
+      // Task 9.4 — referral_code is optional; omit entirely rather than send
+      // an empty string so the server's nullish check isn't tripped by "".
+      const { referral_code, ...rest } = form;
+      await api('/api/auth/register', { method: 'POST', body: referral_code.trim() ? { ...rest, referral_code: referral_code.trim() } : rest });
       navigate('/login');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -52,6 +55,14 @@ export default function RegisterPage() {
             minLength={8}
             value={form.password}
             onChange={(e) => setForm({ ...form, password: e.target.value })}
+          />
+        </label>
+        <label>
+          Code de parrainage (optionnel)
+          <input
+            placeholder="REF-123456"
+            value={form.referral_code}
+            onChange={(e) => setForm({ ...form, referral_code: e.target.value })}
           />
         </label>
         <button className="btn primary wide" disabled={busy}>

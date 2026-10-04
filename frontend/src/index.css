@@ -422,6 +422,32 @@ form .btn {
   color: #334155;
 }
 
+.chip.succeeded,
+.chip.active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.chip.processing {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.chip.inactive {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.positive {
+  color: #166534;
+  font-weight: 600;
+}
+
+.negative {
+  color: #991b1b;
+  font-weight: 600;
+}
+
 .muted.small,
 .small {
   font-size: 0.78rem;

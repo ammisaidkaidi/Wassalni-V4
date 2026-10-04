@@ -8,6 +8,7 @@ import MyReservationsPage from './pages/MyReservationsPage';
 import ProfilePage from './pages/ProfilePage';
 import RegisterPage from './pages/RegisterPage';
 import TripDetailPage from './pages/TripDetailPage';
+import WalletPage from './pages/WalletPage';
 
 export default function App() {
   const { user, logout } = useAuth();
@@ -22,6 +23,7 @@ export default function App() {
             Rechercher
           </NavLink>
           {user?.customer_id && <NavLink to="/reservations">Mes réservations</NavLink>}
+          {user?.customer_id && <NavLink to="/wallet">Mon portefeuille</NavLink>}
           {user?.customer_id && <NavLink to="/profile">Mon profil</NavLink>}
           {user?.role === 'driver' && <NavLink to="/driver">Mon espace chauffeur</NavLink>}
           {user?.role === 'admin' && <NavLink to="/admin">Admin</NavLink>}
@@ -54,6 +56,7 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/reservations" element={<MyReservationsPage />} />
+          <Route path="/wallet" element={<WalletPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/driver" element={<DriverPage />} />
           <Route path="/admin" element={<AdminPage />} />

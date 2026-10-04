@@ -766,21 +766,20 @@ Implement:
 
 TASK 8.2 — Driver earnings dashboard
 
-Show: (backend computed + API-exposed via GET /api/driver/earnings[/ledger|/payouts] —
-correct and live-tested — but no frontend dashboard page renders it yet, so the
-literal "Show" requirement is not yet met end-to-end; see feature-matrix.md 8.2)
+Show: (backend via GET /api/driver/earnings[/ledger|/payouts], rendered on
+DriverPage.tsx's "Mes revenus" tab — proven live over HTTP this session)
 
-[ ] gross revenue
+[x] gross revenue
 
-[ ] commission
+[x] commission
 
-[ ] refunds
+[x] refunds
 
-[ ] net earnings
+[x] net earnings
 
-[ ] pending payout
+[x] pending payout
 
-[ ] paid-out amount
+[x] paid-out amount
 
 TASK 8.3 — Payout scheduling/export
 

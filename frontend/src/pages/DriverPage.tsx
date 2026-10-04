@@ -5,12 +5,15 @@ import { useAuth } from '../auth';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
 import WpointManager from '../components/WpointManager';
 import type {
+  DriverEarningsSummary,
   DriverProfileRow,
   DriverReservationRow,
   DriverTripRow,
   KycDocType,
   KycDocumentRow,
   MaintenanceStatus,
+  PayoutBatchRow,
+  PayoutLedgerRow,
   PricePair,
   RatingRow,
   RatingStatus,
@@ -39,7 +42,16 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: 'Annulé',
 };
 
-type Tab = 'trips' | 'current' | 'reservations' | 'trajectories' | 'kyc' | 'vehicle-inspections' | 'ratings' | 'settings';
+type Tab =
+  | 'trips'
+  | 'current'
+  | 'reservations'
+  | 'trajectories'
+  | 'kyc'
+  | 'vehicle-inspections'
+  | 'ratings'
+  | 'earnings'
+  | 'settings';
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'trips', label: 'Mes voyages' },
   { id: 'current', label: 'Trajet en cours' },
@@ -48,6 +60,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'kyc', label: 'Mes documents' },
   { id: 'vehicle-inspections', label: 'Contrôle technique' },
   { id: 'ratings', label: 'Mes évaluations' },
+  { id: 'earnings', label: 'Mes revenus' },
   { id: 'settings', label: 'Paramètres' },
 ];
 
@@ -99,6 +112,7 @@ export default function DriverPage() {
       {tab === 'kyc' && <KycTab />}
       {tab === 'vehicle-inspections' && <VehicleInspectionsTab />}
       {tab === 'ratings' && <DriverRatingsTab />}
+      {tab === 'earnings' && <EarningsTab />}
       {tab === 'settings' && <ParametresTab />}
     </section>
   );
@@ -1405,6 +1419,138 @@ function DriverRatingsTab() {
               <tr>
                 <td colSpan={4} className="empty">
                   Aucune évaluation reçue pour le moment.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Mes revenus (Task 8.2 earnings dashboard, 8.3 payout batches) ────────────
+
+const PAYOUT_ENTRY_LABEL: Record<PayoutLedgerRow['entry_type'], string> = {
+  earning: 'Gain (course terminée)',
+  refund_adjustment: 'Ajustement (remboursement)',
+};
+
+function EarningsTab() {
+  const [summary, setSummary] = useState<DriverEarningsSummary | null>(null);
+  const [ledger, setLedger] = useState<PayoutLedgerRow[]>([]);
+  const [batches, setBatches] = useState<PayoutBatchRow[]>([]);
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    Promise.all([
+      api<{ summary: DriverEarningsSummary }>('/api/driver/earnings'),
+      api<{ ledger: PayoutLedgerRow[] }>('/api/driver/earnings/ledger'),
+      api<{ batches: PayoutBatchRow[] }>('/api/driver/earnings/payouts'),
+    ])
+      .then(([s, l, b]) => {
+        setSummary(s.summary);
+        setLedger(l.ledger);
+        setBatches(b.batches);
+      })
+      .catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const card = (label: string, value: string | undefined, positive = true): JSX.Element => (
+    <div className="card" style={{ minWidth: 160 }}>
+      <p className="muted small" style={{ margin: 0 }}>
+        {label}
+      </p>
+      <p className={positive ? 'positive' : 'negative'} style={{ fontSize: '1.4rem', fontWeight: 700, margin: 0 }}>
+        {value === undefined ? '—' : `${Number(value).toLocaleString('fr-DZ')} DZD`}
+      </p>
+    </div>
+  );
+
+  return (
+    <div>
+      <p className="muted">Revenus nets de la commission de la plateforme, calculés depuis le registre de paiement.</p>
+      {msg && <p className="alert info">{msg}</p>}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+        {card('Revenu brut', summary?.gross_revenue)}
+        {card('Commission plateforme', summary?.commission, false)}
+        {card('Remboursements', summary?.refunds, false)}
+        {card('Revenu net', summary?.net_earnings)}
+        {card('En attente de versement', summary?.pending_payout)}
+        {card('Déjà versé', summary?.paid_out)}
+      </div>
+
+      <h3>Versements (batches)</h3>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Période</th>
+              <th>Montant</th>
+              <th>Statut</th>
+              <th>Référence</th>
+              <th>Payé le</th>
+            </tr>
+          </thead>
+          <tbody>
+            {batches.map((b) => (
+              <tr key={b.id}>
+                <td>
+                  {fmtDateTime(b.period_start)} → {fmtDateTime(b.period_end)}
+                </td>
+                <td>{Number(b.total_amount).toLocaleString('fr-DZ')} DZD</td>
+                <td>
+                  <span className={`chip ${b.status}`}>{b.status}</span>
+                </td>
+                <td>{b.reference ?? '—'}</td>
+                <td>{b.paid_at ? fmtDateTime(b.paid_at) : '—'}</td>
+              </tr>
+            ))}
+            {batches.length === 0 && (
+              <tr>
+                <td colSpan={5} className="empty">
+                  Aucun versement pour le moment.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Registre détaillé</h3>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Voyage</th>
+              <th>Réservation</th>
+              <th>Brut</th>
+              <th>Commission</th>
+              <th>Net</th>
+              <th>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ledger.map((l) => (
+              <tr key={l.id}>
+                <td>{PAYOUT_ENTRY_LABEL[l.entry_type]}</td>
+                <td>{l.trip_code ?? '—'}</td>
+                <td>{l.reservation_code ?? '—'}</td>
+                <td>{Number(l.gross_amount).toLocaleString('fr-DZ')} DZD</td>
+                <td>
+                  {Number(l.commission_amount).toLocaleString('fr-DZ')} DZD ({l.commission_pct}%)
+                </td>
+                <td className={Number(l.net_amount) < 0 ? 'negative' : 'positive'}>
+                  {Number(l.net_amount).toLocaleString('fr-DZ')} DZD
+                </td>
+                <td>{fmtDateTime(l.created_at)}</td>
+              </tr>
+            ))}
+            {ledger.length === 0 && (
+              <tr>
+                <td colSpan={7} className="empty">
+                  Aucune entrée pour le moment.
                 </td>
               </tr>
             )}

@@ -7,6 +7,7 @@ import type {
   AdminReservationRow,
   CustomerRow,
   DomainErrorRow,
+  DriverEarningsSummary,
   DriverRow,
   FraudSignalRow,
   KycDocType,
@@ -15,6 +16,9 @@ import type {
   NoShowEventRow,
   PaymentGatewayEventRow,
   PaymentRow,
+  PayoutBatchRow,
+  PayoutLedgerRow,
+  PromoCodeRow,
   RatingRow,
   RefundWorklistRow,
   TrackingRow,
@@ -33,6 +37,8 @@ type Tab =
   | 'customers'
   | 'reservations'
   | 'payments'
+  | 'promo-codes'
+  | 'payouts'
   | 'tracking'
   | 'no-show'
   | 'kyc'
@@ -49,6 +55,8 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'customers', label: 'Clients' },
   { id: 'reservations', label: 'Réservations' },
   { id: 'payments', label: 'Paiements' },
+  { id: 'promo-codes', label: 'Codes promo' },
+  { id: 'payouts', label: 'Versements chauffeurs' },
   { id: 'tracking', label: 'Suivi GPS' },
   { id: 'no-show', label: 'Absences' },
   { id: 'kyc', label: 'KYC chauffeurs' },
@@ -107,6 +115,8 @@ export default function AdminPage() {
       {tab === 'customers' && <CustomersTab />}
       {tab === 'reservations' && <ReservationsTab />}
       {tab === 'payments' && <PaymentsTab />}
+      {tab === 'promo-codes' && <PromoCodesTab />}
+      {tab === 'payouts' && <PayoutsTab />}
       {tab === 'tracking' && <TrackingTab />}
       {tab === 'no-show' && <NoShowTab />}
       {tab === 'kyc' && <KycReviewTab />}
@@ -1000,6 +1010,30 @@ function PaymentsTab() {
     }
   };
 
+  const retryRefund = async (refundId: string): Promise<void> => {
+    setMsg('');
+    try {
+      await api(`/api/admin/refunds/${refundId}/retry`, { method: 'POST', body: {} });
+      setMsg('✔ Nouvelle tentative de remboursement lancée');
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const failRefund = async (refundId: string): Promise<void> => {
+    const reason = window.prompt('Raison de l\u2019échec ?', 'Échec manuel (admin)');
+    if (reason === null) return;
+    setMsg('');
+    try {
+      await api(`/api/admin/refunds/${refundId}/fail`, { method: 'POST', body: { reason } });
+      setMsg('✔ Remboursement marqué comme échoué');
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <div>
       {msg && <p className="alert info">{msg}</p>}
@@ -1097,13 +1131,15 @@ function PaymentsTab() {
       <PaymentGatewayEventsPanel />
 
       <h2>
-        Remboursements en attente
-        {worklist.length > 0 && <span className="tab-badge">{worklist.length}</span>}
+        Registre des remboursements (Task 7.4)
+        {worklist.filter((w) => w.status === 'pending' || w.status === 'failed').length > 0 && (
+          <span className="tab-badge">{worklist.filter((w) => w.status === 'pending' || w.status === 'failed').length}</span>
+        )}
       </h2>
       <p className="muted small">
-        Réservations annulées dont au moins un paiement n'a pas encore été intégralement remboursé — distinct des
-        paiements déjà remboursés (colonne « Remboursé » ci-dessus). Chaque ligne agit directement sur le paiement
-        concerné.
+        Un remboursement est calculé automatiquement selon la politique d'annulation (délai avant départ) et exécuté
+        via la passerelle de paiement — chaque ligne est une tentative (succès, échec, ou en attente), jamais réécrite
+        après coup, pour conserver l'historique complet. Un échec peut être réessayé ci-dessous.
       </p>
       <div className="table-wrap">
         <table className="table">
@@ -1113,45 +1149,438 @@ function PaymentsTab() {
               <th>Réservation</th>
               <th>Voyage</th>
               <th>Client</th>
-              <th>Téléphone</th>
-              <th>Payé</th>
-              <th>Déjà remboursé</th>
-              <th>Reste à rembourser</th>
+              <th>Montant</th>
+              <th>Politique</th>
+              <th>Origine</th>
+              <th>Statut</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {worklist.map((w) => (
-              <tr key={w.payment_id}>
+              <tr key={w.refund_id}>
                 <td>{w.payment_code}</td>
                 <td>{w.reservation_code}</td>
                 <td>
                   {w.trip_code} — {fmtDateTime(w.departure_at)}
                 </td>
-                <td>{w.customer_name}</td>
-                <td>{w.customer_phone}</td>
-                <td>{Number(w.amount).toLocaleString('fr-DZ')} DZD</td>
-                <td>{Number(w.refunded_amount).toLocaleString('fr-DZ')} DZD</td>
                 <td>
-                  <strong>{Number(w.refund_due).toLocaleString('fr-DZ')} DZD</strong>
+                  {w.customer_name}
+                  <div className="muted small">{w.customer_phone}</div>
+                </td>
+                <td>{Number(w.amount).toLocaleString('fr-DZ')} DZD</td>
+                <td>{w.policy_pct !== null ? `${w.policy_pct}%` : '—'}</td>
+                <td>{w.initiated_by === 'system' ? 'automatique' : 'admin'}</td>
+                <td>
+                  <span className={`chip ${w.status}`}>{w.status}</span>
+                  {w.status === 'failed' && w.failure_reason && <div className="muted small">{w.failure_reason}</div>}
                 </td>
                 <td className="actions">
-                  <button className="btn primary small" onClick={() => void refund(w.payment_id)}>
-                    Rembourser
-                  </button>
+                  {w.status === 'failed' && (
+                    <button className="btn primary small" onClick={() => void retryRefund(w.refund_id)}>
+                      Réessayer
+                    </button>
+                  )}
+                  {(w.status === 'pending' || w.status === 'processing') && (
+                    <button className="btn ghost small" onClick={() => void failRefund(w.refund_id)}>
+                      Marquer échoué
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
             {worklist.length === 0 && (
               <tr>
                 <td colSpan={9} className="empty">
-                  Aucun remboursement en attente.
+                  Aucun remboursement enregistré.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ── Codes promo (Task 9.2) ───────────────────────────────────────────────────
+
+function PromoCodesTab() {
+  const [rows, setRows] = useState<PromoCodeRow[]>([]);
+  const [form, setForm] = useState({
+    code: '',
+    discount_type: 'fixed' as 'fixed' | 'percentage',
+    discount_value: '',
+    min_amount: '0',
+    max_uses_total: '',
+    max_uses_per_customer: '1',
+    starts_at: '',
+    expires_at: '',
+  });
+  const [msg, setMsg] = useState('');
+
+  const load = useCallback(async () => {
+    setRows((await api<{ promo_codes: PromoCodeRow[] }>('/api/admin/promo-codes')).promo_codes);
+  }, []);
+
+  useEffect(() => {
+    load().catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
+  }, [load]);
+
+  const create = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setMsg('');
+    try {
+      await api('/api/admin/promo-codes', {
+        method: 'POST',
+        body: {
+          code: form.code.trim().toUpperCase(),
+          discount_type: form.discount_type,
+          discount_value: Number(form.discount_value),
+          min_amount: form.min_amount ? Number(form.min_amount) : undefined,
+          max_uses_total: form.max_uses_total ? Number(form.max_uses_total) : null,
+          max_uses_per_customer: Number(form.max_uses_per_customer || 1),
+          starts_at: form.starts_at || null,
+          expires_at: form.expires_at || null,
+        },
+      });
+      setMsg('✔ Code promo créé');
+      setForm({ ...form, code: '', discount_value: '' });
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const toggle = async (id: string, active: boolean): Promise<void> => {
+    setMsg('');
+    try {
+      await api(`/api/admin/promo-codes/${id}/${active ? 'deactivate' : 'activate'}`, { method: 'POST', body: {} });
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div>
+      {msg && <p className="alert info">{msg}</p>}
+      <form className="card form-grid" onSubmit={(e) => void create(e)}>
+        <label>
+          Code
+          <input required minLength={3} value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} />
+        </label>
+        <label>
+          Type
+          <select value={form.discount_type} onChange={(e) => setForm({ ...form, discount_type: e.target.value as 'fixed' | 'percentage' })}>
+            <option value="fixed">Montant fixe (DZD)</option>
+            <option value="percentage">Pourcentage (%)</option>
+          </select>
+        </label>
+        <label>
+          Valeur
+          <input
+            type="number"
+            min={0.01}
+            step="0.01"
+            required
+            value={form.discount_value}
+            onChange={(e) => setForm({ ...form, discount_value: e.target.value })}
+          />
+        </label>
+        <label>
+          Montant minimum (DZD)
+          <input type="number" min={0} step="0.01" value={form.min_amount} onChange={(e) => setForm({ ...form, min_amount: e.target.value })} />
+        </label>
+        <label>
+          Utilisations max. (total, vide = illimité)
+          <input
+            type="number"
+            min={1}
+            value={form.max_uses_total}
+            onChange={(e) => setForm({ ...form, max_uses_total: e.target.value })}
+          />
+        </label>
+        <label>
+          Utilisations max. par client
+          <input
+            type="number"
+            min={1}
+            value={form.max_uses_per_customer}
+            onChange={(e) => setForm({ ...form, max_uses_per_customer: e.target.value })}
+          />
+        </label>
+        <label>
+          Début (optionnel)
+          <input type="datetime-local" value={form.starts_at} onChange={(e) => setForm({ ...form, starts_at: e.target.value })} />
+        </label>
+        <label>
+          Expiration (optionnel)
+          <input type="datetime-local" value={form.expires_at} onChange={(e) => setForm({ ...form, expires_at: e.target.value })} />
+        </label>
+        <button className="btn primary">Créer le code</button>
+      </form>
+
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Type</th>
+              <th>Valeur</th>
+              <th>Min.</th>
+              <th>Usages (total / par client)</th>
+              <th>Fenêtre</th>
+              <th>Statut</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.id}>
+                <td>
+                  <strong>{p.code}</strong>
+                </td>
+                <td>{p.discount_type === 'fixed' ? 'Montant fixe' : 'Pourcentage'}</td>
+                <td>{p.discount_type === 'fixed' ? `${Number(p.discount_value).toLocaleString('fr-DZ')} DZD` : `${p.discount_value}%`}</td>
+                <td>{Number(p.min_amount).toLocaleString('fr-DZ')} DZD</td>
+                <td>
+                  {p.max_uses_total ?? '∞'} / {p.max_uses_per_customer}
+                </td>
+                <td className="muted small">
+                  {p.starts_at ? fmtDateTime(p.starts_at) : '—'} → {p.expires_at ? fmtDateTime(p.expires_at) : '—'}
+                </td>
+                <td>
+                  <span className={`chip ${p.active ? 'active' : 'inactive'}`}>{p.active ? 'actif' : 'inactif'}</span>
+                </td>
+                <td className="actions">
+                  <button className="btn ghost small" onClick={() => void toggle(p.id, p.active)}>
+                    {p.active ? 'Désactiver' : 'Activer'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={8} className="empty">
+                  Aucun code promo.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Versements chauffeurs (Task 8.1 / 8.2 / 8.3) ─────────────────────────────
+
+function PayoutsTab() {
+  const [drivers, setDrivers] = useState<DriverRow[]>([]);
+  const [driverId, setDriverId] = useState('');
+  const [summary, setSummary] = useState<DriverEarningsSummary | null>(null);
+  const [ledger, setLedger] = useState<PayoutLedgerRow[]>([]);
+  const [batches, setBatches] = useState<PayoutBatchRow[]>([]);
+  const [batchForm, setBatchForm] = useState({ period_start: '', period_end: '' });
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    api<{ drivers: DriverRow[] }>('/api/admin/drivers')
+      .then((d) => setDrivers(d.drivers))
+      .catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const loadDriver = useCallback(async (id: string) => {
+    if (!id) {
+      setSummary(null);
+      setLedger([]);
+      setBatches([]);
+      return;
+    }
+    const [s, l, b] = await Promise.all([
+      api<{ summary: DriverEarningsSummary }>(`/api/admin/drivers/${id}/earnings`),
+      api<{ ledger: PayoutLedgerRow[] }>(`/api/admin/drivers/${id}/earnings/ledger`),
+      api<{ batches: PayoutBatchRow[] }>(`/api/admin/payout-batches?driver_id=${id}`),
+    ]);
+    setSummary(s.summary);
+    setLedger(l.ledger);
+    setBatches(b.batches);
+  }, []);
+
+  useEffect(() => {
+    loadDriver(driverId).catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
+  }, [driverId, loadDriver]);
+
+  const createBatch = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (!driverId) return;
+    setMsg('');
+    try {
+      await api('/api/admin/payout-batches', {
+        method: 'POST',
+        body: { driver_id: driverId, period_start: batchForm.period_start, period_end: batchForm.period_end },
+      });
+      setMsg('✔ Batch de versement créé');
+      await loadDriver(driverId);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const markPaid = async (batchId: string): Promise<void> => {
+    const reference = window.prompt('Référence du virement / paiement ?');
+    if (!reference) return;
+    setMsg('');
+    try {
+      await api(`/api/admin/payout-batches/${batchId}/mark-paid`, { method: 'POST', body: { reference } });
+      setMsg('✔ Versement marqué comme payé');
+      await loadDriver(driverId);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div>
+      {msg && <p className="alert info">{msg}</p>}
+      <label>
+        Chauffeur
+        <select value={driverId} onChange={(e) => setDriverId(e.target.value)}>
+          <option value="">— choisir —</option>
+          {drivers.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.full_name} ({d.phone})
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {driverId && summary && (
+        <>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', margin: '14px 0' }}>
+            {([
+              ['Revenu brut', summary.gross_revenue, true],
+              ['Commission', summary.commission, false],
+              ['Remboursements', summary.refunds, false],
+              ['Revenu net', summary.net_earnings, true],
+              ['En attente', summary.pending_payout, true],
+              ['Déjà versé', summary.paid_out, true],
+            ] as Array<[string, string, boolean]>).map(([label, value, positive]) => (
+              <div className="card" key={label} style={{ minWidth: 150 }}>
+                <p className="muted small" style={{ margin: 0 }}>
+                  {label}
+                </p>
+                <p className={positive ? 'positive' : 'negative'} style={{ fontSize: '1.3rem', fontWeight: 700, margin: 0 }}>
+                  {Number(value).toLocaleString('fr-DZ')} DZD
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <form className="form-inline" onSubmit={(e) => void createBatch(e)}>
+            <label>
+              Début période
+              <input
+                type="datetime-local"
+                required
+                value={batchForm.period_start}
+                onChange={(e) => setBatchForm({ ...batchForm, period_start: e.target.value })}
+              />
+            </label>
+            <label>
+              Fin période
+              <input
+                type="datetime-local"
+                required
+                value={batchForm.period_end}
+                onChange={(e) => setBatchForm({ ...batchForm, period_end: e.target.value })}
+              />
+            </label>
+            <button className="btn primary small">Créer un batch de versement</button>
+          </form>
+
+          <h3>Batches</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Période</th>
+                  <th>Montant</th>
+                  <th>Statut</th>
+                  <th>Référence</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map((b) => (
+                  <tr key={b.id}>
+                    <td>
+                      {fmtDateTime(b.period_start)} → {fmtDateTime(b.period_end)}
+                    </td>
+                    <td>{Number(b.total_amount).toLocaleString('fr-DZ')} DZD</td>
+                    <td>
+                      <span className={`chip ${b.status}`}>{b.status}</span>
+                    </td>
+                    <td>{b.reference ?? '—'}</td>
+                    <td className="actions">
+                      {b.status === 'pending' && (
+                        <button className="btn primary small" onClick={() => void markPaid(b.id)}>
+                          Marquer payé
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {batches.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="empty">
+                      Aucun batch pour ce chauffeur.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Registre détaillé</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Voyage</th>
+                  <th>Réservation</th>
+                  <th>Net</th>
+                  <th>Batch</th>
+                  <th>Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledger.map((l) => (
+                  <tr key={l.id}>
+                    <td>{l.entry_type === 'earning' ? 'Gain' : 'Ajustement'}</td>
+                    <td>{l.trip_code ?? '—'}</td>
+                    <td>{l.reservation_code ?? '—'}</td>
+                    <td className={Number(l.net_amount) < 0 ? 'negative' : 'positive'}>
+                      {Number(l.net_amount).toLocaleString('fr-DZ')} DZD
+                    </td>
+                    <td>{l.payout_batch_id ? 'assigné' : '—'}</td>
+                    <td>{fmtDateTime(l.created_at)}</td>
+                  </tr>
+                ))}
+                {ledger.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="empty">
+                      Aucune entrée.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }

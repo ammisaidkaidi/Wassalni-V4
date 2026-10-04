@@ -229,9 +229,9 @@ export interface RefundDueRow {
 }
 
 export interface RefundWorklistRow {
+  refund_id: string;
   payment_id: string;
   payment_code: string;
-  payment_status: string;
   reservation_id: string;
   reservation_code: string;
   customer_name: string;
@@ -239,9 +239,106 @@ export interface RefundWorklistRow {
   trip_code: string;
   departure_at: string;
   amount: string;
-  refunded_amount: string;
-  refund_due: string;
+  status: 'pending' | 'processing' | 'succeeded' | 'failed';
+  policy_pct: string | null;
+  initiated_by: 'system' | 'admin';
+  gateway: string | null;
+  failure_reason: string | null;
+  created_at: string;
+  processed_at: string | null;
+}
+
+// ── Driver payouts (Task 8.1 / 8.2 / 8.3) ──────────────────────────────────────
+
+export interface PayoutLedgerRow {
+  id: string;
+  driver_id: string;
+  trip_id: string | null;
+  reservation_id: string | null;
+  payment_id: string | null;
+  entry_type: 'earning' | 'refund_adjustment';
+  gross_amount: string;
+  commission_pct: string;
+  commission_amount: string;
+  net_amount: string;
+  payout_batch_id: string | null;
+  created_at: string;
+  reservation_code?: string | null;
+  trip_code?: string | null;
+}
+
+export interface PayoutBatchRow {
+  id: string;
+  driver_id: string;
+  driver_name?: string;
+  period_start: string;
+  period_end: string;
+  total_amount: string;
+  status: 'pending' | 'paid' | 'failed';
+  reference: string | null;
+  created_at: string;
   paid_at: string | null;
+}
+
+export interface DriverEarningsSummary {
+  gross_revenue: string;
+  commission: string;
+  refunds: string;
+  net_earnings: string;
+  pending_payout: string;
+  paid_out: string;
+}
+
+// ── Wallet (Task 9.3) ───────────────────────────────────────────────────────────
+
+export type WalletEntryType = 'refund_credit' | 'promo_credit' | 'referral_credit' | 'booking_debit' | 'admin_adjustment';
+
+export interface WalletEntryRow {
+  id: string;
+  customer_id: string;
+  entry_type: WalletEntryType;
+  amount: string;
+  reservation_id: string | null;
+  reference_id: string | null;
+  description: string | null;
+  created_at: string;
+}
+
+// ── Promo codes (Task 9.2) ───────────────────────────────────────────────────────
+
+export interface PromoCodeRow {
+  id: string;
+  code: string;
+  discount_type: 'percentage' | 'fixed';
+  discount_value: string;
+  min_amount: string;
+  max_uses_total: number | null;
+  max_uses_per_customer: number;
+  starts_at: string | null;
+  expires_at: string | null;
+  active: boolean;
+  created_by: string | null;
+  created_at: string;
+}
+
+// ── Referral program (Task 9.4) ──────────────────────────────────────────────────
+
+export interface ReferralSummary {
+  referral_code: string;
+  referred_by_customer_id: string | null;
+  total_referred: number;
+  total_rewarded: string;
+}
+
+export interface ReferralRewardRow {
+  id: string;
+  referrer_id: string;
+  referred_id: string;
+  referred_name?: string;
+  trigger_reservation_id: string | null;
+  reward_amount: string;
+  status: 'pending' | 'paid';
+  created_at: string;
 }
 
 export interface TrackingRow {
