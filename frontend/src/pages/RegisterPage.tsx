@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { useI18n } from '../i18n';
 
 export default function RegisterPage() {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [form, setForm] = useState({ full_name: '', email: '', phone: '', password: '', referral_code: '' });
   const [busy, setBusy] = useState(false);
@@ -16,7 +18,10 @@ export default function RegisterPage() {
       // Task 9.4 — referral_code is optional; omit entirely rather than send
       // an empty string so the server's nullish check isn't tripped by "".
       const { referral_code, ...rest } = form;
-      await api('/api/auth/register', { method: 'POST', body: referral_code.trim() ? { ...rest, referral_code: referral_code.trim() } : rest });
+      await api('/api/auth/register', {
+        method: 'POST',
+        body: referral_code.trim() ? { ...rest, referral_code: referral_code.trim() } : rest,
+      });
       navigate('/login');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -27,52 +32,75 @@ export default function RegisterPage() {
 
   return (
     <section className="narrow">
-      <h1>Créer un compte</h1>
+      <h1>{t('register.title')}</h1>
       <form className="card" onSubmit={(e) => void submit(e)}>
-        <label>
-          Nom complet
-          <input required minLength={2} value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} />
-        </label>
-        <label>
-          Email
-          <input type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-        </label>
-        <label>
-          Téléphone
+        <label htmlFor="register-name">
+          {t('register.fullName')}
           <input
+            id="register-name"
             required
-            pattern="^\+?[0-9]{8,15}$"
-            placeholder="+213 5XX XX XX XX"
-            value={form.phone}
-            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            minLength={2}
+            value={form.full_name}
+            onChange={(e) => setForm({ ...form, full_name: e.target.value })}
+            autoComplete="name"
           />
         </label>
-        <label>
-          Mot de passe (8 caractères min.)
+        <label htmlFor="register-email">
+          {t('register.email')}
           <input
+            id="register-email"
+            type="email"
+            required
+            value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            autoComplete="email"
+          />
+        </label>
+        <label htmlFor="register-phone">
+          {t('register.phone')}
+          <input
+            id="register-phone"
+            required
+            pattern="^\+?[0-9]{8,15}$"
+            placeholder={t('register.phonePlaceholder')}
+            value={form.phone}
+            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            autoComplete="tel"
+          />
+        </label>
+        <label htmlFor="register-password">
+          {t('register.password')}
+          <input
+            id="register-password"
             type="password"
             required
             minLength={8}
             value={form.password}
             onChange={(e) => setForm({ ...form, password: e.target.value })}
+            autoComplete="new-password"
           />
         </label>
-        <label>
-          Code de parrainage (optionnel)
+        <label htmlFor="register-referral">
+          {t('register.referralCode')}
           <input
-            placeholder="REF-123456"
+            id="register-referral"
+            placeholder={t('register.referralPlaceholder')}
             value={form.referral_code}
             onChange={(e) => setForm({ ...form, referral_code: e.target.value })}
           />
         </label>
         <button className="btn primary wide" disabled={busy}>
-          {busy ? 'Création…' : 'Créer mon compte'}
+          {busy ? t('register.creating') : t('register.submit')}
         </button>
         <p className="muted center">
-          Déjà inscrit ? <Link to="/login">Connexion</Link>
+          {t('register.alreadyRegistered')} <Link to="/login">{t('register.login')}</Link>
         </p>
       </form>
-      {error && <p className="alert error">{error}</p>}
+      {error && (
+        <p className="alert error" role="alert">
+          {error}
+        </p>
+      )}
     </section>
   );
 }

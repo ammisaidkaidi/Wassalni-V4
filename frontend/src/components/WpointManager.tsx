@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiError, api } from '../api';
+import { useI18n } from '../i18n';
 import type { Wilaya, WpointRow } from '../types';
 import CommuneSelectorModal from './CommuneSelectorModal';
 
@@ -29,6 +30,7 @@ interface WpointManagerProps {
  *    we just surface that error clearly instead of attempting to work around it.
  */
 export default function WpointManager({ basePath, trajectoryId, wilayas, onWpointsChange }: WpointManagerProps) {
+  const { t } = useI18n();
   const [wpoints, setWpoints] = useState<WpointRow[]>([]);
   const [wilayaId, setWilayaId] = useState('');
   const [msg, setMsg] = useState('');
@@ -66,7 +68,7 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
     try {
       await api(`${basePath}/trajectories/${trajectoryId}/wpoints`, { method: 'POST', body: { wilaya_id: Number(wilayaId) } });
       setWilayaId('');
-      setMsg('✔ Arrêt ajouté');
+      setMsg(t('wpointManager.stopAdded'));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -95,14 +97,14 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
   const remove = async (wpointId: string, label: string): Promise<void> => {
     setError('');
     setMsg('');
-    if (!window.confirm(`Supprimer l'arrêt « ${label} » de cette trajectoire ?`)) return;
+    if (!window.confirm(t('wpointManager.confirmRemove', { label }))) return;
     try {
       await api(`${basePath}/trajectories/${trajectoryId}/wpoints/${wpointId}`, { method: 'DELETE' });
-      setMsg('✔ Arrêt supprimé');
+      setMsg(t('wpointManager.stopRemoved'));
       await load();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'WPOINT_IN_USE') {
-        setError('Impossible de supprimer : cet arrêt est utilisé par au moins un voyage existant.');
+        setError(t('wpointManager.inUseError'));
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -111,8 +113,16 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
 
   return (
     <div className="wpoint-manager">
-      {msg && <p className="alert success small">{msg}</p>}
-      {error && <p className="alert error small">{error}</p>}
+      {msg && (
+        <p className="alert success small" role="status">
+          {msg}
+        </p>
+      )}
+      {error && (
+        <p className="alert error small" role="alert">
+          {error}
+        </p>
+      )}
       <ol className="stops">
         {wpoints.map((w, index) => (
           <li key={w.id} className="wpoint-item">
@@ -125,13 +135,14 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
                 <span className="muted">({w.nom_ar})</span>
                 {communeCounts[w.id] !== undefined && (
                   <span className="muted small">
-                    — {communeCounts[w.id]} commune{communeCounts[w.id] > 1 ? 's' : ''}
+                    — {t('wpointManager.communeCount', { count: communeCounts[w.id], s: communeCounts[w.id] > 1 ? 's' : '' })}
                   </span>
                 )}
                 <button
                   type="button"
                   className="btn ghost small"
-                  title="Monter"
+                  title={t('wpointManager.moveUp')}
+                  aria-label={t('wpointManager.moveUp')}
                   disabled={index === 0 || busy}
                   onClick={() => void move(index, -1)}
                 >
@@ -140,17 +151,18 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
                 <button
                   type="button"
                   className="btn ghost small"
-                  title="Descendre"
+                  title={t('wpointManager.moveDown')}
+                  aria-label={t('wpointManager.moveDown')}
                   disabled={index === wpoints.length - 1 || busy}
                   onClick={() => void move(index, 1)}
                 >
                   ↓
                 </button>
                 <button type="button" className="btn ghost small" onClick={() => setCommuneModalFor(w)}>
-                  Gérer les communes
+                  {t('wpointManager.manageCommunes')}
                 </button>
                 <button type="button" className="btn danger small" onClick={() => void remove(w.id, w.nom_fr)}>
-                  Supprimer
+                  {t('wpointManager.remove')}
                 </button>
               </div>
             </div>
@@ -158,10 +170,10 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
         ))}
       </ol>
       <form className="form-inline" onSubmit={(e) => void addWpoint(e)}>
-        <label>
-          Ajouter un arrêt
-          <select required value={wilayaId} onChange={(e) => setWilayaId(e.target.value)}>
-            <option value="">— Wilaya —</option>
+        <label htmlFor="wpoint-add-wilaya">
+          {t('wpointManager.addStop')}
+          <select id="wpoint-add-wilaya" required value={wilayaId} onChange={(e) => setWilayaId(e.target.value)}>
+            <option value="">{t('wpointManager.pickWilaya')}</option>
             {wilayas.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.nom_fr}
@@ -169,7 +181,7 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
             ))}
           </select>
         </label>
-        <button className="btn primary">Ajouter</button>
+        <button className="btn primary">{t('wpointManager.add')}</button>
       </form>
 
       {communeModalFor && (
@@ -183,7 +195,7 @@ export default function WpointManager({ basePath, trajectoryId, wilayas, onWpoin
           onClose={() => setCommuneModalFor(null)}
           onSaved={(count) => {
             setCommuneCounts((prev) => ({ ...prev, [communeModalFor.id]: count }));
-            setMsg('✔ Communes mises à jour');
+            setMsg(t('wpointManager.communesUpdated'));
           }}
         />
       )}

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { useAuth } from '../auth';
 import { EmergencyContactsCard, FavoritesCard, WaitlistCard } from '../components/CustomerExtras';
+import { useI18n } from '../i18n';
 import type { CommuneRow, CustomerProfileRow, Wilaya } from '../types';
 
 interface ProfileForm {
@@ -32,6 +33,7 @@ const EMPTY_FORM: ProfileForm = {
 };
 
 export default function ProfilePage() {
+  const { t, lang } = useI18n();
   const { user, loading: authLoading } = useAuth();
   const [profile, setProfile] = useState<CustomerProfileRow | null>(null);
   const [form, setForm] = useState<ProfileForm>(EMPTY_FORM);
@@ -104,7 +106,7 @@ export default function ProfilePage() {
 
   const useCurrentLocation = (): void => {
     if (!('geolocation' in navigator)) {
-      setError("La géolocalisation n'est pas disponible sur cet appareil.");
+      setError(t('profile.geolocationUnavailable'));
       return;
     }
     setLocating(true);
@@ -119,7 +121,7 @@ export default function ProfilePage() {
         setLocating(false);
       },
       (err) => {
-        setError(`Position indisponible : ${err.message}`);
+        setError(t('profile.positionUnavailable', { error: err.message }));
         setLocating(false);
       },
       { enableHighAccuracy: true, timeout: 10_000 },
@@ -148,7 +150,7 @@ export default function ProfilePage() {
         },
       });
       setProfile(r.customer);
-      setMsg('✔ Profil mis à jour');
+      setMsg(t('profile.updated'));
     } catch (e) {
       if (e instanceof ApiError) setError(e.message);
       else setError(e instanceof Error ? e.message : String(e));
@@ -157,76 +159,111 @@ export default function ProfilePage() {
     }
   };
 
-  if (authLoading) return <p className="empty">Chargement…</p>;
+  if (authLoading) return <p className="empty">{t('profile.loading')}</p>;
   if (!user || !user.customer_id)
     return (
       <p className="empty">
-        <Link to="/login?next=/profile">Connectez-vous</Link> pour gérer votre profil.
+        <Link to="/login?next=/profile">{t('login.title')}</Link> — {t('profile.loginToManage')}
       </p>
     );
-  if (!profile) return error ? <p className="alert error">{error}</p> : <p className="empty">Chargement…</p>;
+  if (!profile)
+    return error ? (
+      <p className="alert error" role="alert">
+        {error}
+      </p>
+    ) : (
+      <p className="empty">{t('profile.loading')}</p>
+    );
 
   return (
     <section>
-      <h1>Mon profil</h1>
-      {msg && <p className="alert success">{msg}</p>}
-      {error && <p className="alert error">{error}</p>}
+      <h1>{t('profile.title')}</h1>
+      {msg && (
+        <p className="alert success" role="status">
+          {msg}
+        </p>
+      )}
+      {error && (
+        <p className="alert error" role="alert">
+          {error}
+        </p>
+      )}
 
       <div className="detail-grid">
         <div className="card">
-          <h2 style={{ marginTop: 0 }}>Identité &amp; coordonnées</h2>
+          <h2 style={{ marginTop: 0 }}>{t('profile.identityCard')}</h2>
           <p className="muted small">
-            Membre depuis {new Date(profile.created_at).toLocaleDateString('fr-DZ')} — wilaya actuelle :{' '}
-            {wilayaName(profile.home_wilaya_id)}.
+            {t('profile.memberSince', {
+              date: new Date(profile.created_at).toLocaleDateString(lang === 'ar' ? 'ar-DZ' : 'fr-DZ'),
+              wilaya: wilayaName(profile.home_wilaya_id),
+            })}
           </p>
           <form className="form-grid" onSubmit={(e) => void save(e)}>
-            <label>
-              Nom complet
+            <label htmlFor="profile-name">
+              {t('profile.fullName')}
               <input
+                id="profile-name"
                 required
                 minLength={2}
                 value={form.full_name}
                 onChange={(e) => setForm({ ...form, full_name: e.target.value })}
               />
             </label>
-            <label>
-              Téléphone
-              <input required value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-            </label>
-            <label>
-              Email
-              <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-            </label>
-            <label>
-              Adresse
-              <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
-            </label>
-            <label>
-              NIN (18 chiffres)
+            <label htmlFor="profile-phone">
+              {t('profile.phone')}
               <input
+                id="profile-phone"
+                required
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+              />
+            </label>
+            <label htmlFor="profile-email">
+              {t('profile.email')}
+              <input
+                id="profile-email"
+                type="email"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+              />
+            </label>
+            <label htmlFor="profile-address">
+              {t('profile.address')}
+              <input
+                id="profile-address"
+                value={form.address}
+                onChange={(e) => setForm({ ...form, address: e.target.value })}
+              />
+            </label>
+            <label htmlFor="profile-nin">
+              {t('profile.nin')}
+              <input
+                id="profile-nin"
                 value={form.nin}
                 maxLength={18}
-                placeholder="optionnel"
+                placeholder={t('profile.optional')}
                 onChange={(e) => setForm({ ...form, nin: e.target.value.replace(/\D/g, '') })}
               />
             </label>
-            <label>
-              NIF (20 chiffres)
+            <label htmlFor="profile-nif">
+              {t('profile.nif')}
               <input
+                id="profile-nif"
                 value={form.nif}
                 maxLength={20}
-                placeholder="optionnel"
+                placeholder={t('profile.optional')}
                 onChange={(e) => setForm({ ...form, nif: e.target.value.replace(/\D/g, '') })}
               />
             </label>
 
-            <label>
-              Wilaya de résidence
+            <label htmlFor="profile-wilaya">
+              {t('profile.homeWilaya')}
               <select
+                id="profile-wilaya"
                 value={form.home_wilaya_id}
                 onChange={(e) => setForm({ ...form, home_wilaya_id: e.target.value, home_commune_id: '' })}
               >
-                <option value="">— non renseignée —</option>
+                <option value="">{t('profile.notProvided')}</option>
                 {wilayas.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.code} — {w.nom_fr}
@@ -234,14 +271,15 @@ export default function ProfilePage() {
                 ))}
               </select>
             </label>
-            <label>
-              Commune de résidence
+            <label htmlFor="profile-commune">
+              {t('profile.homeCommune')}
               <select
+                id="profile-commune"
                 value={form.home_commune_id}
                 disabled={!form.home_wilaya_id}
                 onChange={(e) => setForm({ ...form, home_commune_id: e.target.value })}
               >
-                <option value="">— non renseignée —</option>
+                <option value="">{t('profile.notProvided')}</option>
                 {communes.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.nom_fr}
@@ -250,18 +288,20 @@ export default function ProfilePage() {
               </select>
             </label>
 
-            <label>
-              Position GPS (latitude)
+            <label htmlFor="profile-gps-lat">
+              {t('profile.gpsLat')}
               <input
+                id="profile-gps-lat"
                 type="number"
                 step="0.000001"
                 value={form.gps_lat}
                 onChange={(e) => setForm({ ...form, gps_lat: e.target.value })}
               />
             </label>
-            <label>
-              Position GPS (longitude)
+            <label htmlFor="profile-gps-lon">
+              {t('profile.gpsLon')}
               <input
+                id="profile-gps-lon"
                 type="number"
                 step="0.000001"
                 value={form.gps_lon}
@@ -270,12 +310,12 @@ export default function ProfilePage() {
             </label>
             <div>
               <button type="button" className="btn ghost small" disabled={locating} onClick={useCurrentLocation}>
-                {locating ? 'Localisation…' : '📍 Utiliser ma position actuelle'}
+                {locating ? t('profile.locating') : t('profile.useCurrentLocation')}
               </button>
             </div>
 
             <button className="btn primary" disabled={saving}>
-              {saving ? 'Enregistrement…' : 'Enregistrer'}
+              {saving ? t('profile.saving') : t('profile.save')}
             </button>
           </form>
         </div>

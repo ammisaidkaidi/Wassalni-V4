@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth';
 import NotificationBell from './components/NotificationBell';
+import { LANGS, useI18n } from './i18n';
 import AdminPage from './pages/AdminPage';
 import DriverPage from './pages/DriverPage';
 import HomePage from './pages/HomePage';
@@ -11,26 +12,57 @@ import RegisterPage from './pages/RegisterPage';
 import ShareTrackingPage from './pages/ShareTrackingPage';
 import TripDetailPage from './pages/TripDetailPage';
 import WalletPage from './pages/WalletPage';
+import { useTheme } from './theme';
 
 export default function App() {
   const { user, logout } = useAuth();
+  const { t, lang, setLang } = useI18n();
+  const { theme, toggleTheme } = useTheme();
+
   return (
     <div className="app">
+      <a href="#main-content" className="skip-link">
+        {t('nav.skipToContent')}
+      </a>
       <header className="topbar">
         <NavLink to="/" className="brand">
           🚐 Wassalni
         </NavLink>
-        <nav>
+        <nav aria-label={t('nav.search')}>
           <NavLink to="/" end>
-            Rechercher
+            {t('nav.search')}
           </NavLink>
-          {user?.customer_id && <NavLink to="/reservations">Mes réservations</NavLink>}
-          {user?.customer_id && <NavLink to="/wallet">Mon portefeuille</NavLink>}
-          {user?.customer_id && <NavLink to="/profile">Mon profil</NavLink>}
-          {user?.role === 'driver' && <NavLink to="/driver">Mon espace chauffeur</NavLink>}
-          {user?.role === 'admin' && <NavLink to="/admin">Admin</NavLink>}
+          {user?.customer_id && <NavLink to="/reservations">{t('nav.myReservations')}</NavLink>}
+          {user?.customer_id && <NavLink to="/wallet">{t('nav.myWallet')}</NavLink>}
+          {user?.customer_id && <NavLink to="/profile">{t('nav.myProfile')}</NavLink>}
+          {user?.role === 'driver' && <NavLink to="/driver">{t('nav.driverSpace')}</NavLink>}
+          {user?.role === 'admin' && <NavLink to="/admin">{t('nav.admin')}</NavLink>}
         </nav>
         <div className="auth">
+          <label className="lang-switch">
+            <span className="sr-only">{t('lang.switch')}</span>
+            <select
+              aria-label={t('lang.switch')}
+              value={lang}
+              onChange={(e) => setLang(e.target.value as typeof lang)}
+            >
+              {LANGS.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="btn ghost icon-btn"
+            onClick={toggleTheme}
+            aria-pressed={theme === 'dark'}
+            title={t('theme.toggle')}
+          >
+            <span aria-hidden="true">{theme === 'dark' ? '☀️' : '🌙'}</span>
+            <span className="sr-only">{t('theme.toggle')}</span>
+          </button>
           {user ? (
             <>
               <NotificationBell />
@@ -38,21 +70,21 @@ export default function App() {
                 {user.full_name}
               </span>
               <button className="btn ghost" onClick={() => void logout()}>
-                Déconnexion
+                {t('nav.logout')}
               </button>
             </>
           ) : (
             <>
-              <NavLink to="/login">Connexion</NavLink>
+              <NavLink to="/login">{t('nav.login')}</NavLink>
               <NavLink to="/register" className="btn primary">
-                Créer un compte
+                {t('nav.register')}
               </NavLink>
             </>
           )}
         </div>
       </header>
 
-      <main className="container">
+      <main className="container" id="main-content">
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/trips/:id" element={<TripDetailPage />} />
@@ -64,11 +96,11 @@ export default function App() {
           <Route path="/driver" element={<DriverPage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/track/:token" element={<ShareTrackingPage />} />
-          <Route path="*" element={<p className="empty">Page introuvable</p>} />
+          <Route path="*" element={<p className="empty">{t('notFound.text')}</p>} />
         </Routes>
       </main>
 
-      <footer className="footer">Wassalni — démonstrateur (delivery domain v3 · Supabase)</footer>
+      <footer className="footer">{t('footer.text')}</footer>
     </div>
   );
 }

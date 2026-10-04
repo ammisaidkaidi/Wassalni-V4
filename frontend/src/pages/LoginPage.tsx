@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, setSessionToken } from '../api';
 import { useAuth } from '../auth';
+import { useI18n } from '../i18n';
 
 interface Challenge {
   otp_required: true;
@@ -11,6 +12,7 @@ interface Challenge {
 }
 
 export default function LoginPage() {
+  const { t } = useI18n();
   const [searchParams] = useSearchParams();
   const next = searchParams.get('next') ?? '/';
   const navigate = useNavigate();
@@ -62,7 +64,10 @@ export default function LoginPage() {
     setError('');
     setBusy(true);
     try {
-      if (challenge) setChallenge(await api<Challenge>('/api/auth/resend-2fa', { method: 'POST', body: { otp_token: challenge.otp_token } }));
+      if (challenge)
+        setChallenge(
+          await api<Challenge>('/api/auth/resend-2fa', { method: 'POST', body: { otp_token: challenge.otp_token } }),
+        );
       setCode('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -73,33 +78,51 @@ export default function LoginPage() {
 
   return (
     <section className="narrow">
-      <h1>Connexion</h1>
+      <h1>{t('login.title')}</h1>
       {step === 'password' ? (
         <form className="card" onSubmit={(e) => void submitPassword(e)}>
-          <label>
-            Email
-            <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="vous@exemple.dz" />
+          <label htmlFor="login-email">
+            {t('login.email')}
+            <input
+              id="login-email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder={t('login.emailPlaceholder')}
+              autoComplete="email"
+            />
           </label>
-          <label>
-            Mot de passe
-            <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+          <label htmlFor="login-password">
+            {t('login.password')}
+            <input
+              id="login-password"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+            />
           </label>
           <button className="btn primary wide" disabled={busy}>
-            {busy ? 'Vérification…' : 'Continuer'}
+            {busy ? t('login.verifying') : t('login.continueBtn')}
           </button>
           <p className="muted center">
-            Pas de compte ? <Link to="/register">Créer un compte</Link>
+            {t('login.noAccount')} <Link to="/register">{t('login.createAccount')}</Link>
           </p>
         </form>
       ) : (
         <form className="card" onSubmit={(e) => void submitCode(e)}>
-          <p className="muted">
-            Un code à 6 chiffres a été envoyé à <strong>{email}</strong>.
-          </p>
-          {challenge?.dev_code && <p className="alert info">Mode dev (pas de SMTP) — code : <strong>{challenge.dev_code}</strong></p>}
-          <label>
-            Code de vérification
+          <p className="muted">{t('login.codeSentTo', { email })}</p>
+          {challenge?.dev_code && (
+            <p className="alert info" role="status">
+              {t('login.devModeCode', { code: challenge.dev_code })}
+            </p>
+          )}
+          <label htmlFor="login-otp">
+            {t('login.verificationCode')}
             <input
+              id="login-otp"
               inputMode="numeric"
               pattern="[0-9]{6}"
               maxLength={6}
@@ -108,17 +131,22 @@ export default function LoginPage() {
               onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
               placeholder="······"
               className="otp-input"
+              autoComplete="one-time-code"
             />
           </label>
           <button className="btn primary wide" disabled={busy || code.length !== 6}>
-            {busy ? 'Vérification…' : 'Valider'}
+            {busy ? t('login.verifying') : t('login.submit')}
           </button>
           <button type="button" className="btn ghost wide" disabled={busy} onClick={() => void resend()}>
-            Renvoyer le code
+            {t('login.resend')}
           </button>
         </form>
       )}
-      {error && <p className="alert error">{error}</p>}
+      {error && (
+        <p className="alert error" role="alert">
+          {error}
+        </p>
+      )}
     </section>
   );
 }

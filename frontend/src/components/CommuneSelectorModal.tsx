@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import { useI18n } from '../i18n';
 import type { CommuneRow, DairaRow } from '../types';
+import { useFocusTrap } from '../useFocusTrap';
 
 interface CommuneSelectorModalProps {
   basePath: '/api/admin' | '/api/driver';
@@ -40,6 +42,9 @@ export default function CommuneSelectorModal({
   onClose,
   onSaved,
 }: CommuneSelectorModalProps) {
+  const { t } = useI18n();
+  const modalRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(modalRef, true);
   const [dairas, setDairas] = useState<DairaRow[]>([]);
   const [communes, setCommunes] = useState<CommuneRow[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -160,46 +165,62 @@ export default function CommuneSelectorModal({
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-box wpoint-modal" role="dialog" aria-modal="true" aria-label="Gérer les communes du WPoint">
+      <div
+        className="modal-box wpoint-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('communeModal.dialogLabel')}
+        ref={modalRef}
+        tabIndex={-1}
+      >
         <div className="modal-head">
-          <h2>Communes du WPoint</h2>
-          <button type="button" className="btn ghost small modal-x" onClick={onClose} aria-label="Fermer">
+          <h2>{t('communeModal.title')}</h2>
+          <button type="button" className="btn ghost small modal-x" onClick={onClose} aria-label={t('communeModal.close')}>
             ✕
           </button>
         </div>
 
         <div className="wpoint-readonly-wilaya">
-          <span className="chip-label">Wilaya (lecture seule)</span>
+          <span className="chip-label">{t('communeModal.readonlyWilaya')}</span>
           <strong>{wilayaNomFr}</strong> <span className="muted">({wilayaNomAr})</span>
         </div>
 
-        {error && <p className="alert error small">{error}</p>}
+        {error && (
+          <p className="alert error small" role="alert">
+            {error}
+          </p>
+        )}
 
         {loading ? (
-          <p className="empty">Chargement…</p>
+          <p className="empty">{t('communeModal.loading')}</p>
         ) : (
           <>
             <div className="wpoint-controls">
               <button type="button" className="btn ghost small" onClick={selectAll} disabled={saving}>
-                Tout sélectionner
+                {t('communeModal.selectAll')}
               </button>
               <button type="button" className="btn ghost small" onClick={deselectAll} disabled={saving}>
-                Tout désélectionner
+                {t('communeModal.deselectAll')}
               </button>
               <button type="button" className="btn ghost small" onClick={invertSelection} disabled={saving}>
-                Inverser la sélection
+                {t('communeModal.invertSelection')}
               </button>
               <span className="wpoint-count">
-                {selected.size} commune{selected.size > 1 ? 's' : ''} sélectionnée{selected.size > 1 ? 's' : ''}
+                {t('communeModal.selectedCount', { count: selected.size, s: selected.size > 1 ? 's' : '' })}
               </span>
             </div>
 
             <div className="wpoint-chips">
-              {selectedCommunes.length === 0 && <span className="muted small">Aucune commune sélectionnée — toute la wilaya reste disponible.</span>}
+              {selectedCommunes.length === 0 && <span className="muted small">{t('communeModal.noneSelected')}</span>}
               {selectedCommunes.map((c) => (
                 <span key={c.id} className="chip removable">
                   {c.nom_fr}
-                  <button type="button" onClick={() => removeChip(c.id)} aria-label={`Retirer ${c.nom_fr}`} disabled={saving}>
+                  <button
+                    type="button"
+                    onClick={() => removeChip(c.id)}
+                    aria-label={t('communeModal.remove', { name: c.nom_fr })}
+                    disabled={saving}
+                  >
                     ×
                   </button>
                 </span>
@@ -255,10 +276,10 @@ export default function CommuneSelectorModal({
 
         <div className="modal-foot">
           <button type="button" className="btn ghost" onClick={onClose} disabled={saving}>
-            Annuler
+            {t('communeModal.cancel')}
           </button>
           <button type="button" className="btn primary" onClick={() => void confirm()} disabled={saving || loading}>
-            {saving ? 'Enregistrement…' : 'Confirmer'}
+            {saving ? t('communeModal.saving') : t('communeModal.confirm')}
           </button>
         </div>
       </div>

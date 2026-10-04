@@ -10,10 +10,68 @@
   --danger: #dc2626;
   --radius: 14px;
   --shadow: 0 1px 3px rgba(15, 36, 46, 0.08), 0 8px 24px rgba(15, 36, 46, 0.06);
+  --focus-ring: #0d9488;
+
+  /* Badge/chip colour families — overridden per-family below for dark mode
+     so every status pill stays readable (WCAG-contrast-checked) in both
+     themes instead of just inverting the whole page. */
+  --neutral-bg: #e2e8f0;
+  --neutral-ink: #334155;
+  --red-bg: #fee2e2;
+  --red-ink: #991b1b;
+  --green-bg: #dcfce7;
+  --green-ink: #166534;
+  --amber-bg: #fef3c7;
+  --amber-ink: #b45309;
+  --purple-bg: #ede9fe;
+  --purple-ink: #6d28d9;
+  --teal-bg: #ccfbf1;
+  --teal-ink: #0e7490;
+  --blue-bg: #e0f2fe;
+  --blue-ink: #075985;
+  --surface-muted: #f8fafc;
+}
+
+/* Task 15.4 — Dark mode. Toggled via `document.documentElement.dataset.theme`
+   (see src/theme.tsx). Only the variables are redefined — every component
+   that already consumes var(--bg)/var(--card)/etc. (which is the vast
+   majority of this stylesheet) adapts automatically. */
+[data-theme='dark'] {
+  --bg: #0f1720;
+  --card: #182332;
+  --ink: #e8eef3;
+  --muted: #94a3b8;
+  --line: #2b3b4e;
+  --primary: #2dd4bf;
+  --primary-dark: #5eead4;
+  --accent: #fbbf24;
+  --danger: #f87171;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --focus-ring: #5eead4;
+
+  --neutral-bg: #2b3b4e;
+  --neutral-ink: #cbd5e1;
+  --red-bg: #5c1a1a;
+  --red-ink: #fca5a5;
+  --green-bg: #15422a;
+  --green-ink: #86efac;
+  --amber-bg: #5a3c0a;
+  --amber-ink: #fcd34d;
+  --purple-bg: #3b2064;
+  --purple-ink: #d8b4fe;
+  --teal-bg: #0f3d42;
+  --teal-ink: #5eead4;
+  --blue-bg: #0c3a52;
+  --blue-ink: #7dd3fc;
+  --surface-muted: #1f2d3d;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  color-scheme: light dark;
 }
 
 body {
@@ -22,6 +80,68 @@ body {
   background: var(--bg);
   color: var(--ink);
   line-height: 1.5;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* Task 15.3 — Accessibility: a visible, consistent keyboard-focus indicator
+   on every interactive element (previously only inputs/selects had one). */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Task 15.3 — "Skip to main content" link: invisible until it receives
+   keyboard focus, lets keyboard/screen-reader users bypass the top nav. */
+.skip-link {
+  position: absolute;
+  inset-inline-start: 8px;
+  top: -48px;
+  background: var(--card);
+  color: var(--ink);
+  padding: 10px 16px;
+  border-radius: 10px;
+  border: 2px solid var(--primary);
+  z-index: 100;
+  transition: top 0.15s ease;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  top: 8px;
+}
+
+/* Visually-hidden but still announced by screen readers — used for labels
+   that would be visually redundant (icon-only buttons, select labels). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.lang-switch select {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+  padding: 8px 10px;
+  line-height: 1;
 }
 
 .app {
@@ -68,7 +188,7 @@ body {
 
 .topbar nav a.active {
   color: var(--primary-dark);
-  background: #ccfbf1;
+  background: var(--teal-bg);
 }
 
 .auth {
@@ -233,13 +353,13 @@ select {
   border: 1px solid var(--line);
   border-radius: 10px;
   font-size: 0.95rem;
-  background: #fff;
+  background: var(--card);
   color: var(--ink);
 }
 
 input:focus,
 select:focus {
-  outline: 2px solid #99f6e4;
+  outline: 2px solid var(--focus-ring);
   border-color: var(--primary);
 }
 
@@ -312,7 +432,7 @@ form .btn {
 .btn.small {
   padding: 5px 10px;
   font-size: 0.8rem;
-  margin-right: 4px;
+  margin-inline-end: 4px;
 }
 
 .btn.wide {
@@ -332,18 +452,18 @@ form .btn {
 }
 
 .alert.error {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--red-bg);
+  color: var(--red-ink);
 }
 
 .alert.success {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--green-bg);
+  color: var(--green-ink);
 }
 
 .alert.info {
-  background: #e0f2fe;
-  color: #075985;
+  background: var(--blue-bg);
+  color: var(--blue-ink);
 }
 
 .empty {
@@ -367,84 +487,84 @@ form .btn {
   border-radius: 999px;
   font-size: 0.75rem;
   font-weight: 700;
-  background: #e2e8f0;
-  color: #334155;
-  margin-right: 4px;
+  background: var(--neutral-bg);
+  color: var(--neutral-ink);
+  margin-inline-end: 4px;
 }
 
 .chip.scheduled,
 .chip.confirmed {
-  background: #cffafe;
-  color: #0e7490;
+  background: var(--teal-bg);
+  color: var(--teal-ink);
 }
 
 .chip.in_progress,
 .chip.pending {
-  background: #fef3c7;
-  color: #b45309;
+  background: var(--amber-bg);
+  color: var(--amber-ink);
 }
 
 .chip.completed,
 .chip.paid {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--green-bg);
+  color: var(--green-ink);
 }
 
 .chip.cancelled,
 .chip.no_show,
 .chip.failed {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--red-bg);
+  color: var(--red-ink);
 }
 
 .chip.draft {
-  background: #ede9fe;
-  color: #6d28d9;
+  background: var(--purple-bg);
+  color: var(--purple-ink);
 }
 
 .chip.partially_refunded {
-  background: #fef3c7;
-  color: #b45309;
+  background: var(--amber-bg);
+  color: var(--amber-ink);
 }
 
 .chip.refunded {
-  background: #ede9fe;
-  color: #6d28d9;
+  background: var(--purple-bg);
+  color: var(--purple-ink);
 }
 
 .chip.partially_paid {
-  background: #fef3c7;
-  color: #b45309;
+  background: var(--amber-bg);
+  color: var(--amber-ink);
 }
 
 .chip.unpaid {
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--neutral-bg);
+  color: var(--neutral-ink);
 }
 
 .chip.succeeded,
 .chip.active {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--green-bg);
+  color: var(--green-ink);
 }
 
 .chip.processing {
-  background: #fef3c7;
-  color: #b45309;
+  background: var(--amber-bg);
+  color: var(--amber-ink);
 }
 
 .chip.inactive {
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--neutral-bg);
+  color: var(--neutral-ink);
 }
 
 .positive {
-  color: #166534;
+  color: var(--green-ink);
   font-weight: 600;
 }
 
 .negative {
-  color: #991b1b;
+  color: var(--red-ink);
   font-weight: 600;
 }
 
@@ -550,7 +670,7 @@ form .btn {
 }
 
 .wpoint-count {
-  margin-left: auto;
+  margin-inline-start: auto;
   font-weight: 700;
   font-size: 0.85rem;
   color: var(--primary-dark);
@@ -568,7 +688,7 @@ form .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: #ccfbf1;
+  background: var(--teal-bg);
   color: var(--primary-dark);
 }
 
@@ -611,11 +731,11 @@ form .btn {
 }
 
 .daira-group.daira-all summary {
-  background: #f0fdfa;
+  background: var(--teal-bg);
 }
 
 .daira-group.daira-partial summary {
-  background: #fffbeb;
+  background: var(--amber-bg);
 }
 
 .daira-name {
@@ -688,12 +808,12 @@ form .btn {
 }
 
 .stops li.from .dot {
-  box-shadow: 0 0 0 4px #99f6e4;
+  box-shadow: 0 0 0 4px var(--teal-bg);
 }
 
 .stops li.to .dot {
   background: var(--accent);
-  box-shadow: 0 0 0 4px #fde68a;
+  box-shadow: 0 0 0 4px var(--amber-bg);
 }
 
 .total {
@@ -735,7 +855,7 @@ form .btn {
 
 .tab-badge {
   display: inline-block;
-  margin-left: 6px;
+  margin-inline-start: 6px;
   padding: 1px 7px;
   border-radius: 999px;
   background: #991b1b;
@@ -762,14 +882,14 @@ form .btn {
 
 .table th,
 .table td {
-  text-align: left;
+  text-align: start;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
 
 .table th {
-  background: #f8fafc;
+  background: var(--surface-muted);
   color: var(--muted);
   font-size: 0.78rem;
   text-transform: uppercase;
@@ -801,7 +921,7 @@ form .btn {
 .notif-dot {
   position: absolute;
   top: -4px;
-  right: -4px;
+  inset-inline-end: -4px;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
@@ -816,7 +936,7 @@ form .btn {
 }
 .notif-panel {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   top: calc(100% + 8px);
   width: 360px;
   max-height: 440px;
@@ -844,7 +964,7 @@ form .btn {
   cursor: pointer;
 }
 .notif-item.unread {
-  background: #f0fdfa;
+  background: var(--teal-bg);
   font-weight: 600;
 }
 .notif-item .notif-time {
@@ -890,11 +1010,11 @@ form .btn {
   padding: 8px 12px;
   border-radius: 12px;
   font-size: 0.88rem;
-  background: #f1f5f9;
+  background: var(--surface-muted);
 }
 .chat-msg.mine {
   align-self: flex-end;
-  background: #ccfbf1;
+  background: var(--teal-bg);
 }
 .chat-msg .chat-meta {
   display: block;
@@ -906,7 +1026,7 @@ form .btn {
   display: inline-block;
   padding: 2px 10px;
   border-radius: 999px;
-  background: #f1f5f9;
+  background: var(--surface-muted);
   font-size: 0.75rem;
   font-weight: 700;
   color: var(--muted);
@@ -927,7 +1047,7 @@ form .btn {
   height: 30px;
   border-radius: 8px;
   border: 1px solid var(--line);
-  background: #f8fafc;
+  background: var(--surface-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -936,8 +1056,8 @@ form .btn {
   padding: 0;
 }
 .seat-icon.available {
-  background: #ecfeff;
-  border-color: #a5f3fc;
+  background: var(--teal-bg);
+  border-color: var(--teal-ink);
 }
 .seat-icon.selected {
   background: var(--primary);
@@ -945,8 +1065,8 @@ form .btn {
   filter: none;
 }
 .seat-icon.occupied {
-  background: #e2e8f0;
-  color: #94a3b8;
+  background: var(--neutral-bg);
+  color: var(--muted);
   cursor: not-allowed;
   opacity: 0.6;
 }
@@ -961,7 +1081,7 @@ form .btn {
 .seat-picker-legend .seat-icon {
   width: 16px;
   height: 16px;
-  margin-right: 4px;
+  margin-inline-end: 4px;
   display: inline-block;
   vertical-align: middle;
 }

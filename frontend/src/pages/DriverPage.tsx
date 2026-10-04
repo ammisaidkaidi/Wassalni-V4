@@ -6,6 +6,7 @@ import { ConversationAction, RevealContactAction } from '../components/Reservati
 import SosButton from '../components/SosButton';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
 import WpointManager from '../components/WpointManager';
+import { useI18n } from '../i18n';
 import type {
   DriverEarningsSummary,
   DriverProfileRow,
@@ -38,13 +39,6 @@ const RESERVATION_STATUS_COLOR: Record<string, string> = {
   cancelled: '#9ca3af',
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  scheduled: 'Programmé',
-  in_progress: 'En cours',
-  completed: 'Terminé',
-  cancelled: 'Annulé',
-};
-
 type Tab =
   | 'trips'
   | 'current'
@@ -55,59 +49,43 @@ type Tab =
   | 'ratings'
   | 'earnings'
   | 'settings';
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'trips', label: 'Mes voyages' },
-  { id: 'current', label: 'Trajet en cours' },
-  { id: 'reservations', label: 'Réservations' },
-  { id: 'trajectories', label: 'Trajectoires' },
-  { id: 'kyc', label: 'Mes documents' },
-  { id: 'vehicle-inspections', label: 'Contrôle technique' },
-  { id: 'ratings', label: 'Mes évaluations' },
-  { id: 'earnings', label: 'Mes revenus' },
-  { id: 'settings', label: 'Paramètres' },
-];
-
-const MAINTENANCE_LABEL: Record<MaintenanceStatus, string> = {
-  ok: 'OK',
-  needs_service: 'Entretien requis',
-  out_of_service: 'Hors service',
-};
-
-const KYC_DOC_LABEL: Record<KycDocType, string> = {
-  identity: "Pièce d'identité",
-  license: 'Permis de conduire',
-  vehicle_registration: 'Carte grise du véhicule',
-  insurance: "Attestation d'assurance",
-};
-const KYC_STATUS_LABEL: Record<KycDocumentRow['status'], string> = {
-  pending: 'En attente de vérification',
-  approved: 'Approuvé',
-  rejected: 'Refusé',
-};
 
 export default function DriverPage() {
+  const { t } = useI18n();
   const { user, loading } = useAuth();
   const [tab, setTab] = useState<Tab>('trips');
 
-  if (loading) return <p className="empty">Chargement…</p>;
+  const TABS: Array<{ id: Tab; label: string }> = [
+    { id: 'trips', label: t('driver.tabs.trips') },
+    { id: 'current', label: t('driver.tabs.current') },
+    { id: 'reservations', label: t('driver.tabs.reservations') },
+    { id: 'trajectories', label: t('driver.tabs.trajectories') },
+    { id: 'kyc', label: t('driver.tabs.kyc') },
+    { id: 'vehicle-inspections', label: t('driver.tabs.vehicleInspections') },
+    { id: 'ratings', label: t('driver.tabs.ratings') },
+    { id: 'earnings', label: t('driver.tabs.earnings') },
+    { id: 'settings', label: t('driver.tabs.settings') },
+  ];
+
+  if (loading) return <p className="empty">{t('driver.loading')}</p>;
   if (!user)
     return (
       <p className="empty">
-        <Link to="/login?next=/driver">Connectez-vous</Link> avec votre compte chauffeur pour accéder à cette section.
+        <Link to="/login?next=/driver">{t('driver.loginLink')}</Link> {t('driver.loginRequired')}
       </p>
     );
-  if (user.role !== 'driver') return <p className="empty">Cette section est réservée aux comptes chauffeur.</p>;
+  if (user.role !== 'driver') return <p className="empty">{t('driver.forbidden')}</p>;
 
   return (
     <section>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
-        <h1>Espace chauffeur</h1>
+        <h1>{t('driver.title')}</h1>
         <SosButton role="driver" />
       </div>
       <div className="tabs">
-        {TABS.map((t) => (
-          <button key={t.id} className={`tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
-            {t.label}
+        {TABS.map((tb) => (
+          <button key={tb.id} className={`tab${tab === tb.id ? ' active' : ''}`} onClick={() => setTab(tb.id)}>
+            {tb.label}
           </button>
         ))}
       </div>
@@ -127,14 +105,15 @@ export default function DriverPage() {
 // ── Mes voyages ──────────────────────────────────────────────────────────────
 
 function MesVoyagesTab() {
+  const { t } = useI18n();
   const [trips, setTrips] = useState<DriverTripRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [msg, setMsg] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const t = await api<{ trips: DriverTripRow[] }>('/api/driver/trips');
-      setTrips(t.trips);
+      const r = await api<{ trips: DriverTripRow[] }>('/api/driver/trips');
+      setTrips(r.trips);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     }
@@ -144,14 +123,18 @@ function MesVoyagesTab() {
     void load();
   }, [load]);
 
-  const active = trips.filter((t) => t.status === 'in_progress');
-  const upcoming = trips.filter((t) => t.status === 'scheduled');
-  const history = trips.filter((t) => t.status === 'completed' || t.status === 'cancelled');
-  const selected = trips.find((t) => t.id === selectedId) ?? null;
+  const active = trips.filter((tr) => tr.status === 'in_progress');
+  const upcoming = trips.filter((tr) => tr.status === 'scheduled');
+  const history = trips.filter((tr) => tr.status === 'completed' || tr.status === 'cancelled');
+  const selected = trips.find((tr) => tr.id === selectedId) ?? null;
 
   return (
     <div>
-      {msg && <p className="alert error">{msg}</p>}
+      {msg && (
+        <p className="alert error" role="alert">
+          {msg}
+        </p>
+      )}
       {selected ? (
         <DriverTripDetail
           trip={selected}
@@ -161,12 +144,12 @@ function MesVoyagesTab() {
           }}
         />
       ) : trips.length === 0 ? (
-        <p className="empty">Aucun voyage ne vous est assigné pour le moment.</p>
+        <p className="empty">{t('driver.trips.noTripsAssigned')}</p>
       ) : (
         <>
-          <TripGroup title="En cours" trips={active} onOpen={setSelectedId} />
-          <TripGroup title="À venir" trips={upcoming} onOpen={setSelectedId} />
-          <TripGroup title="Historique" trips={history} onOpen={setSelectedId} />
+          <TripGroup title={t('driver.trips.inProgress')} trips={active} onOpen={setSelectedId} />
+          <TripGroup title={t('driver.trips.upcoming')} trips={upcoming} onOpen={setSelectedId} />
+          <TripGroup title={t('driver.trips.history')} trips={history} onOpen={setSelectedId} />
         </>
       )}
     </div>
@@ -174,6 +157,7 @@ function MesVoyagesTab() {
 }
 
 function TripGroup({ title, trips, onOpen }: { title: string; trips: DriverTripRow[]; onOpen: (id: string) => void }) {
+  const { t } = useI18n();
   if (trips.length === 0) return null;
   return (
     <div className="card" style={{ marginBottom: 16 }}>
@@ -182,25 +166,25 @@ function TripGroup({ title, trips, onOpen }: { title: string; trips: DriverTripR
         <table className="table">
           <thead>
             <tr>
-              <th>Code</th>
-              <th>Trajectoire</th>
-              <th>Départ</th>
-              <th>Véhicule</th>
-              <th>Statut</th>
+              <th>{t('driver.trips.code')}</th>
+              <th>{t('driver.trips.trajectory')}</th>
+              <th>{t('driver.trips.departure')}</th>
+              <th>{t('driver.trips.vehicle')}</th>
+              <th>{t('driver.trips.status')}</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {trips.map((t) => (
-              <tr key={t.id}>
-                <td>{t.code}</td>
-                <td>{t.trajectory_name}</td>
-                <td>{fmtDateTime(t.departure_at)}</td>
-                <td>{t.vehicle_matricule ?? '—'}</td>
-                <td>{STATUS_LABEL[t.status] ?? t.status}</td>
+            {trips.map((tr) => (
+              <tr key={tr.id}>
+                <td>{tr.code}</td>
+                <td>{tr.trajectory_name}</td>
+                <td>{fmtDateTime(tr.departure_at)}</td>
+                <td>{tr.vehicle_matricule ?? '—'}</td>
+                <td>{t(`status.trip.${tr.status}`)}</td>
                 <td>
-                  <button className="btn ghost small" onClick={() => onOpen(t.id)}>
-                    Ouvrir
+                  <button className="btn ghost small" onClick={() => onOpen(tr.id)}>
+                    {t('driver.trips.open')}
                   </button>
                 </td>
               </tr>
@@ -220,6 +204,7 @@ interface DriverTripDetailData {
 }
 
 function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; onBack: () => void; onChanged: () => void }) {
+  const { t } = useI18n();
   const [data, setData] = useState<DriverTripDetailData | null>(null);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
@@ -258,7 +243,7 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
       return;
     }
     if (!('geolocation' in navigator)) {
-      setMsg("La géolocalisation n'est pas supportée par ce navigateur.");
+      setMsg(t('driver.trips.geoUnsupported'));
       return;
     }
     setMsg('');
@@ -274,7 +259,7 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
           .then(() => setLastSent(new Date().toLocaleTimeString('fr-FR')))
           .catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
       },
-      (err) => setMsg(`Erreur de géolocalisation : ${err.message}`),
+      (err) => setMsg(t('driver.trips.geoError', { message: err.message })),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 20_000 },
     );
     watchIdRef.current = id;
@@ -311,7 +296,7 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
   };
 
   const cancel = async (): Promise<void> => {
-    if (!confirm('Annuler ce voyage ?')) return;
+    if (!confirm(t('driver.trips.confirmCancel'))) return;
     setBusy(true);
     setMsg('');
     try {
@@ -330,69 +315,79 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
   return (
     <div className="card">
       <button className="btn ghost small" onClick={onBack} style={{ marginBottom: 12 }}>
-        ← Retour
+        {t('driver.trips.back')}
       </button>
       <h2 style={{ marginTop: 0 }}>
         {trip.code} — {trip.trajectory_name}
       </h2>
       <p className="muted">
-        Départ {fmtDateTime(trip.departure_at)} · {trip.capacity} places · {trip.vehicle_matricule ?? 'véhicule non assigné'} ·
-        statut : <strong>{STATUS_LABEL[status] ?? status}</strong>
+        {t('driver.trips.departure')} {fmtDateTime(trip.departure_at)} · {t('driver.trips.seatsUnit', { n: trip.capacity })} ·{' '}
+        {trip.vehicle_matricule ?? t('driver.trips.vehicleUnassigned')} · {t('driver.trips.statusLabel')}{' '}
+        <strong>{t(`status.trip.${status}`)}</strong>
       </p>
 
-      {msg && <p className="alert error">{msg}</p>}
+      {msg && (
+        <p className="alert error" role="alert">
+          {msg}
+        </p>
+      )}
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
         {status === 'scheduled' && (
           <>
             <button className="btn primary" disabled={busy} onClick={() => void start()}>
-              Démarrer le voyage
+              {t('driver.trips.startTrip')}
             </button>
             <button className="btn danger" disabled={busy} onClick={() => void cancel()}>
-              Annuler le voyage
+              {t('driver.trips.cancelTrip')}
             </button>
           </>
         )}
         {status === 'in_progress' && (
           <>
             <button className={`btn ${sharing ? 'danger' : 'primary'}`} onClick={toggleSharing}>
-              {sharing ? 'Arrêter le partage de position' : 'Partager ma position (GPS)'}
+              {sharing ? t('driver.trips.stopSharing') : t('driver.trips.shareLocation')}
             </button>
             <button className="btn ghost" disabled={busy} onClick={() => void complete()}>
-              Terminer le voyage
+              {t('driver.trips.completeTrip')}
             </button>
           </>
         )}
       </div>
-      {sharing && <p className="muted">📡 Position partagée en direct{lastSent ? ` — dernier envoi : ${lastSent}` : '…'}</p>}
+      {sharing && (
+        <p className="muted">
+          {t('driver.trips.sharingLive')}
+          {lastSent ? t('driver.trips.lastSent', { time: lastSent }) : '…'}
+        </p>
+      )}
 
       {data && (
         <>
-          <h3>Arrêts</h3>
+          <h3>{t('driver.trips.stops')}</h3>
           <ol>
             {data.stops.map((s) => (
               <li key={s.id}>
                 {s.nom_fr}
-                {s.eta ? ` — ETA ${fmtDateTime(s.eta)}` : ''}
+                {s.eta ? `${t('driver.trips.etaPrefix')}${fmtDateTime(s.eta)}` : ''}
               </li>
             ))}
           </ol>
 
-          <h3>Passagers ({data.manifest.reduce((n, m) => n + m.seats, 0)} place(s) réservée(s))</h3>
+          <h3>{t('driver.trips.passengers', { seats: data.manifest.reduce((n, m) => n + m.seats, 0) })}</h3>
           {data.manifest.length === 0 ? (
-            <p className="muted">Aucune réservation pour ce voyage.</p>
+            <p className="muted">{t('driver.trips.noReservations')}</p>
           ) : (
             <div className="table-wrap">
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Client</th>
-                    <th>Téléphone</th>
-                    <th>Places</th>
-                    <th>Montée</th>
-                    <th>Descente</th>
-                    <th>Statut</th>
-                    <th>Contact</th>
+                    <th>{t('driver.trips.customer')}</th>
+                    <th>{t('driver.trips.phone')}</th>
+                    <th>{t('driver.trips.seats')}</th>
+                    <th>{t('driver.trips.pickup')}</th>
+                    <th>{t('driver.trips.dropoff')}</th>
+                    <th>{t('driver.trips.status')}</th>
+                    <th>{t('driver.trips.contact')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -403,7 +398,7 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
                       <td>{m.seats}</td>
                       <td>{m.pickup ?? '—'}</td>
                       <td>{m.dropoff ?? '—'}</td>
-                      <td>{m.status}</td>
+                      <td>{t(`status.reservation.${m.status}`)}</td>
                       <td style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         <ConversationAction apiBase={`/api/driver/reservations/${m.id}`} myRole="driver" />
                         <RevealContactAction apiBase={`/api/driver/reservations/${m.id}`} />
@@ -424,6 +419,7 @@ function DriverTripDetail({ trip, onBack, onChanged }: { trip: DriverTripRow; on
 
 /** Task 10.2 — waitlist queue for this specific trip, driver-visible (read-only). */
 function WaitlistPanel({ tripId }: { tripId: string }) {
+  const { t } = useI18n();
   const [entries, setEntries] = useState<WaitlistEntryRow[]>([]);
   useEffect(() => {
     api<{ entries: WaitlistEntryRow[] }>(`/api/driver/trips/${tripId}/waitlist`)
@@ -433,15 +429,15 @@ function WaitlistPanel({ tripId }: { tripId: string }) {
   if (entries.length === 0) return null;
   return (
     <>
-      <h3>Liste d'attente ({entries.length})</h3>
+      <h3>{t('driver.trips.waitlistTitle', { count: entries.length })}</h3>
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
-              <th>#</th>
-              <th>Client</th>
-              <th>Places</th>
-              <th>Statut</th>
+              <th>{t('driver.trips.position')}</th>
+              <th>{t('driver.trips.customer')}</th>
+              <th>{t('driver.trips.seats')}</th>
+              <th>{t('driver.trips.status')}</th>
             </tr>
           </thead>
           <tbody>
@@ -450,7 +446,7 @@ function WaitlistPanel({ tripId }: { tripId: string }) {
                 <td>{e.position}</td>
                 <td>{e.customer_name ?? '—'}</td>
                 <td>{e.seats}</td>
-                <td>{e.status}</td>
+                <td>{t(`status.waitlist.${e.status}`)}</td>
               </tr>
             ))}
           </tbody>
@@ -469,13 +465,6 @@ interface CurrentTripDetailData {
   stop_manifest: StopManifestEntry[];
 }
 
-const ETA_REASON_LABEL: Record<string, string> = {
-  not_in_progress: "Le voyage n'a pas encore démarré",
-  no_location: "Aucune position GPS reçue pour l'instant",
-  stale_location: 'Dernière position reçue trop ancienne',
-  no_reference_coordinates: 'Coordonnées de référence indisponibles pour cette wilaya',
-};
-
 /** Picks the trip to feature: the one actively in_progress, else the soonest upcoming scheduled one. */
 function pickCurrentTrip(trips: DriverTripRow[]): DriverTripRow | null {
   const inProgress = trips.find((t) => t.status === 'in_progress');
@@ -487,6 +476,7 @@ function pickCurrentTrip(trips: DriverTripRow[]): DriverTripRow | null {
 }
 
 function TrajetEnCoursTab() {
+  const { t } = useI18n();
   const [trip, setTrip] = useState<DriverTripRow | null>(null);
   const [data, setData] = useState<CurrentTripDetailData | null>(null);
   const [wilayas, setWilayas] = useState<Wilaya[]>([]);
@@ -497,12 +487,12 @@ function TrajetEnCoursTab() {
 
   const load = useCallback(async () => {
     try {
-      const [t, w] = await Promise.all([
+      const [tr, w] = await Promise.all([
         api<{ trips: DriverTripRow[] }>('/api/driver/trips'),
         api<{ wilayas: Wilaya[] }>('/api/registry/wilayas'),
       ]);
       setWilayas(w.wilayas);
-      const current = pickCurrentTrip(t.trips);
+      const current = pickCurrentTrip(tr.trips);
       setTrip(current);
       if (current) {
         const d = await api<CurrentTripDetailData>(`/api/driver/trips/${current.id}`);
@@ -577,9 +567,14 @@ function TrajetEnCoursTab() {
     return pins;
   }, [data, wilayaCoords]);
 
-  if (!loaded) return <p className="empty">Chargement…</p>;
-  if (msg) return <p className="alert error">{msg}</p>;
-  if (!trip) return <p className="empty">Aucun voyage en cours ni programmé pour le moment.</p>;
+  if (!loaded) return <p className="empty">{t('driver.loading')}</p>;
+  if (msg)
+    return (
+      <p className="alert error" role="alert">
+        {msg}
+      </p>
+    );
+  if (!trip) return <p className="empty">{t('driver.current.noCurrentTrip')}</p>;
 
   const seatsReserved = data?.manifest.reduce((n, m) => n + m.seats, 0) ?? 0;
 
@@ -587,53 +582,56 @@ function TrajetEnCoursTab() {
     <div>
       <div className="card" style={{ marginBottom: 16 }}>
         <h2 style={{ marginTop: 0 }}>
-          {trip.code} — {trip.trajectory_name}{' '}
-          <span className={`chip ${trip.status}`}>{STATUS_LABEL[trip.status] ?? trip.status}</span>
+          {trip.code} — {trip.trajectory_name} <span className={`chip ${trip.status}`}>{t(`status.trip.${trip.status}`)}</span>
         </h2>
         <p className="muted">
-          Départ {fmtDateTime(trip.departure_at)} · {trip.capacity} places · {trip.vehicle_matricule ?? 'véhicule non assigné'} ·{' '}
-          {seatsReserved} place(s) réservée(s)
+          {t('driver.trips.departure')} {fmtDateTime(trip.departure_at)} · {t('driver.trips.seatsUnit', { n: trip.capacity })} ·{' '}
+          {trip.vehicle_matricule ?? t('driver.trips.vehicleUnassigned')} · {t('driver.current.seatsReserved', { count: seatsReserved })}
         </p>
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h2 style={{ marginTop: 0 }}>Carte du trajet</h2>
+        <h2 style={{ marginTop: 0 }}>{t('driver.current.mapTitle')}</h2>
         <p className="muted small">
-          Ligne bleue : trajectoire. Points colorés : position des clients —{' '}
-          <span style={{ color: RESERVATION_STATUS_COLOR.pending }}>● en attente</span>{' '}
-          <span style={{ color: RESERVATION_STATUS_COLOR.confirmed }}>● confirmée</span>{' '}
-          <span style={{ color: RESERVATION_STATUS_COLOR.completed }}>● terminée</span>. Une position « (approx.) » est
-          centrée sur la wilaya de montée faute de point précis fourni par le client.
+          {t('driver.current.mapLegend')}{' '}
+          <span style={{ color: RESERVATION_STATUS_COLOR.pending }}>{t('driver.current.legendPending')}</span>{' '}
+          <span style={{ color: RESERVATION_STATUS_COLOR.confirmed }}>{t('driver.current.legendConfirmed')}</span>{' '}
+          <span style={{ color: RESERVATION_STATUS_COLOR.completed }}>{t('driver.current.legendCompleted')}</span>.{' '}
+          {t('driver.current.mapApproxNote')}
         </p>
         {mapStops.length === 0 ? (
-          <p className="empty">Coordonnées indisponibles pour cette trajectoire.</p>
+          <p className="empty">{t('driver.current.noMapCoords')}</p>
         ) : (
           <TripMap stops={mapStops} pins={mapPins} height={420} />
         )}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h2 style={{ marginTop: 0 }}>ETA en direct par arrêt</h2>
-        {etaMsg && <p className="alert error">{etaMsg}</p>}
+        <h2 style={{ marginTop: 0 }}>{t('driver.current.etaTitle')}</h2>
+        {etaMsg && (
+          <p className="alert error" role="alert">
+            {etaMsg}
+          </p>
+        )}
         {trip.status !== 'in_progress' ? (
-          <p className="muted small">{ETA_REASON_LABEL.not_in_progress}</p>
+          <p className="muted small">{t('driver.etaReason.not_in_progress')}</p>
         ) : (
           <>
             <p className="muted small">
               {eta?.position_age_seconds != null
-                ? `Position reçue il y a ${Math.round(eta.position_age_seconds / 60)} min.`
-                : 'En attente de position GPS…'}{' '}
+                ? t('driver.current.positionReceivedAgo', { minutes: Math.round(eta.position_age_seconds / 60) })
+                : t('driver.current.waitingForGps')}{' '}
               <button className="btn ghost small" onClick={() => void loadEta(trip.id)}>
-                Actualiser
+                {t('driver.current.refresh')}
               </button>
             </p>
             <div className="table-wrap">
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Arrêt</th>
-                    <th>Distance</th>
-                    <th>Arrivée estimée</th>
+                    <th>{t('driver.current.stop')}</th>
+                    <th>{t('driver.current.distance')}</th>
+                    <th>{t('driver.current.estimatedArrival')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -641,48 +639,47 @@ function TrajetEnCoursTab() {
                     <tr key={s.wpoint_id}>
                       <td>{s.wpoint_name}</td>
                       <td>{s.distance_km != null ? `${s.distance_km} km` : '—'}</td>
-                      <td>{s.eta ? fmtDateTime(s.eta) : <span className="muted small">{s.reason ? ETA_REASON_LABEL[s.reason] : '—'}</span>}</td>
+                      <td>
+                        {s.eta ? (
+                          fmtDateTime(s.eta)
+                        ) : (
+                          <span className="muted small">{s.reason ? t(`driver.etaReason.${s.reason}`) : '—'}</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <p className="muted small">
-              Estimation approximative (distance à vol d'oiseau depuis la dernière position connue, vitesse moyenne
-              supposée) — pas un calcul d'itinéraire routier précis.
-            </p>
+            <p className="muted small">{t('driver.current.etaApproxNote')}</p>
           </>
         )}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h2 style={{ marginTop: 0 }}>Manifeste par arrêt</h2>
+        <h2 style={{ marginTop: 0 }}>{t('driver.current.manifestTitle')}</h2>
         {!data || data.stop_manifest.length === 0 ? (
-          <p className="empty">Aucun arrêt pour ce voyage.</p>
+          <p className="empty">{t('driver.current.noStopsForTrip')}</p>
         ) : (
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Arrêt</th>
-                  <th>Montent</th>
-                  <th>Descendent</th>
-                  <th>Places +</th>
-                  <th>Places -</th>
-                  <th>À bord après</th>
-                  <th>Places restantes</th>
+                  <th>{t('driver.current.stop')}</th>
+                  <th>{t('driver.current.boarding')}</th>
+                  <th>{t('driver.current.alighting')}</th>
+                  <th>{t('driver.current.seatsIn')}</th>
+                  <th>{t('driver.current.seatsOut')}</th>
+                  <th>{t('driver.current.aboardAfter')}</th>
+                  <th>{t('driver.current.remainingSeats')}</th>
                 </tr>
               </thead>
               <tbody>
                 {data.stop_manifest.map((s) => (
                   <tr key={s.wpoint_id}>
                     <td>{s.wpoint_name}</td>
-                    <td>
-                      {s.boarding.length === 0 ? '—' : s.boarding.map((p) => `${p.customer_name} (${p.seats})`).join(', ')}
-                    </td>
-                    <td>
-                      {s.alighting.length === 0 ? '—' : s.alighting.map((p) => `${p.customer_name} (${p.seats})`).join(', ')}
-                    </td>
+                    <td>{s.boarding.length === 0 ? '—' : s.boarding.map((p) => `${p.customer_name} (${p.seats})`).join(', ')}</td>
+                    <td>{s.alighting.length === 0 ? '—' : s.alighting.map((p) => `${p.customer_name} (${p.seats})`).join(', ')}</td>
                     <td>{s.seats_entering}</td>
                     <td>{s.seats_leaving}</td>
                     <td>{s.seats_aboard_after}</td>
@@ -696,21 +693,21 @@ function TrajetEnCoursTab() {
       </div>
 
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>Réservations ({data?.manifest.length ?? 0})</h2>
+        <h2 style={{ marginTop: 0 }}>{t('driver.current.reservationsTitle', { count: data?.manifest.length ?? 0 })}</h2>
         {!data || data.manifest.length === 0 ? (
-          <p className="empty">Aucune réservation pour ce voyage.</p>
+          <p className="empty">{t('driver.trips.noReservations')}</p>
         ) : (
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Client</th>
-                  <th>Téléphone</th>
-                  <th>Places</th>
-                  <th>Montée</th>
-                  <th>Descente</th>
-                  <th>Position</th>
-                  <th>Statut</th>
+                  <th>{t('driver.trips.customer')}</th>
+                  <th>{t('driver.trips.phone')}</th>
+                  <th>{t('driver.trips.seats')}</th>
+                  <th>{t('driver.trips.pickup')}</th>
+                  <th>{t('driver.trips.dropoff')}</th>
+                  <th>{t('driver.current.positionCol')}</th>
+                  <th>{t('driver.trips.status')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -721,9 +718,9 @@ function TrajetEnCoursTab() {
                     <td>{m.seats}</td>
                     <td>{m.pickup ?? '—'}</td>
                     <td>{m.dropoff ?? '—'}</td>
-                    <td>{m.pickup_lat != null ? 'Précise (carte)' : 'Approximative (wilaya)'}</td>
+                    <td>{m.pickup_lat != null ? t('driver.current.precise') : t('driver.current.approximate')}</td>
                     <td>
-                      <span className={`chip ${m.status}`}>{m.status}</span>
+                      <span className={`chip ${m.status}`}>{t(`status.reservation.${m.status}`)}</span>
                     </td>
                   </tr>
                 ))}
@@ -739,6 +736,7 @@ function TrajetEnCoursTab() {
 // ── Réservations ─────────────────────────────────────────────────────────────
 
 function ReservationsTab() {
+  const { t } = useI18n();
   const [rows, setRows] = useState<DriverReservationRow[]>([]);
   const [status, setStatus] = useState<string>('pending');
   const [msg, setMsg] = useState('');
@@ -763,7 +761,7 @@ function ReservationsTab() {
     setMsg('');
     try {
       await api(`/api/driver/reservations/${id}/${action}`, { method: 'POST' });
-      setMsg(action === 'confirm' ? '✔ Réservation confirmée' : '✔ Réservation refusée');
+      setMsg(action === 'confirm' ? t('driver.reservations.confirmed') : t('driver.reservations.declined'));
       await load(status);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -775,35 +773,39 @@ function ReservationsTab() {
   return (
     <div>
       <div className="form-inline select-row">
-        <label>
-          Filtrer
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="pending">En attente</option>
-            <option value="confirmed">Confirmées</option>
-            <option value="completed">Terminées</option>
-            <option value="cancelled">Refusées / annulées</option>
-            <option value="">Toutes</option>
+        <label htmlFor="driver-reservations-filter">
+          {t('driver.reservations.filter')}
+          <select id="driver-reservations-filter" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="pending">{t('driver.reservations.statusPending')}</option>
+            <option value="confirmed">{t('driver.reservations.statusConfirmed')}</option>
+            <option value="completed">{t('driver.reservations.statusCompleted')}</option>
+            <option value="cancelled">{t('driver.reservations.statusCancelled')}</option>
+            <option value="">{t('driver.reservations.statusAll')}</option>
           </select>
         </label>
       </div>
-      {msg && <p className="alert info">{msg}</p>}
+      {msg && (
+        <p className="alert info" role="status">
+          {msg}
+        </p>
+      )}
       {rows.length === 0 ? (
-        <p className="empty">Aucune réservation ici.</p>
+        <p className="empty">{t('driver.reservations.none')}</p>
       ) : (
         <div className="table-wrap">
           <table className="table">
             <thead>
               <tr>
-                <th>Code</th>
-                <th>Voyage</th>
-                <th>Départ</th>
-                <th>Client</th>
-                <th>Téléphone</th>
-                <th>Places</th>
-                <th>Montée → Descente</th>
-                <th>Prix</th>
-                <th>Statut</th>
-                <th>Actions</th>
+                <th>{t('driver.reservations.code')}</th>
+                <th>{t('driver.reservations.trip')}</th>
+                <th>{t('driver.reservations.departure')}</th>
+                <th>{t('driver.reservations.customer')}</th>
+                <th>{t('driver.reservations.phone')}</th>
+                <th>{t('driver.reservations.seats')}</th>
+                <th>{t('driver.reservations.pickupDropoff')}</th>
+                <th>{t('driver.reservations.price')}</th>
+                <th>{t('driver.reservations.status')}</th>
+                <th>{t('driver.reservations.actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -824,16 +826,16 @@ function ReservationsTab() {
                     {r.total_price} {r.currency}
                   </td>
                   <td>
-                    <span className={`chip ${r.status}`}>{r.status}</span>
+                    <span className={`chip ${r.status}`}>{t(`status.reservation.${r.status}`)}</span>
                   </td>
                   <td className="actions">
                     {r.status === 'pending' && (
                       <>
                         <button className="btn primary small" disabled={busyId === r.id} onClick={() => void act(r.id, 'confirm')}>
-                          Confirmer
+                          {t('driver.reservations.confirm')}
                         </button>
                         <button className="btn danger small" disabled={busyId === r.id} onClick={() => void act(r.id, 'decline')}>
-                          Refuser
+                          {t('driver.reservations.decline')}
                         </button>
                       </>
                     )}
@@ -850,6 +852,7 @@ function ReservationsTab() {
 }
 
 function RateCustomerAction({ reservationId }: { reservationId: string }) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<RatingStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [stars, setStars] = useState(5);
@@ -878,26 +881,35 @@ function RateCustomerAction({ reservationId }: { reservationId: string }) {
     }
   };
 
-  if (status?.driver_to_customer) return <span className="chip confirmed">✔ client noté</span>;
+  if (status?.driver_to_customer) return <span className="chip confirmed">{t('driver.reservations.customerRated')}</span>;
 
   return (
     <span>
       <button className="btn ghost small" onClick={() => setOpen(!open)}>
-        Noter le client
+        {t('driver.reservations.rateCustomer')}
       </button>
       {open && (
         <form className="form-inline" style={{ marginTop: 6 }} onSubmit={(e) => void submit(e)}>
-          {msg && <span className="alert error small">{msg}</span>}
-          <select value={stars} onChange={(e) => setStars(Number(e.target.value))}>
+          {msg && (
+            <span className="alert error small" role="alert">
+              {msg}
+            </span>
+          )}
+          <select value={stars} onChange={(e) => setStars(Number(e.target.value))} aria-label={t('driver.reservations.rateCustomer')}>
             {[5, 4, 3, 2, 1].map((n) => (
               <option key={n} value={n}>
                 {'★'.repeat(n)}
               </option>
             ))}
           </select>
-          <input placeholder="Avis (optionnel)" value={review} onChange={(e) => setReview(e.target.value)} />
+          <input
+            placeholder={t('driver.reservations.reviewPlaceholder')}
+            aria-label={t('driver.reservations.reviewPlaceholder')}
+            value={review}
+            onChange={(e) => setReview(e.target.value)}
+          />
           <button className="btn primary small" disabled={busy}>
-            Envoyer
+            {t('driver.reservations.send')}
           </button>
         </form>
       )}
@@ -908,6 +920,7 @@ function RateCustomerAction({ reservationId }: { reservationId: string }) {
 // ── Trajectoires ─────────────────────────────────────────────────────────────
 
 function TrajectoiresTab() {
+  const { t } = useI18n();
   const [rows, setRows] = useState<TrajectoryRow[]>([]);
   const [wilayas, setWilayas] = useState<Wilaya[]>([]);
   const [selected, setSelected] = useState<string>('');
@@ -919,11 +932,11 @@ function TrajectoiresTab() {
   const [lastTripId, setLastTripId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [t, w] = await Promise.all([
+    const [tr, w] = await Promise.all([
       api<{ trajectories: TrajectoryRow[] }>('/api/driver/trajectories'),
       api<{ wilayas: Wilaya[] }>('/api/registry/wilayas'),
     ]);
-    setRows(t.trajectories);
+    setRows(tr.trajectories);
     setWilayas(w.wilayas);
   }, []);
 
@@ -941,7 +954,7 @@ function TrajectoiresTab() {
     try {
       const r = await api<{ id: string }>('/api/driver/trajectories', { method: 'POST', body: { name } });
       setName('');
-      setMsg('✔ Trajectoire créée');
+      setMsg(t('driver.trajectories.trajectoryCreated'));
       await load();
       setSelected(r.id);
     } catch (err) {
@@ -957,7 +970,7 @@ function TrajectoiresTab() {
         method: 'POST',
         body: { from_wpoint_id: price.from, to_wpoint_id: price.to, price: Number(price.amount) },
       });
-      setMsg('✔ Tarif par défaut enregistré');
+      setMsg(t('driver.trajectories.defaultPriceSaved'));
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     }
@@ -977,7 +990,7 @@ function TrajectoiresTab() {
         },
       });
       setLastTripId(r.id);
-      setMsg('✔ Voyage créé (brouillon). Ajoutez les arrêts/prix puis publiez-le depuis « Mes voyages ».');
+      setMsg(t('driver.trajectories.tripCreatedDraft'));
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     }
@@ -990,7 +1003,7 @@ function TrajectoiresTab() {
       await api(`/api/driver/trips/${lastTripId}/stops`, { method: 'POST', body: {} });
       await api(`/api/driver/trips/${lastTripId}/prices/populate`, { method: 'POST', body: {} });
       await api(`/api/driver/trips/${lastTripId}/publish`, { method: 'POST', body: {} });
-      setMsg('✔ Voyage publié — consultez-le dans « Mes voyages »');
+      setMsg(t('driver.trajectories.tripPublished'));
       setLastTripId(null);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
@@ -999,23 +1012,34 @@ function TrajectoiresTab() {
 
   return (
     <div>
-      {msg && <p className="alert info">{msg}</p>}
+      {msg && (
+        <p className="alert info" role="status">
+          {msg}
+        </p>
+      )}
       <form className="card form-inline" onSubmit={(e) => void create(e)}>
-        <label>
-          Nouvelle trajectoire
-          <input required minLength={2} placeholder="Alger — Blida" value={name} onChange={(e) => setName(e.target.value)} />
+        <label htmlFor="driver-new-trajectory">
+          {t('driver.trajectories.newTrajectory')}
+          <input
+            id="driver-new-trajectory"
+            required
+            minLength={2}
+            placeholder={t('driver.trajectories.namePlaceholder')}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
         </label>
-        <button className="btn primary">Créer</button>
+        <button className="btn primary">{t('driver.trajectories.create')}</button>
       </form>
 
       <div className="form-inline select-row">
-        <label>
-          Gérer
-          <select value={selected} onChange={(e) => setSelected(e.target.value)}>
-            <option value="">— Choisir une trajectoire —</option>
-            {rows.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name} ({t.nb_wpoints} arrêts)
+        <label htmlFor="driver-trajectory-select">
+          {t('driver.trajectories.manage')}
+          <select id="driver-trajectory-select" value={selected} onChange={(e) => setSelected(e.target.value)}>
+            <option value="">{t('driver.trajectories.pickTrajectory')}</option>
+            {rows.map((tr) => (
+              <option key={tr.id} value={tr.id}>
+                {tr.name} ({t('driver.trajectories.stopsCount', { n: tr.nb_wpoints })})
               </option>
             ))}
           </select>
@@ -1025,17 +1049,17 @@ function TrajectoiresTab() {
       {selected && (
         <div className="detail-grid">
           <div className="card">
-            <h2>Arrêts</h2>
+            <h2>{t('driver.trajectories.stopsTitle')}</h2>
             <WpointManager basePath="/api/driver" trajectoryId={selected} wilayas={wilayas} onWpointsChange={setWpoints} />
           </div>
 
           <div className="card">
-            <h2>Tarif par défaut</h2>
+            <h2>{t('driver.trajectories.defaultPriceTitle')}</h2>
             <form className="form-grid" onSubmit={(e) => void setDefaultPrice(e)}>
-              <label>
-                De
-                <select required value={price.from} onChange={(e) => setPrice({ ...price, from: e.target.value })}>
-                  <option value="">—</option>
+              <label htmlFor="driver-price-from">
+                {t('driver.trajectories.from')}
+                <select id="driver-price-from" required value={price.from} onChange={(e) => setPrice({ ...price, from: e.target.value })}>
+                  <option value="">{t('driver.trajectories.pickOption')}</option>
                   {wpoints.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.nom_fr}
@@ -1043,10 +1067,10 @@ function TrajectoiresTab() {
                   ))}
                 </select>
               </label>
-              <label>
-                À
-                <select required value={price.to} onChange={(e) => setPrice({ ...price, to: e.target.value })}>
-                  <option value="">—</option>
+              <label htmlFor="driver-price-to">
+                {t('driver.trajectories.to')}
+                <select id="driver-price-to" required value={price.to} onChange={(e) => setPrice({ ...price, to: e.target.value })}>
+                  <option value="">{t('driver.trajectories.pickOption')}</option>
                   {wpoints.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.nom_fr}
@@ -1054,29 +1078,38 @@ function TrajectoiresTab() {
                   ))}
                 </select>
               </label>
-              <label>
-                Prix (DZD)
-                <input type="number" min={0} required value={price.amount} onChange={(e) => setPrice({ ...price, amount: e.target.value })} />
+              <label htmlFor="driver-price-amount">
+                {t('driver.trajectories.price')}
+                <input
+                  id="driver-price-amount"
+                  type="number"
+                  min={0}
+                  required
+                  value={price.amount}
+                  onChange={(e) => setPrice({ ...price, amount: e.target.value })}
+                />
               </label>
-              <button className="btn primary">Enregistrer</button>
+              <button className="btn primary">{t('driver.trajectories.save')}</button>
             </form>
           </div>
 
           <div className="card">
-            <h2>Créer un voyage sur cette trajectoire</h2>
+            <h2>{t('driver.trajectories.createTripTitle')}</h2>
             <form className="form-grid" onSubmit={(e) => void createTrip(e)}>
-              <label>
-                Départ
+              <label htmlFor="driver-trip-departure">
+                {t('driver.trajectories.departure')}
                 <input
+                  id="driver-trip-departure"
                   type="datetime-local"
                   required
                   value={tripForm.departure_at}
                   onChange={(e) => setTripForm({ ...tripForm, departure_at: e.target.value })}
                 />
               </label>
-              <label>
-                Capacité
+              <label htmlFor="driver-trip-capacity">
+                {t('driver.trajectories.capacity')}
                 <input
+                  id="driver-trip-capacity"
                   type="number"
                   min={1}
                   required
@@ -1084,9 +1117,10 @@ function TrajectoiresTab() {
                   onChange={(e) => setTripForm({ ...tripForm, capacity: e.target.value })}
                 />
               </label>
-              <label>
-                Prix/place (secours)
+              <label htmlFor="driver-trip-seat-price">
+                {t('driver.trajectories.fallbackPrice')}
                 <input
+                  id="driver-trip-seat-price"
                   type="number"
                   min={0}
                   step="0.01"
@@ -1094,13 +1128,13 @@ function TrajectoiresTab() {
                   onChange={(e) => setTripForm({ ...tripForm, seat_price: e.target.value })}
                 />
               </label>
-              <button className="btn primary">Créer le voyage</button>
+              <button className="btn primary">{t('driver.trajectories.createTrip')}</button>
             </form>
             {lastTripId && (
               <p className="muted" style={{ marginTop: 12 }}>
-                Voyage créé.{' '}
+                {t('driver.trajectories.tripCreated')}{' '}
                 <button className="btn ghost small" onClick={() => void populateAndPublish()}>
-                  Ajouter les arrêts + tarifs par défaut et publier maintenant
+                  {t('driver.trajectories.populateAndPublish')}
                 </button>
               </p>
             )}
@@ -1114,6 +1148,7 @@ function TrajectoiresTab() {
 // ── Paramètres ───────────────────────────────────────────────────────────────
 
 function ParametresTab() {
+  const { t } = useI18n();
   const [profile, setProfile] = useState<DriverProfileRow | null>(null);
   const [vehicle, setVehicle] = useState<VehicleRow | null>(null);
   const [profileForm, setProfileForm] = useState({ full_name: '', phone: '', email: '', address: '' });
@@ -1172,7 +1207,7 @@ function ParametresTab() {
           address: profileForm.address || null,
         },
       });
-      setMsg('✔ Profil mis à jour');
+      setMsg(t('driver.settings.profileUpdated'));
       await load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
@@ -1194,7 +1229,7 @@ function ParametresTab() {
       };
       if (vehicle) {
         await api('/api/driver/vehicle', { method: 'PATCH', body });
-        setMsg('✔ Véhicule mis à jour');
+        setMsg(t('driver.settings.vehicleUpdated'));
       } else {
         // Accessibility fields aren't accepted by the creation endpoint (only
         // matricule/seats/make/model) — immediately follow up with a PATCH so
@@ -1204,7 +1239,7 @@ function ParametresTab() {
           method: 'PATCH',
           body: { wheelchair_accessible: body.wheelchair_accessible, pets_allowed: body.pets_allowed, luggage_capacity: body.luggage_capacity },
         });
-        setMsg('✔ Véhicule enregistré');
+        setMsg(t('driver.settings.vehicleSaved'));
       }
       await load();
     } catch (err) {
@@ -1212,83 +1247,110 @@ function ParametresTab() {
     }
   };
 
-  if (!profile) return msg ? <p className="alert error">{msg}</p> : <p className="empty">Chargement…</p>;
+  if (!profile)
+    return msg ? (
+      <p className="alert error" role="alert">
+        {msg}
+      </p>
+    ) : (
+      <p className="empty">{t('driver.loading')}</p>
+    );
 
   return (
     <div className="detail-grid">
-      {msg && <p className="alert info" style={{ gridColumn: '1 / -1' }}>{msg}</p>}
+      {msg && (
+        <p className="alert info" style={{ gridColumn: '1 / -1' }} role="status">
+          {msg}
+        </p>
+      )}
 
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>Mon profil</h2>
-        <p className="muted small">
-          Identité officielle (NIN {profile.nin}) non modifiable ici — contactez l'administrateur pour toute correction.
-        </p>
+        <h2 style={{ marginTop: 0 }}>{t('driver.settings.myProfile')}</h2>
+        <p className="muted small">{t('driver.settings.ninNote', { nin: profile.nin })}</p>
         <p>
           {profile.rating_count > 0 ? (
-            <>
-              ★ {Number(profile.rating_avg).toFixed(1)} / 5 ({profile.rating_count} évaluation{profile.rating_count > 1 ? 's' : ''})
-            </>
+            t('driver.settings.ratingSummary', {
+              avg: Number(profile.rating_avg).toFixed(1),
+              count: profile.rating_count,
+              s: profile.rating_count > 1 ? 's' : '',
+            })
           ) : (
-            <span className="muted">Aucune évaluation reçue pour le moment.</span>
+            <span className="muted">{t('driver.settings.noRatings')}</span>
           )}
           {profile.trust_badge && (
             <span className="chip confirmed" style={{ marginLeft: 8 }}>
-              ✔ Chauffeur de confiance
+              {t('driver.settings.trustBadge')}
             </span>
           )}
         </p>
         {profile.no_show_count > 0 && (
-          <p className={`alert ${profile.flagged_at ? 'error' : 'info'}`}>
-            ⚠ {profile.no_show_count} absence(s) enregistrée(s){profile.flagged_at ? ' — compte signalé à l\u2019administration' : ''}.
+          <p className={`alert ${profile.flagged_at ? 'error' : 'info'}`} role={profile.flagged_at ? 'alert' : 'status'}>
+            {t('driver.settings.noShowWarning', {
+              count: profile.no_show_count,
+              flagged: profile.flagged_at ? t('driver.settings.flaggedSuffix') : '',
+            })}
           </p>
         )}
         <form className="form-grid" onSubmit={(e) => void saveProfile(e)}>
-          <label>
-            Nom complet
+          <label htmlFor="driver-profile-name">
+            {t('driver.settings.fullName')}
             <input
+              id="driver-profile-name"
               required
               minLength={2}
               value={profileForm.full_name}
               onChange={(e) => setProfileForm({ ...profileForm, full_name: e.target.value })}
             />
           </label>
-          <label>
-            Téléphone
-            <input required value={profileForm.phone} onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })} />
+          <label htmlFor="driver-profile-phone">
+            {t('driver.settings.phone')}
+            <input
+              id="driver-profile-phone"
+              required
+              value={profileForm.phone}
+              onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
+            />
           </label>
-          <label>
-            Email
-            <input type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} />
+          <label htmlFor="driver-profile-email">
+            {t('driver.settings.email')}
+            <input
+              id="driver-profile-email"
+              type="email"
+              value={profileForm.email}
+              onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })}
+            />
           </label>
-          <label>
-            Adresse
-            <input value={profileForm.address} onChange={(e) => setProfileForm({ ...profileForm, address: e.target.value })} />
+          <label htmlFor="driver-profile-address">
+            {t('driver.settings.address')}
+            <input
+              id="driver-profile-address"
+              value={profileForm.address}
+              onChange={(e) => setProfileForm({ ...profileForm, address: e.target.value })}
+            />
           </label>
-          <button className="btn primary">Enregistrer</button>
+          <button className="btn primary">{t('driver.settings.save')}</button>
         </form>
       </div>
 
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>Mon véhicule</h2>
-        {!vehicle && <p className="muted small">Vous n'avez pas encore de véhicule enregistré — créez-le ci-dessous.</p>}
-        {vehicle && (
-          <p className="muted small">
-            Le contrôle technique (requis pour publier un voyage) se gère dans l'onglet « Contrôle technique ».
-          </p>
-        )}
+        <h2 style={{ marginTop: 0 }}>{t('driver.settings.myVehicle')}</h2>
+        {!vehicle && <p className="muted small">{t('driver.settings.noVehicle')}</p>}
+        {vehicle && <p className="muted small">{t('driver.settings.inspectionHint')}</p>}
         <form className="form-grid" onSubmit={(e) => void saveVehicle(e)}>
-          <label>
-            Matricule
+          <label htmlFor="driver-vehicle-matricule">
+            {t('driver.settings.matricule')}
             <input
+              id="driver-vehicle-matricule"
               required
               minLength={3}
               value={vehicleForm.matricule}
               onChange={(e) => setVehicleForm({ ...vehicleForm, matricule: e.target.value })}
             />
           </label>
-          <label>
-            Places
+          <label htmlFor="driver-vehicle-seats">
+            {t('driver.settings.seats')}
             <input
+              id="driver-vehicle-seats"
               type="number"
               min={1}
               required
@@ -1296,17 +1358,18 @@ function ParametresTab() {
               onChange={(e) => setVehicleForm({ ...vehicleForm, seats: e.target.value })}
             />
           </label>
-          <label>
-            Marque
-            <input value={vehicleForm.make} onChange={(e) => setVehicleForm({ ...vehicleForm, make: e.target.value })} />
+          <label htmlFor="driver-vehicle-make">
+            {t('driver.settings.make')}
+            <input id="driver-vehicle-make" value={vehicleForm.make} onChange={(e) => setVehicleForm({ ...vehicleForm, make: e.target.value })} />
           </label>
-          <label>
-            Modèle
-            <input value={vehicleForm.model} onChange={(e) => setVehicleForm({ ...vehicleForm, model: e.target.value })} />
+          <label htmlFor="driver-vehicle-model">
+            {t('driver.settings.model')}
+            <input id="driver-vehicle-model" value={vehicleForm.model} onChange={(e) => setVehicleForm({ ...vehicleForm, model: e.target.value })} />
           </label>
-          <label>
-            Capacité bagages (optionnel)
+          <label htmlFor="driver-vehicle-luggage">
+            {t('driver.settings.luggageCapacity')}
             <input
+              id="driver-vehicle-luggage"
               type="number"
               min={0}
               value={vehicleForm.luggage_capacity}
@@ -1319,7 +1382,7 @@ function ParametresTab() {
               checked={vehicleForm.wheelchair_accessible}
               onChange={(e) => setVehicleForm({ ...vehicleForm, wheelchair_accessible: e.target.checked })}
             />
-            Accessible en fauteuil roulant
+            {t('driver.settings.wheelchairAccessible')}
           </label>
           <label style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             <input
@@ -1327,9 +1390,9 @@ function ParametresTab() {
               checked={vehicleForm.pets_allowed}
               onChange={(e) => setVehicleForm({ ...vehicleForm, pets_allowed: e.target.checked })}
             />
-            Animaux acceptés
+            {t('driver.settings.petsAllowed')}
           </label>
-          <button className="btn primary">{vehicle ? 'Mettre à jour' : 'Enregistrer'}</button>
+          <button className="btn primary">{vehicle ? t('driver.settings.update') : t('driver.settings.save')}</button>
         </form>
       </div>
     </div>
@@ -1339,6 +1402,7 @@ function ParametresTab() {
 // ── Contrôle technique (Task 6.2) ────────────────────────────────────────────
 
 function VehicleInspectionsTab() {
+  const { t } = useI18n();
   const [inspections, setInspections] = useState<VehicleInspectionRow[]>([]);
   const [eligible, setEligible] = useState(false);
   const [form, setForm] = useState({ inspection_date: '', expiry_date: '', maintenance_status: 'ok' as MaintenanceStatus, notes: '' });
@@ -1377,7 +1441,7 @@ function VehicleInspectionsTab() {
       }
       setForm({ inspection_date: '', expiry_date: '', maintenance_status: 'ok', notes: '' });
       setFile(null);
-      setMsg('✔ Contrôle technique envoyé pour vérification');
+      setMsg(t('driver.inspections.sent'));
       await load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
@@ -1388,56 +1452,73 @@ function VehicleInspectionsTab() {
 
   return (
     <div>
-      <p className="muted">
-        Un voyage ne peut être publié que si votre véhicule a un contrôle technique approuvé par l'administration, non
-        expiré, et non marqué « hors service ».
-      </p>
+      <p className="muted">{t('driver.inspections.eligibilityNote')}</p>
       <p>
         {eligible ? (
-          <span className="chip confirmed">✔ Véhicule éligible à la publication de voyages</span>
+          <span className="chip confirmed">{t('driver.inspections.eligible')}</span>
         ) : (
-          <span className="chip cancelled">⚠ Véhicule non éligible — soumettez un contrôle technique valide</span>
+          <span className="chip cancelled">{t('driver.inspections.notEligible')}</span>
         )}
       </p>
-      {msg && <p className="alert info">{msg}</p>}
+      {msg && (
+        <p className="alert info" role="status">
+          {msg}
+        </p>
+      )}
       <form className="card form-grid" onSubmit={(e) => void submit(e)}>
-        <label>
-          Date de contrôle
-          <input type="date" required value={form.inspection_date} onChange={(e) => setForm({ ...form, inspection_date: e.target.value })} />
+        <label htmlFor="inspection-date">
+          {t('driver.inspections.inspectionDate')}
+          <input
+            id="inspection-date"
+            type="date"
+            required
+            value={form.inspection_date}
+            onChange={(e) => setForm({ ...form, inspection_date: e.target.value })}
+          />
         </label>
-        <label>
-          Date d'expiration
-          <input type="date" required value={form.expiry_date} onChange={(e) => setForm({ ...form, expiry_date: e.target.value })} />
+        <label htmlFor="inspection-expiry">
+          {t('driver.inspections.expiryDate')}
+          <input
+            id="inspection-expiry"
+            type="date"
+            required
+            value={form.expiry_date}
+            onChange={(e) => setForm({ ...form, expiry_date: e.target.value })}
+          />
         </label>
-        <label>
-          État d'entretien
-          <select value={form.maintenance_status} onChange={(e) => setForm({ ...form, maintenance_status: e.target.value as MaintenanceStatus })}>
-            <option value="ok">OK</option>
-            <option value="needs_service">Entretien requis</option>
-            <option value="out_of_service">Hors service</option>
+        <label htmlFor="inspection-maintenance">
+          {t('driver.inspections.maintenanceStatus')}
+          <select
+            id="inspection-maintenance"
+            value={form.maintenance_status}
+            onChange={(e) => setForm({ ...form, maintenance_status: e.target.value as MaintenanceStatus })}
+          >
+            <option value="ok">{t('driver.maintenance.ok')}</option>
+            <option value="needs_service">{t('driver.maintenance.needs_service')}</option>
+            <option value="out_of_service">{t('driver.maintenance.out_of_service')}</option>
           </select>
         </label>
-        <label>
-          Notes (optionnel)
-          <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+        <label htmlFor="inspection-notes">
+          {t('driver.inspections.notes')}
+          <input id="inspection-notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
         </label>
-        <label>
-          Fiche de contrôle (optionnel, PDF/image)
-          <input type="file" accept=".pdf,image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        <label htmlFor="inspection-file">
+          {t('driver.inspections.fileLabel')}
+          <input id="inspection-file" type="file" accept=".pdf,image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
         </label>
         <button className="btn primary" disabled={busy}>
-          Envoyer
+          {t('driver.inspections.send')}
         </button>
       </form>
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
-              <th>Contrôle</th>
-              <th>Expiration</th>
-              <th>Entretien</th>
-              <th>Fichier</th>
-              <th>Statut</th>
+              <th>{t('driver.inspections.inspection')}</th>
+              <th>{t('driver.inspections.expiry')}</th>
+              <th>{t('driver.inspections.maintenance')}</th>
+              <th>{t('driver.inspections.file')}</th>
+              <th>{t('driver.inspections.status')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1445,11 +1526,11 @@ function VehicleInspectionsTab() {
               <tr key={i.id}>
                 <td>{i.inspection_date}</td>
                 <td>{i.expiry_date}</td>
-                <td>{MAINTENANCE_LABEL[i.maintenance_status]}</td>
+                <td>{t(`driver.maintenance.${i.maintenance_status}`)}</td>
                 <td>
                   {i.file_path ? (
                     <a href={fileUrl(`/api/driver/vehicle/inspections/${i.id}/file`)} target="_blank" rel="noreferrer">
-                      voir
+                      {t('driver.inspections.viewFile')}
                     </a>
                   ) : (
                     '—'
@@ -1457,7 +1538,7 @@ function VehicleInspectionsTab() {
                 </td>
                 <td>
                   <span className={`chip ${i.approval_state === 'approved' ? 'confirmed' : i.approval_state === 'rejected' ? 'cancelled' : 'pending'}`}>
-                    {i.approval_state}
+                    {t(`status.kyc.${i.approval_state}`)}
                   </span>
                   {i.approval_state === 'rejected' && i.rejection_reason && <div className="muted small">{i.rejection_reason}</div>}
                 </td>
@@ -1466,7 +1547,7 @@ function VehicleInspectionsTab() {
             {inspections.length === 0 && (
               <tr>
                 <td colSpan={5} className="empty">
-                  Aucun contrôle technique soumis.
+                  {t('driver.inspections.none')}
                 </td>
               </tr>
             )}
@@ -1480,6 +1561,7 @@ function VehicleInspectionsTab() {
 // ── Mes évaluations (Task 6.3) ───────────────────────────────────────────────
 
 function DriverRatingsTab() {
+  const { t } = useI18n();
   const [rows, setRows] = useState<RatingRow[]>([]);
   const [msg, setMsg] = useState('');
 
@@ -1491,16 +1573,20 @@ function DriverRatingsTab() {
 
   return (
     <div>
-      <p className="muted">Évaluations laissées par vos clients après un trajet terminé.</p>
-      {msg && <p className="alert info">{msg}</p>}
+      <p className="muted">{t('driver.ratings.intro')}</p>
+      {msg && (
+        <p className="alert info" role="status">
+          {msg}
+        </p>
+      )}
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
-              <th>Réservation</th>
-              <th>Client</th>
-              <th>Note</th>
-              <th>Avis</th>
+              <th>{t('driver.ratings.reservation')}</th>
+              <th>{t('driver.ratings.customer')}</th>
+              <th>{t('driver.ratings.rating')}</th>
+              <th>{t('driver.ratings.review')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1515,7 +1601,7 @@ function DriverRatingsTab() {
             {rows.length === 0 && (
               <tr>
                 <td colSpan={4} className="empty">
-                  Aucune évaluation reçue pour le moment.
+                  {t('driver.ratings.none')}
                 </td>
               </tr>
             )}
@@ -1528,12 +1614,12 @@ function DriverRatingsTab() {
 
 // ── Mes revenus (Task 8.2 earnings dashboard, 8.3 payout batches) ────────────
 
-const PAYOUT_ENTRY_LABEL: Record<PayoutLedgerRow['entry_type'], string> = {
-  earning: 'Gain (course terminée)',
-  refund_adjustment: 'Ajustement (remboursement)',
-};
-
 function EarningsTab() {
+  const { t } = useI18n();
+  const PAYOUT_ENTRY_LABEL: Record<PayoutLedgerRow['entry_type'], string> = {
+    earning: t('driver.earnings.earningEntry'),
+    refund_adjustment: t('driver.earnings.refundAdjustmentEntry'),
+  };
   const [summary, setSummary] = useState<DriverEarningsSummary | null>(null);
   const [ledger, setLedger] = useState<PayoutLedgerRow[]>([]);
   const [batches, setBatches] = useState<PayoutBatchRow[]>([]);
@@ -1566,27 +1652,31 @@ function EarningsTab() {
 
   return (
     <div>
-      <p className="muted">Revenus nets de la commission de la plateforme, calculés depuis le registre de paiement.</p>
-      {msg && <p className="alert info">{msg}</p>}
+      <p className="muted">{t('driver.earnings.intro')}</p>
+      {msg && (
+        <p className="alert info" role="status">
+          {msg}
+        </p>
+      )}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-        {card('Revenu brut', summary?.gross_revenue)}
-        {card('Commission plateforme', summary?.commission, false)}
-        {card('Remboursements', summary?.refunds, false)}
-        {card('Revenu net', summary?.net_earnings)}
-        {card('En attente de versement', summary?.pending_payout)}
-        {card('Déjà versé', summary?.paid_out)}
+        {card(t('driver.earnings.grossRevenue'), summary?.gross_revenue)}
+        {card(t('driver.earnings.commission'), summary?.commission, false)}
+        {card(t('driver.earnings.refunds'), summary?.refunds, false)}
+        {card(t('driver.earnings.netEarnings'), summary?.net_earnings)}
+        {card(t('driver.earnings.pendingPayout'), summary?.pending_payout)}
+        {card(t('driver.earnings.paidOut'), summary?.paid_out)}
       </div>
 
-      <h3>Versements (batches)</h3>
+      <h3>{t('driver.earnings.batchesTitle')}</h3>
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
-              <th>Période</th>
-              <th>Montant</th>
-              <th>Statut</th>
-              <th>Référence</th>
-              <th>Payé le</th>
+              <th>{t('driver.earnings.period')}</th>
+              <th>{t('driver.earnings.amount')}</th>
+              <th>{t('driver.earnings.status')}</th>
+              <th>{t('driver.earnings.reference')}</th>
+              <th>{t('driver.earnings.paidAt')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1606,7 +1696,7 @@ function EarningsTab() {
             {batches.length === 0 && (
               <tr>
                 <td colSpan={5} className="empty">
-                  Aucun versement pour le moment.
+                  {t('driver.earnings.noBatches')}
                 </td>
               </tr>
             )}
@@ -1614,18 +1704,18 @@ function EarningsTab() {
         </table>
       </div>
 
-      <h3>Registre détaillé</h3>
+      <h3>{t('driver.earnings.ledgerTitle')}</h3>
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
-              <th>Type</th>
-              <th>Voyage</th>
-              <th>Réservation</th>
-              <th>Brut</th>
-              <th>Commission</th>
-              <th>Net</th>
-              <th>Date</th>
+              <th>{t('driver.earnings.type')}</th>
+              <th>{t('driver.earnings.trip')}</th>
+              <th>{t('driver.earnings.reservation')}</th>
+              <th>{t('driver.earnings.gross')}</th>
+              <th>{t('driver.earnings.commission')}</th>
+              <th>{t('driver.earnings.net')}</th>
+              <th>{t('driver.earnings.date')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1638,16 +1728,14 @@ function EarningsTab() {
                 <td>
                   {Number(l.commission_amount).toLocaleString('fr-DZ')} DZD ({l.commission_pct}%)
                 </td>
-                <td className={Number(l.net_amount) < 0 ? 'negative' : 'positive'}>
-                  {Number(l.net_amount).toLocaleString('fr-DZ')} DZD
-                </td>
+                <td className={Number(l.net_amount) < 0 ? 'negative' : 'positive'}>{Number(l.net_amount).toLocaleString('fr-DZ')} DZD</td>
                 <td>{fmtDateTime(l.created_at)}</td>
               </tr>
             ))}
             {ledger.length === 0 && (
               <tr>
                 <td colSpan={7} className="empty">
-                  Aucune entrée pour le moment.
+                  {t('driver.earnings.noLedger')}
                 </td>
               </tr>
             )}
@@ -1661,6 +1749,13 @@ function EarningsTab() {
 // ── Mes documents (KYC — Task 6.1) ──────────────────────────────────────────
 
 function KycTab() {
+  const { t } = useI18n();
+  const KYC_DOC_LABEL: Record<KycDocType, string> = {
+    identity: t('status.kycDoc.identity'),
+    license: t('status.kycDoc.license'),
+    vehicle_registration: t('status.kycDoc.vehicle_registration'),
+    insurance: t('status.kycDoc.insurance'),
+  };
   const [docs, setDocs] = useState<KycDocumentRow[]>([]);
   const [msg, setMsg] = useState('');
   const [busyType, setBusyType] = useState<KycDocType | null>(null);
@@ -1693,7 +1788,7 @@ function KycTab() {
     setMsg('');
     try {
       await apiUpload('/api/driver/kyc', file, { doc_type: docType });
-      setMsg('✔ Document envoyé pour vérification');
+      setMsg(t('driver.kyc.uploaded'));
       await load();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -1706,11 +1801,12 @@ function KycTab() {
 
   return (
     <div>
-      <p className="muted">
-        Téléversez vos documents justificatifs (identité, permis, carte grise, assurance). Un administrateur les vérifie
-        puis les approuve ou les refuse avec un motif ; en cas de refus, téléversez une nouvelle version ci-dessous.
-      </p>
-      {msg && <p className="alert info">{msg}</p>}
+      <p className="muted">{t('driver.kyc.intro')}</p>
+      {msg && (
+        <p className="alert info" role="status">
+          {msg}
+        </p>
+      )}
       <div className="grid">
         {docTypes.map((docType) => {
           const current = latestByType.get(docType);
@@ -1720,23 +1816,25 @@ function KycTab() {
               {current ? (
                 <>
                   <p>
-                    <span className={`chip ${current.status}`}>{KYC_STATUS_LABEL[current.status]}</span>
+                    <span className={`chip ${current.status}`}>{t(`status.kyc.${current.status}`)}</span>
                   </p>
                   <p className="muted small">
-                    Envoyé le {fmtDateTime(current.submitted_at)} —{' '}
+                    {t('driver.kyc.sentOn', { date: fmtDateTime(current.submitted_at) })}{' '}
                     <a href={fileUrl(`/api/driver/kyc/${current.id}/file`)} target="_blank" rel="noreferrer">
-                      voir le fichier
+                      {t('driver.kyc.viewFile')}
                     </a>
                   </p>
                   {current.status === 'rejected' && current.rejection_reason && (
-                    <p className="alert error">Motif du refus : {current.rejection_reason}</p>
+                    <p className="alert error" role="alert">
+                      {t('driver.kyc.rejectionReason', { reason: current.rejection_reason })}
+                    </p>
                   )}
                 </>
               ) : (
-                <p className="muted small">Aucun document envoyé pour le moment.</p>
+                <p className="muted small">{t('driver.kyc.noneSent')}</p>
               )}
               <label className="btn ghost small" style={{ display: 'inline-block', cursor: 'pointer' }}>
-                {busyType === docType ? 'Envoi…' : current ? 'Envoyer une nouvelle version' : 'Téléverser'}
+                {busyType === docType ? t('driver.kyc.uploading') : current ? t('driver.kyc.uploadNewVersion') : t('driver.kyc.upload')}
                 <input
                   type="file"
                   accept="image/jpeg,image/png,image/webp,application/pdf"

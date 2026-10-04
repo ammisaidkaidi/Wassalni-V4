@@ -1,9 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, fmtDateTime } from '../api';
+import { useI18n } from '../i18n';
 import type { TripSearchRow, Wilaya } from '../types';
 
 export default function HomePage() {
+  const { t, lang } = useI18n();
   const [wilayas, setWilayas] = useState<Wilaya[]>([]);
   const [form, setForm] = useState({ from: '', to: '', dateFrom: '', dateTo: '' });
   const [results, setResults] = useState<TripSearchRow[] | null>(null);
@@ -38,15 +40,20 @@ export default function HomePage() {
   return (
     <section>
       <div className="hero">
-        <h1>Voyagez entre les 69 wilayas</h1>
-        <p>Recherchez un voyage, réservez vos places, payez en DZD.</p>
+        <h1>{t('home.title')}</h1>
+        <p>{t('home.subtitle')}</p>
       </div>
 
-      <form className="card search-card" onSubmit={(e) => void search(e)}>
-        <label>
-          Départ
-          <select required value={form.from} onChange={(e) => setForm({ ...form, from: e.target.value })}>
-            <option value="">— Wilaya de départ —</option>
+      <form className="card search-card" onSubmit={(e) => void search(e)} aria-label={t('home.searchBtn')}>
+        <label htmlFor="home-from">
+          {t('home.fromLabel')}
+          <select
+            id="home-from"
+            required
+            value={form.from}
+            onChange={(e) => setForm({ ...form, from: e.target.value })}
+          >
+            <option value="">{t('home.fromPlaceholder')}</option>
             {wilayas.map((w) => (
               <option key={w.id} value={w.id}>
                 {String(w.id).padStart(2, '0')} · {w.nom_fr}
@@ -54,10 +61,10 @@ export default function HomePage() {
             ))}
           </select>
         </label>
-        <label>
-          Arrivée
-          <select required value={form.to} onChange={(e) => setForm({ ...form, to: e.target.value })}>
-            <option value="">— Wilaya d'arrivée —</option>
+        <label htmlFor="home-to">
+          {t('home.toLabel')}
+          <select id="home-to" required value={form.to} onChange={(e) => setForm({ ...form, to: e.target.value })}>
+            <option value="">{t('home.toPlaceholder')}</option>
             {wilayas.map((w) => (
               <option key={w.id} value={w.id} disabled={String(w.id) === form.from}>
                 {String(w.id).padStart(2, '0')} · {w.nom_fr}
@@ -65,18 +72,20 @@ export default function HomePage() {
             ))}
           </select>
         </label>
-        <label>
-          Du
+        <label htmlFor="home-date-from">
+          {t('home.dateFromLabel')}
           <input
+            id="home-date-from"
             type="date"
             value={form.dateFrom}
             max={form.dateTo || undefined}
             onChange={(e) => setForm({ ...form, dateFrom: e.target.value })}
           />
         </label>
-        <label>
-          Au
+        <label htmlFor="home-date-to">
+          {t('home.dateToLabel')}
           <input
+            id="home-date-to"
             type="date"
             value={form.dateTo}
             min={form.dateFrom || undefined}
@@ -84,35 +93,39 @@ export default function HomePage() {
           />
         </label>
         <button className="btn primary" disabled={busy || !form.from || !form.to || form.from === form.to}>
-          {busy ? 'Recherche…' : 'Rechercher'}
+          {busy ? t('home.searching') : t('home.searchBtn')}
         </button>
       </form>
 
-      {error && <p className="alert error">{error}</p>}
+      {error && (
+        <p className="alert error" role="alert">
+          {error}
+        </p>
+      )}
 
       {results !== null && (
         <div className="results">
-          <h2>
-            {total} voyage{total > 1 ? 's' : ''} trouvé{total > 1 ? 's' : ''}
-          </h2>
-          {results.length === 0 && <p className="empty">Aucun voyage pour cette recherche.</p>}
+          <h2 aria-live="polite">{t('home.resultsCount', { count: total, s: total > 1 ? 's' : '' })}</h2>
+          {results.length === 0 && <p className="empty">{t('home.noResults')}</p>}
           <div className="grid">
-            {results.map((t) => (
-              <Link key={t.id} to={`/trips/${t.id}`} className="card trip-card">
+            {results.map((trip) => (
+              <Link key={trip.id} to={`/trips/${trip.id}`} className="card trip-card">
                 <div className="route">
-                  <strong>{t.from_wilaya}</strong>
-                  <span className="arrow">→</span>
-                  <strong>{t.to_wilaya}</strong>
+                  <strong>{trip.from_wilaya}</strong>
+                  <span className="arrow" aria-hidden="true">
+                    →
+                  </span>
+                  <strong>{trip.to_wilaya}</strong>
                 </div>
                 <div className="meta">
-                  <span>🕒 {fmtDateTime(t.departure_at)}</span>
-                  <span>🗺️ {t.trajectory_name}</span>
+                  <span>🕒 {fmtDateTime(trip.departure_at)}</span>
+                  <span>🗺️ {trip.trajectory_name}</span>
                 </div>
                 <div className="foot">
                   <span className="price">
-                    {Number(t.price).toLocaleString('fr-DZ')} {t.currency}
+                    {Number(trip.price).toLocaleString(lang === 'ar' ? 'ar-DZ' : 'fr-DZ')} {trip.currency}
                   </span>
-                  <span className="seats">{t.seats_available ?? 0} place(s) libre(s)</span>
+                  <span className="seats">{t('home.seatsAvailable', { count: trip.seats_available ?? 0 })}</span>
                 </div>
               </Link>
             ))}

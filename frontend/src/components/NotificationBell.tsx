@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, fmtDateTime } from '../api';
+import { useI18n } from '../i18n';
 import type { NotificationRow } from '../types';
 
 /**
@@ -9,6 +10,7 @@ import type { NotificationRow } from '../types';
  * the recent list and marks items read as they're clicked.
  */
 export default function NotificationBell() {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState(0);
   const [items, setItems] = useState<NotificationRow[]>([]);
@@ -23,8 +25,8 @@ export default function NotificationBell() {
 
   useEffect(() => {
     refreshCount();
-    const t = setInterval(refreshCount, 30_000);
-    return () => clearInterval(t);
+    const interval = setInterval(refreshCount, 30_000);
+    return () => clearInterval(interval);
   }, [refreshCount]);
 
   useEffect(() => {
@@ -39,7 +41,9 @@ export default function NotificationBell() {
     const next = !open;
     setOpen(next);
     if (next) {
-      const r = await api<{ notifications: NotificationRow[] }>('/api/notifications?limit=30').catch(() => ({ notifications: [] }));
+      const r = await api<{ notifications: NotificationRow[] }>('/api/notifications?limit=30').catch(() => ({
+        notifications: [],
+      }));
       setItems(r.notifications);
       setLoaded(true);
     }
@@ -60,22 +64,45 @@ export default function NotificationBell() {
 
   return (
     <div className="notif-bell-wrap" ref={ref}>
-      <button className="notif-bell" onClick={() => void togglePanel()} title="Notifications">
+      <button
+        className="notif-bell"
+        onClick={() => void togglePanel()}
+        title={t('notifications.title')}
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-label={count > 0 ? t('notifications.unreadCount', { count }) : t('notifications.title')}
+      >
         🔔
-        {count > 0 && <span className="notif-dot">{count > 99 ? '99+' : count}</span>}
+        {count > 0 && (
+          <span className="notif-dot" aria-hidden="true">
+            {count > 99 ? '99+' : count}
+          </span>
+        )}
       </button>
       {open && (
-        <div className="notif-panel">
+        <div className="notif-panel" role="dialog" aria-label={t('notifications.title')}>
           <div className="notif-panel-head">
-            <strong>Notifications</strong>
+            <strong>{t('notifications.title')}</strong>
             <button className="btn ghost small" onClick={() => void markAll()}>
-              Tout marquer lu
+              {t('notifications.markAllRead')}
             </button>
           </div>
-          {!loaded && <p className="empty">Chargement…</p>}
-          {loaded && items.length === 0 && <p className="empty">Aucune notification.</p>}
+          {!loaded && <p className="empty">{t('notifications.loading')}</p>}
+          {loaded && items.length === 0 && <p className="empty">{t('notifications.none')}</p>}
           {items.map((n) => (
-            <div key={n.id} className={`notif-item${n.read_at ? '' : ' unread'}`} onClick={() => void markOne(n)}>
+            <div
+              key={n.id}
+              className={`notif-item${n.read_at ? '' : ' unread'}`}
+              onClick={() => void markOne(n)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void markOne(n);
+                }
+              }}
+            >
               <div>{n.title}</div>
               {n.body && <div style={{ fontWeight: 400 }}>{n.body}</div>}
               <span className="notif-time">{fmtDateTime(n.created_at)}</span>

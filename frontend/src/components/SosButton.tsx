@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
+import { useI18n } from '../i18n';
 
 /**
  * Task 11.5 — SOS trigger, usable from either the customer or driver side
@@ -7,6 +8,7 @@ import { api } from '../api';
  * scoped to one reservation ongoing right now.
  */
 export default function SosButton({ role, reservationId }: { role: 'customer' | 'driver'; reservationId?: string }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [notes, setNotes] = useState('');
   const [sending, setSending] = useState(false);
@@ -29,7 +31,12 @@ export default function SosButton({ role, reservationId }: { role: 'customer' | 
       }
       await api(`/api/${role}/sos`, {
         method: 'POST',
-        body: { reservation_id: reservationId ?? null, lat: coords.lat ?? null, lon: coords.lon ?? null, notes: notes.trim() || null },
+        body: {
+          reservation_id: reservationId ?? null,
+          lat: coords.lat ?? null,
+          lon: coords.lon ?? null,
+          notes: notes.trim() || null,
+        },
       });
       setSent(true);
     } catch (err) {
@@ -42,7 +49,7 @@ export default function SosButton({ role, reservationId }: { role: 'customer' | 
   if (!open) {
     return (
       <button className="sos-btn" onClick={() => setOpen(true)}>
-        🆘 SOS
+        {t('sos.button')}
       </button>
     );
   }
@@ -52,30 +59,37 @@ export default function SosButton({ role, reservationId }: { role: 'customer' | 
       {sent ? (
         <>
           <p>
-            <strong>✔ Alerte envoyée.</strong> Notre équipe a été prévenue et va vous contacter. En cas d'urgence vitale, appelez directement les
-            secours (17 / 14).
+            <strong>{t('sos.sentTitle')}</strong> {t('sos.sentBody')}
           </p>
           <button className="btn ghost small" onClick={() => setOpen(false)}>
-            Fermer
+            {t('sos.close')}
           </button>
         </>
       ) : (
         <>
           <p>
-            <strong>Déclencher une alerte SOS ?</strong> Votre position (si autorisée) et un message optionnel seront transmis immédiatement à
-            notre équipe de sécurité.
+            <strong>{t('sos.confirmTitle')}</strong> {t('sos.confirmBody')}
           </p>
-          <label>
-            Message (optionnel)
-            <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ce qui se passe…" />
+          <label htmlFor="sos-message">
+            {t('sos.messageLabel')}
+            <input
+              id="sos-message"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={t('sos.messagePlaceholder')}
+            />
           </label>
-          {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
+          {error && (
+            <p style={{ color: 'var(--danger)' }} role="alert">
+              {error}
+            </p>
+          )}
           <div className="table actions">
             <button className="sos-btn" disabled={sending} onClick={() => void trigger()}>
-              {sending ? 'Envoi…' : "Confirmer l'alerte"}
+              {sending ? t('sos.sending') : t('sos.confirmAlert')}
             </button>
             <button className="btn ghost small" onClick={() => setOpen(false)}>
-              Annuler
+              {t('sos.cancel')}
             </button>
           </div>
         </>

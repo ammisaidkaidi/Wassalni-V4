@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import SeatPicker from '../components/SeatPicker';
+import { useI18n } from '../i18n';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
 import type { CommuneRow, TripDetail, Wilaya } from '../types';
 
@@ -13,6 +14,8 @@ function stops_wilaya(data: TripDetail | null, wpointId: string): number | undef
 }
 
 export default function TripDetailPage() {
+  const { t, lang } = useI18n();
+  const locale = lang === 'ar' ? 'ar-DZ' : 'fr-DZ';
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -150,8 +153,8 @@ export default function TripDetailPage() {
 
   const pickedMarkers: MapPin[] = useMemo(() => {
     const pins: MapPin[] = [];
-    if (pickupPos) pins.push({ id: 'pickup', label: 'Montée (choisie)', lat: pickupPos.lat, lon: pickupPos.lon, color: '#16a34a' });
-    if (dropoffPos) pins.push({ id: 'dropoff', label: 'Descente (choisie)', lat: dropoffPos.lat, lon: dropoffPos.lon, color: '#dc2626' });
+    if (pickupPos) pins.push({ id: 'pickup', label: t('tripDetail.pickupPinLabel'), lat: pickupPos.lat, lon: pickupPos.lon, color: '#16a34a' });
+    if (dropoffPos) pins.push({ id: 'dropoff', label: t('tripDetail.dropoffPinLabel'), lat: dropoffPos.lat, lon: dropoffPos.lon, color: '#dc2626' });
     return pins;
   }, [pickupPos, dropoffPos]);
 
@@ -167,24 +170,20 @@ export default function TripDetailPage() {
   const locateMe = (): void => {
     setGeoMsg('');
     if (!('geolocation' in navigator)) {
-      setGeoMsg("Votre navigateur ne permet pas la géolocalisation — placez votre point manuellement sur la carte ci-dessous.");
+      setGeoMsg(t('tripDetail.geoUnsupported'));
       setShowMap(true);
       return;
     }
-    setGeoMsg('Localisation en cours…');
+    setGeoMsg(t('tripDetail.geoLocating'));
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         onMapPick(pos.coords.latitude, pos.coords.longitude);
         setShowMap(true);
-        setGeoMsg('✔ Position détectée — ajustez-la sur la carte si besoin.');
+        setGeoMsg(t('tripDetail.geoDetected'));
       },
       (err) => {
         const denied = err.code === err.PERMISSION_DENIED;
-        setGeoMsg(
-          denied
-            ? "Accès à la position refusé — placez votre point manuellement sur la carte ci-dessous."
-            : "Impossible de déterminer votre position — placez votre point manuellement sur la carte ci-dessous.",
-        );
+        setGeoMsg(denied ? t('tripDetail.geoDenied') : t('tripDetail.geoFailed'));
         setShowMap(true);
       },
       { enableHighAccuracy: true, timeout: 10000 },
@@ -213,7 +212,7 @@ export default function TripDetailPage() {
           dropoff_commune_id: dropoffCommuneId ? Number(dropoffCommuneId) : null,
         },
       });
-      setDone('✔ Réservation confirmée — retrouvez-la dans « Mes réservations »');
+      setDone(t('tripDetail.bookingConfirmed'));
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         navigate(`/login?next=/trips/${id}`);
@@ -232,7 +231,7 @@ export default function TripDetailPage() {
     setFavMsg('');
     try {
       await api('/api/customer/favorites/routes', { method: 'POST', body: { origin_wpoint_id: pickup, destination_wpoint_id: dropoff } });
-      setFavMsg('✔ Trajet ajouté à vos favoris');
+      setFavMsg(t('tripDetail.favoriteAdded'));
     } catch (e) {
       setFavMsg(e instanceof Error ? e.message : String(e));
     }
@@ -251,7 +250,7 @@ export default function TripDetailPage() {
         method: 'POST',
         body: { trip_id: id, seats, pickup_wpoint_id: pickup, dropoff_wpoint_id: dropoff },
       });
-      setWaitlistMsg("✔ Vous êtes sur la liste d'attente — retrouvez-la dans votre profil.");
+      setWaitlistMsg(t('tripDetail.waitlistJoined'));
     } catch (e) {
       setWaitlistMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -259,8 +258,13 @@ export default function TripDetailPage() {
     }
   };
 
-  if (error) return <p className="alert error">{error}</p>;
-  if (!data) return <p className="empty">Chargement…</p>;
+  if (error)
+    return (
+      <p className="alert error" role="alert">
+        {error}
+      </p>
+    );
+  if (!data) return <p className="empty">{t('tripDetail.loading')}</p>;
   const { trip, stops } = data;
 
   return (
@@ -269,13 +273,17 @@ export default function TripDetailPage() {
         {trip.trajectory_name} <span className="chip">{trip.code}</span>
       </h1>
       <p className="meta">
-        🕒 Départ {fmtDateTime(trip.departure_at)} · Arrivée {fmtDateTime(trip.arrival_eta)} · 🧑‍✈️{' '}
-        {trip.driver_name ?? '—'} · 🚐 {trip.vehicle_matricule ?? '—'}
+        {t('tripDetail.headerMeta', {
+          departure: fmtDateTime(trip.departure_at),
+          arrival: fmtDateTime(trip.arrival_eta),
+          driver: trip.driver_name ?? '—',
+          vehicle: trip.vehicle_matricule ?? '—',
+        })}
       </p>
 
       <div className="detail-grid">
         <div className="card">
-          <h2>Itinéraire</h2>
+          <h2>{t('tripDetail.itinerary')}</h2>
           <ol className="stops">
             {stops.map((s) => (
               <li key={s.id} className={s.id === pickup ? 'stop from' : s.id === dropoff ? 'stop to' : ''}>
@@ -290,10 +298,10 @@ export default function TripDetailPage() {
         </div>
 
         <div className="card booking">
-          <h2>Réserver</h2>
-          <label>
-            Montée
-            <select value={pickup} onChange={(e) => setPickup(e.target.value)}>
+          <h2>{t('tripDetail.bookCard')}</h2>
+          <label htmlFor="trip-pickup">
+            {t('tripDetail.pickup')}
+            <select id="trip-pickup" value={pickup} onChange={(e) => setPickup(e.target.value)}>
               {stops.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.nom_fr}
@@ -301,9 +309,9 @@ export default function TripDetailPage() {
               ))}
             </select>
           </label>
-          <label>
-            Descente
-            <select value={dropoff} onChange={(e) => setDropoff(e.target.value)}>
+          <label htmlFor="trip-dropoff">
+            {t('tripDetail.dropoff')}
+            <select id="trip-dropoff" value={dropoff} onChange={(e) => setDropoff(e.target.value)}>
               {stops.map((s) => (
                 <option key={s.id} value={s.id} disabled={s.id === pickup}>
                   {s.nom_fr}
@@ -311,10 +319,10 @@ export default function TripDetailPage() {
               ))}
             </select>
           </label>
-          <label>
-            Commune de montée <span className="muted small">(optionnel)</span>
-            <select value={pickupCommuneId} onChange={(e) => setPickupCommuneId(e.target.value)}>
-              <option value="">Peu importe la commune</option>
+          <label htmlFor="trip-pickup-commune">
+            {t('tripDetail.pickupCommune')} <span className="muted small">{t('tripDetail.optional')}</span>
+            <select id="trip-pickup-commune" value={pickupCommuneId} onChange={(e) => setPickupCommuneId(e.target.value)}>
+              <option value="">{t('tripDetail.anyCommune')}</option>
               {pickupCommunes.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.nom_fr}
@@ -322,10 +330,10 @@ export default function TripDetailPage() {
               ))}
             </select>
           </label>
-          <label>
-            Commune de descente <span className="muted small">(optionnel)</span>
-            <select value={dropoffCommuneId} onChange={(e) => setDropoffCommuneId(e.target.value)}>
-              <option value="">Peu importe la commune</option>
+          <label htmlFor="trip-dropoff-commune">
+            {t('tripDetail.dropoffCommune')} <span className="muted small">{t('tripDetail.optional')}</span>
+            <select id="trip-dropoff-commune" value={dropoffCommuneId} onChange={(e) => setDropoffCommuneId(e.target.value)}>
+              <option value="">{t('tripDetail.anyCommune')}</option>
               {dropoffCommunes.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.nom_fr}
@@ -335,41 +343,45 @@ export default function TripDetailPage() {
           </label>
           <div className="form-inline" style={{ marginBottom: 8 }}>
             <button type="button" className="btn ghost small" onClick={() => void addFavoriteRoute()}>
-              ★ Ajouter ce trajet aux favoris
+              {t('tripDetail.addFavorite')}
             </button>
           </div>
-          {favMsg && <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>{favMsg}</p>}
+          {favMsg && (
+            <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }} role="status">
+              {favMsg}
+            </p>
+          )}
 
-          <label>Places</label>
+          <label id="trip-seats-label">{t('tripDetail.seatsLabel')}</label>
           <SeatPicker capacity={trip.capacity} available={maxSeats} selected={seats} onChange={(n) => setSeats(Math.max(1, Math.min(maxSeats, n)))} />
 
           <div className="form-inline" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
             <button type="button" className="btn ghost small" onClick={locateMe}>
-              📍 Utiliser ma position actuelle
+              {t('tripDetail.useMyPosition')}
             </button>
             <button type="button" className="btn ghost small" onClick={() => setShowMap((v) => !v)}>
-              {showMap ? 'Masquer la carte' : 'Choisir ma position sur la carte'}
+              {showMap ? t('tripDetail.hideMap') : t('tripDetail.showMap')}
             </button>
           </div>
-          {geoMsg && <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>{geoMsg}</p>}
+          {geoMsg && (
+            <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }} role="status">
+              {geoMsg}
+            </p>
+          )}
 
           {showMap && (
             <div style={{ marginBottom: 12 }}>
               <div className="form-inline" style={{ marginBottom: 8 }}>
                 <label style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <input type="radio" name="pickmode" checked={pickMode === 'pickup'} onChange={() => setPickMode('pickup')} />
-                  Placer le point de montée
+                  {t('tripDetail.placePickupPoint')}
                 </label>
                 <label style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <input type="radio" name="pickmode" checked={pickMode === 'dropoff'} onChange={() => setPickMode('dropoff')} />
-                  Placer le point de descente
+                  {t('tripDetail.placeDropoffPoint')}
                 </label>
               </div>
-              <p className="muted small">
-                Cliquez sur la carte pour indiquer précisément où le chauffeur doit vous prendre / déposer, dans la
-                wilaya choisie ci-dessus. Facultatif — sans clic, le chauffeur verra une position approximative (centre
-                de la wilaya).
-              </p>
+              <p className="muted small">{t('tripDetail.mapHint')}</p>
               <TripMap stops={mapStops} pickedMarkers={pickedMarkers} onPick={onMapPick} height={320} />
             </div>
           )}
@@ -378,32 +390,36 @@ export default function TripDetailPage() {
             {pricePair ? (
               <>
                 <span>
-                  {Number(pricePair.price).toLocaleString('fr-DZ')} {pricePair.currency} × {seats}
+                  {Number(pricePair.price).toLocaleString(locale)} {pricePair.currency} × {seats}
                 </span>
                 <strong>
-                  {total?.toLocaleString('fr-DZ')} {pricePair.currency}
+                  {total?.toLocaleString(locale)} {pricePair.currency}
                 </strong>
               </>
             ) : (
-              <span className="muted">Aucun tarif pour ce trajet — choisissez d'autres arrêts.</span>
+              <span className="muted">{t('tripDetail.noFare')}</span>
             )}
           </div>
           {done ? (
-            <p className="alert success">{done}</p>
+            <p className="alert success" role="status">
+              {done}
+            </p>
           ) : maxSeats < 1 && pricePair ? (
             <>
-              <p className="muted small">Ce trajet est complet pour le moment.</p>
+              <p className="muted small">{t('tripDetail.full')}</p>
               {waitlistMsg ? (
-                <p className="alert success">{waitlistMsg}</p>
+                <p className="alert success" role="status">
+                  {waitlistMsg}
+                </p>
               ) : (
                 <button className="btn primary wide" disabled={joiningWaitlist} onClick={() => void joinWaitlist()}>
-                  {joiningWaitlist ? 'Inscription…' : "Rejoindre la liste d'attente"}
+                  {joiningWaitlist ? t('tripDetail.joiningWaitlist') : t('tripDetail.joinWaitlist')}
                 </button>
               )}
             </>
           ) : (
             <button className="btn primary wide" disabled={!pricePair || maxSeats < 1} onClick={() => void book()}>
-              {user ? 'Réserver' : 'Se connecter pour réserver'}
+              {user ? t('tripDetail.bookBtn') : t('tripDetail.loginToBook')}
             </button>
           )}
         </div>

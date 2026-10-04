@@ -1285,15 +1285,15 @@ TASK 15.1 — Arabic
 
 Implement:
 
-[ ] Arabic UI
+[x] Arabic UI
 
-[ ] RTL
+[x] RTL
 
-[ ] translated validation messages
+[x] translated validation messages
 
-[ ] translated state labels
+[x] translated state labels
 
-[ ] modal/dropdown RTL correctness
+[x] modal/dropdown RTL correctness
 
 TASK 15.2 — English
 
@@ -1309,33 +1309,33 @@ TASK 15.3 — Accessibility
 
 Audit:
 
-[ ] semantic HTML
+[x] semantic HTML
 
-[ ] labels
+[x] labels
 
-[ ] keyboard navigation
+[x] keyboard navigation
 
-[ ] focus management
+[x] focus management
 
-[ ] modal focus trapping
+[x] modal focus trapping
 
-[ ] screen-reader support
+[x] screen-reader support
 
-[ ] color contrast
+[x] color contrast
 
-[ ] error announcements
+[x] error announcements
 
-[ ] form accessibility
+[x] form accessibility
 
 TASK 15.4 — Dark mode
 
-[ ] theme system
+[x] theme system
 
-[ ] persistence
+[x] persistence
 
-[ ] contrast verification
+[x] contrast verification
 
-[ ] modal/map/form compatibility
+[x] modal/map/form compatibility
 
 PHASE 16 — PWA / CLIENT PLATFORM
 

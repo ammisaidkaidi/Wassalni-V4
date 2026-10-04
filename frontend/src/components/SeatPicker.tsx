@@ -1,3 +1,5 @@
+import { useI18n } from '../i18n';
+
 /**
  * Task 10.1 — visual capacity selector.
  *
@@ -26,24 +28,31 @@ export default function SeatPicker({
   /** Task 10.7 — surfaced here so the accessibility need is visible right where seats are picked. */
   accessible?: boolean;
 }) {
+  const { t } = useI18n();
   const occupied = Math.max(0, capacity - available);
   const seatsDisplay = Math.min(capacity, 60); // cap the icon grid so a 200-seat bus doesn't render 200 spans
   const scale = capacity > 0 ? seatsDisplay / capacity : 1;
 
   return (
     <div className="seat-picker">
-      <div className="seat-picker-grid" role="group" aria-label="Places disponibles">
+      <div className="seat-picker-grid" role="group" aria-label={t('seatPicker.groupLabel')}>
         {Array.from({ length: seatsDisplay }, (_, i) => {
           const unitIndex = Math.floor(i / scale);
           const isOccupied = unitIndex < occupied;
           const seatNumberAmongFree = unitIndex - occupied + 1;
           const isSelected = !isOccupied && seatNumberAmongFree <= selected;
+          const title = isOccupied
+            ? t('seatPicker.occupiedTitle')
+            : isSelected
+              ? t('seatPicker.selectedTitle')
+              : t('seatPicker.availableTitle');
           return (
             <button
               key={i}
               type="button"
               disabled={isOccupied}
-              title={isOccupied ? 'Place déjà occupée/retenue' : isSelected ? 'Place sélectionnée' : 'Place disponible'}
+              title={title}
+              aria-label={title}
               aria-pressed={isSelected}
               className={`seat-icon${isOccupied ? ' occupied' : isSelected ? ' selected' : ' available'}`}
               onClick={() => !isOccupied && onChange(seatNumberAmongFree)}
@@ -55,18 +64,21 @@ export default function SeatPicker({
       </div>
       <div className="seat-picker-legend">
         <span>
-          <span className="seat-icon available" style={{ pointerEvents: 'none' }} /> Disponible
+          <span className="seat-icon available" style={{ pointerEvents: 'none' }} aria-hidden="true" />{' '}
+          {t('seatPicker.legendAvailable')}
         </span>
         <span>
-          <span className="seat-icon selected" style={{ pointerEvents: 'none' }} /> Votre sélection ({selected})
+          <span className="seat-icon selected" style={{ pointerEvents: 'none' }} aria-hidden="true" />{' '}
+          {t('seatPicker.legendSelected', { count: selected })}
         </span>
         <span>
-          <span className="seat-icon occupied" style={{ pointerEvents: 'none' }} /> Occupée/retenue
+          <span className="seat-icon occupied" style={{ pointerEvents: 'none' }} aria-hidden="true" />{' '}
+          {t('seatPicker.legendOccupied')}
         </span>
       </div>
       <p className="muted small">
-        {available} place(s) libre(s) sur {capacity}. Le modèle ne réserve pas un siège précis — uniquement le nombre de places.
-        {accessible && ' Véhicule accessible en fauteuil roulant.'}
+        {t('seatPicker.summary', { available, capacity })}
+        {accessible && t('seatPicker.wheelchairNote')}
       </p>
     </div>
   );
