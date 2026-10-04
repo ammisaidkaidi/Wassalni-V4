@@ -6,6 +6,9 @@ import { AuthProvider } from './auth';
 import { I18nProvider } from './i18n';
 import './index.css';
 import { ThemeProvider } from './theme';
+import { registerServiceWorker } from './pwa';
+
+registerServiceWorker();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

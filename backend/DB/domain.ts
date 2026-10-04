@@ -649,6 +649,17 @@ export interface NotificationRow {
   created_at: string;
 }
 
+export interface PushSubscriptionRow {
+  id: string;
+  user_id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  user_agent: string | null;
+  created_at: string;
+  last_seen_at: string;
+}
+
 export interface ConversationRow {
   id: string;
   reservation_id: string;
@@ -2479,6 +2490,56 @@ export class DomainRepository {
   }
   async markAllNotificationsRead(userId: string): Promise<number> {
     return (await this.db.callScalar<number>('mark_all_notifications_read', userId)) ?? 0;
+  }
+
+  // ── Web push (Task 16.2) ──────────────────────────────────────────────────
+  // Dispatch itself lives in api/push.ts (it needs the `web-push` HTTP
+  // client, which has no business inside the data layer); this is purely
+  // the subscription registry + the "which notifications still need a
+  // push" queue that poller reads from.
+
+  /** Upsert — re-subscribing the same browser (endpoint) just refreshes its keys/activity timestamp. */
+  async savePushSubscription(userId: string, endpoint: string, p256dh: string, auth: string, userAgent: string | null): Promise<PushSubscriptionRow> {
+    const rows = await this.db.raw<PushSubscriptionRow>(
+      `insert into push_subscription (user_id, endpoint, p256dh, auth, user_agent)
+       values ($1, $2, $3, $4, $5)
+       on conflict (user_id, endpoint)
+       do update set p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent, last_seen_at = now()
+       returning *`,
+      [userId, endpoint, p256dh, auth, userAgent],
+    );
+    return rows[0];
+  }
+  /** Task 16.2 device management — list every device/browser subscribed for this account. */
+  async listPushSubscriptions(userId: string): Promise<PushSubscriptionRow[]> {
+    return this.db.raw('select * from push_subscription where user_id = $1 order by created_at desc', [userId]);
+  }
+  async deletePushSubscription(userId: string, id: string): Promise<void> {
+    await this.db.raw('delete from push_subscription where id = $1 and user_id = $2', [id, userId]);
+  }
+  async deletePushSubscriptionByEndpoint(userId: string, endpoint: string): Promise<void> {
+    await this.db.raw('delete from push_subscription where user_id = $1 and endpoint = $2', [userId, endpoint]);
+  }
+  /** Used by the dispatcher when a push service reports the endpoint gone (410/404) — prune regardless of which user it was filed under. */
+  async deletePushSubscriptionsByEndpointAny(endpoint: string): Promise<void> {
+    await this.db.raw('delete from push_subscription where endpoint = $1', [endpoint]);
+  }
+  async getPushSubscriptionsForUsers(userIds: string[]): Promise<PushSubscriptionRow[]> {
+    const uniqueIds = Array.from(new Set(userIds));
+    if (uniqueIds.length === 0) return [];
+    const placeholders = uniqueIds.map((_, i) => `$${i + 1}`).join(', ');
+    return this.db.raw(`select * from push_subscription where user_id in (${placeholders})`, uniqueIds);
+  }
+
+  /** Notifications raised anywhere (reservation lifecycle, SOS, waitlist, …) that the push dispatcher hasn't attempted yet. */
+  async listUnpushedNotifications(limit = 200): Promise<NotificationRow[]> {
+    return this.db.raw('select * from notification where pushed_at is null order by created_at asc limit $1', [limit]);
+  }
+  async markNotificationsPushed(ids: string[]): Promise<void> {
+    const uniqueIds = Array.from(new Set(ids));
+    if (uniqueIds.length === 0) return;
+    const placeholders = uniqueIds.map((_, i) => `$${i + 1}`).join(', ');
+    await this.db.raw(`update notification set pushed_at = now() where id in (${placeholders})`, uniqueIds);
   }
 
   // ── In-app messaging (Task 11.2) ──────────────────────────────────────────

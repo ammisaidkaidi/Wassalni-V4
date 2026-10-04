@@ -750,6 +750,15 @@ export interface AdminUserRow {
   created_at: string;
 }
 
+export interface PushSubscriptionRow {
+  id: string;
+  user_id: string;
+  endpoint: string;
+  user_agent: string | null;
+  created_at: string;
+  last_seen_at: string;
+}
+
 export interface SharedTripInfo {
   reservation_status: string;
   trip_status: string;

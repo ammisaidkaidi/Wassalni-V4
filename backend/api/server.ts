@@ -19,6 +19,8 @@ import { customerRoutes } from './routes/customer';
 import { paymentsRoutes } from './routes/payments';
 import { tripsRoutes } from './routes/trips';
 import { notificationsRoutes } from './routes/notifications';
+import { pushRoutes } from './routes/push';
+import { configurePushService, dispatchPendingPushNotifications } from './push';
 import { shareRoutes } from './routes/share';
 
 async function main(): Promise<void> {
@@ -54,6 +56,17 @@ async function main(): Promise<void> {
   }
   if (cfg.isProduction && !cfg.cookieSecure) {
     console.warn('⚠ PRODUCTION avec COOKIE_SECURE=false — les cookies de session ne seront pas marqués "secure". À utiliser uniquement derrière HTTPS.');
+  }
+  // Task 16.2 — Web Push.
+  configurePushService(cfg);
+  if (cfg.vapidIsEphemeral && !cfg.isProduction) {
+    console.warn('⚠ VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY non configurés — clé générée pour ce process uniquement : les abonnements push ne survivront pas à un redémarrage.');
+  }
+  if (cfg.vapidIsEphemeral && cfg.isProduction) {
+    console.warn(
+      '⚠ PRODUCTION sans VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY configurés — une paire de clés éphémère a été générée. ' +
+        'Chaque redémarrage invalidera tous les abonnements push existants tant que ces variables ne sont pas fixées dans backend/.env.',
+    );
   }
 
   const app = express();
@@ -96,6 +109,8 @@ async function main(): Promise<void> {
   // Shared inbox across every role (Task 11.1) — gated only by requireAuth
   // inside the route module itself, not by a specific role.
   app.use('/api/notifications', notificationsRoutes(repo));
+  // Task 16.2 — Web Push subscription management (same "any signed-in role" gating as the inbox above).
+  app.use('/api/push', pushRoutes(repo, cfg));
   // Public (no auth at all) live-trip tracking link (Task 11.4) — anyone
   // holding the opaque, hashed token can view it, by design.
   app.use('/api/share', shareRoutes(repo));
@@ -148,10 +163,26 @@ async function main(): Promise<void> {
   }, lifecycleIntervalMs);
   lifecycleTimer.unref();
 
+  // Task 16.2 — Web Push dispatcher: sweeps notifications no browser
+  // subscription has been pushed for yet. Same log-don't-crash,
+  // unref'd-interval pattern as the two tickers above; a single failed
+  // delivery (stale subscription, push service hiccup) never blocks the
+  // others, see api/push.ts.
+  const pushIntervalMs = 20_000;
+  const pushTimer = setInterval(() => {
+    dispatchPendingPushNotifications(repo)
+      .then((r) => {
+        if (r.notifications > 0) console.log(`⏱ Push dispatch: ${r.sent} sent, ${r.pruned} stale subscriptions pruned, ${r.notifications} notifications processed`);
+      })
+      .catch((err) => console.error('✗ dispatchPendingPushNotifications failed:', err));
+  }, pushIntervalMs);
+  pushTimer.unref();
+
   const shutdown = (): void => {
     console.log('Shutting down…');
     clearInterval(expiryTimer);
     clearInterval(lifecycleTimer);
+    clearInterval(pushTimer);
     server.close(() => {
       conn.close().finally(() => process.exit(0));
     });

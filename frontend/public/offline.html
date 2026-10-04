@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wassalni — Hors ligne</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f8fafc;
+        --fg: #0f172a;
+        --muted: #64748b;
+        --accent: #0e9f6e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f172a;
+          --fg: #f1f5f9;
+          --muted: #94a3b8;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        padding: 24px;
+        text-align: center;
+      }
+      .card {
+        max-width: 420px;
+      }
+      img {
+        width: 72px;
+        height: 72px;
+        border-radius: 18px;
+        margin-bottom: 18px;
+      }
+      h1 {
+        font-size: 1.3rem;
+        margin: 0 0 10px;
+      }
+      p {
+        color: var(--muted);
+        line-height: 1.5;
+        margin: 0 0 20px;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 10px;
+        padding: 10px 22px;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      button:hover {
+        opacity: 0.92;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img src="/icons/icon-192.png" alt="" />
+      <h1>Vous êtes hors ligne</h1>
+      <p>
+        Cette page nécessite une connexion internet. La réservation, le paiement et le suivi en temps réel ne
+        fonctionnent pas hors ligne. Reconnectez-vous puis réessayez.
+      </p>
+      <button onclick="location.reload()">Réessayer</button>
+    </div>
+  </body>
+</html>

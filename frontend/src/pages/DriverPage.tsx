@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Link } from 'react-router-dom';
 import { api, apiUpload, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
+import PushNotificationsCard from '../components/PushNotificationsCard';
 import { ConversationAction, RevealContactAction } from '../components/ReservationExtras';
 import SosButton from '../components/SosButton';
 import TripMap, { type MapPin, type MapStop } from '../components/TripMap';
@@ -1395,6 +1396,8 @@ function ParametresTab() {
           <button className="btn primary">{vehicle ? t('driver.settings.update') : t('driver.settings.save')}</button>
         </form>
       </div>
+
+      <PushNotificationsCard />
     </div>
   );
 }

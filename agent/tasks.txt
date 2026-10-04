@@ -1343,15 +1343,15 @@ TASK 16.1 — PWA
 
 Implement:
 
-[ ] manifest
+[x] manifest
 
-[ ] icons
+[x] icons
 
-[ ] installability
+[x] installability
 
-[ ] offline shell
+[x] offline shell
 
-[ ] service worker
+[x] service worker
 
 Do not pretend booking/payment functionality works offline if it requires the server.
 
@@ -1359,15 +1359,15 @@ TASK 16.2 — Web push
 
 Implement:
 
-[ ] permission flow
+[x] permission flow
 
-[ ] subscription storage
+[x] subscription storage
 
-[ ] notification dispatch
+[x] notification dispatch
 
-[ ] unsubscribe
+[x] unsubscribe
 
-[ ] device management
+[x] device management
 
 PHASE 17 — SMS / COMMUNICATION CHANNELS
 

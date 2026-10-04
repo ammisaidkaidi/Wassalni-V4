@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { useAuth } from '../auth';
 import { EmergencyContactsCard, FavoritesCard, WaitlistCard } from '../components/CustomerExtras';
+import PushNotificationsCard from '../components/PushNotificationsCard';
 import { useI18n } from '../i18n';
 import type { CommuneRow, CustomerProfileRow, Wilaya } from '../types';
 
@@ -320,6 +321,7 @@ export default function ProfilePage() {
           </form>
         </div>
 
+        <PushNotificationsCard />
         <EmergencyContactsCard />
         <FavoritesCard />
         <WaitlistCard />

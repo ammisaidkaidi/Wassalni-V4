@@ -1,3 +1,4 @@
+import webpush from 'web-push';
 import { loadBackendEnv } from '../DB/config';
 
 /** Runtime configuration of the API server (all values from backend/.env). */
@@ -19,6 +20,14 @@ export interface ApiConfig {
   /** When no SMTP is configured: OTP codes are logged to the console and
    *  returned as `dev_code` in the login response (development only!). */
   otpDevMode: boolean;
+  /** Task 16.2 — Web Push (VAPID) keypair + contact subject used to sign
+   *  every push message sent to a browser's push service. */
+  vapid: { publicKey: string; privateKey: string; subject: string };
+  /** True when VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY were not set and an
+   *  ephemeral keypair was generated for this process only — every
+   *  previously stored browser subscription becomes invalid on restart, so
+   *  this must never be true in production. */
+  vapidIsEphemeral: boolean;
 }
 
 function intEnv(name: string, def: number): number {
@@ -38,6 +47,20 @@ export function loadApiConfig(): ApiConfig {
     pass: process.env.SMTP_PASS ?? undefined,
     from: process.env.SMTP_FROM?.trim() || 'Wassalni <no-reply@wassalni.dz>',
   };
+  const envVapidPublic = process.env.VAPID_PUBLIC_KEY?.trim();
+  const envVapidPrivate = process.env.VAPID_PRIVATE_KEY?.trim();
+  const vapidIsEphemeral = !envVapidPublic || !envVapidPrivate;
+  // Dev convenience only (mirrors otpDevMode below): without a configured
+  // keypair, generate one for this process so push still works locally,
+  // but it changes on every restart — every subscription stored against
+  // the previous key becomes invalid, which is why this must be set
+  // explicitly (and kept stable) in production.
+  const generated = vapidIsEphemeral ? webpush.generateVAPIDKeys() : null;
+  const vapid = {
+    publicKey: envVapidPublic || generated!.publicKey,
+    privateKey: envVapidPrivate || generated!.privateKey,
+    subject: process.env.VAPID_SUBJECT?.trim() || 'mailto:support@wassalni.dz',
+  };
   return {
     port: intEnv('PORT', 3000),
     sessionTtlHours: intEnv('SESSION_TTL_HOURS', 24 * 7),
@@ -52,5 +75,7 @@ export function loadApiConfig(): ApiConfig {
     isProduction,
     smtp,
     otpDevMode: !smtp.host,
+    vapid,
+    vapidIsEphemeral,
   };
 }

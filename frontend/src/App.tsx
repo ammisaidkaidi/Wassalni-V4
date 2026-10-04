@@ -1,5 +1,6 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth';
+import InstallAppButton from './components/InstallAppButton';
 import NotificationBell from './components/NotificationBell';
 import { LANGS, useI18n } from './i18n';
 import AdminPage from './pages/AdminPage';
@@ -53,6 +54,7 @@ export default function App() {
               ))}
             </select>
           </label>
+          <InstallAppButton />
           <button
             type="button"
             className="btn ghost icon-btn"
