@@ -39,6 +39,36 @@ const kycUpload = multer({
   },
 });
 
+// Task 6.2 — vehicle inspection certificate uploads (same disk/auth-checked-
+// streaming pattern as KYC above, kept as a separate root/table since it's a
+// different submission type with its own review queue). File is optional —
+// the structured date/expiry/maintenance-status fields are what matters for
+// publish-eligibility; a scanned certificate is a nice-to-have for the
+// admin reviewer, not a hard requirement.
+const INSPECTION_UPLOAD_ROOT = path.join(__dirname, '../../uploads/vehicle-inspection');
+const inspectionUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, _file, cb) => {
+      const driverId = (req as unknown as { user: { driver_id: string } }).user.driver_id;
+      const dir = path.join(INSPECTION_UPLOAD_ROOT, driverId);
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10);
+      cb(null, `${Date.now()}-${crypto.randomUUID()}${ext}`);
+    },
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!KYC_ALLOWED_MIME.has(file.mimetype)) {
+      cb(new ApiError(400, 'BAD_PARAM', 'Format de fichier non supporté (JPEG, PNG, WEBP ou PDF uniquement)'));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 const uuidParam = (value: string): string => {
@@ -56,6 +86,13 @@ const profileSchema = z.object({
   phone: z.string().regex(/^\+?[0-9]{8,15}$/, 'téléphone invalide').optional(),
   email: z.string().email().nullish(),
   address: z.string().nullish(),
+});
+
+const MAINTENANCE_STATUSES = ['ok', 'needs_service', 'out_of_service'] as const;
+
+const rateCustomerSchema = z.object({
+  stars: z.number().int().min(1).max(5),
+  review: z.string().max(2000).nullish(),
 });
 
 const vehicleCreateSchema = z.object({
@@ -170,6 +207,72 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
         model: b.model === null ? null : b.model,
       });
       res.json({ vehicle });
+    }),
+  );
+
+  // ── Task 6.2: vehicle inspection submission / status tracking ─────────────
+
+  router.get(
+    '/vehicle/inspections',
+    wrap(async (req, res) => {
+      const profile = await repo.getDriverProfile(req.user!.driver_id!);
+      if (!profile?.vehicle_id) {
+        res.json({ inspections: [], eligible: false });
+        return;
+      }
+      const [inspections, eligible] = await Promise.all([
+        repo.listVehicleInspectionsForVehicle(profile.vehicle_id),
+        repo.isVehicleEligible(profile.vehicle_id),
+      ]);
+      res.json({ inspections, eligible });
+    }),
+  );
+
+  router.post(
+    '/vehicle/inspections',
+    inspectionUpload.single('file'),
+    wrap(async (req, res) => {
+      const profile = await repo.getDriverProfile(req.user!.driver_id!);
+      if (!profile?.vehicle_id) {
+        throw new ApiError(409, 'NO_VEHICLE', "Enregistrez d'abord votre véhicule avant de soumettre un contrôle technique");
+      }
+      const file = (req as unknown as { file?: Express.Multer.File }).file;
+      const inspectionDate = typeof req.body?.inspection_date === 'string' ? req.body.inspection_date : '';
+      const expiryDate = typeof req.body?.expiry_date === 'string' ? req.body.expiry_date : '';
+      const maintenanceStatus = req.body?.maintenance_status as string;
+      if (!inspectionDate || !expiryDate) {
+        if (file) fs.unlink(file.path, () => undefined);
+        throw new ApiError(400, 'BAD_PARAM', 'Date de contrôle et date d\'expiration requises');
+      }
+      if (!MAINTENANCE_STATUSES.includes(maintenanceStatus as (typeof MAINTENANCE_STATUSES)[number])) {
+        if (file) fs.unlink(file.path, () => undefined);
+        throw new ApiError(400, 'BAD_PARAM', 'État d\'entretien invalide');
+      }
+      const id = await repo.submitVehicleInspection(
+        profile.vehicle_id,
+        req.user!.driver_id!,
+        {
+          inspectionDate,
+          expiryDate,
+          maintenanceStatus: maintenanceStatus as (typeof MAINTENANCE_STATUSES)[number],
+          notes: typeof req.body?.notes === 'string' ? req.body.notes : null,
+        },
+        file ? { path: file.path, fileName: file.originalname, mimeType: file.mimetype } : null,
+      );
+      res.status(201).json({ inspection: await repo.getVehicleInspection(id) });
+    }),
+  );
+
+  router.get(
+    '/vehicle/inspections/:id/file',
+    wrap(async (req, res) => {
+      const inspection = await repo.getVehicleInspection(uuidParam(req.params.id));
+      const profile = await repo.getDriverProfile(req.user!.driver_id!);
+      if (!inspection || inspection.vehicle_id !== profile?.vehicle_id || !inspection.file_path) {
+        throw new ApiError(404, 'NOT_FOUND', 'Document introuvable');
+      }
+      res.setHeader('Content-Type', inspection.mime_type ?? 'application/octet-stream');
+      res.sendFile(path.resolve(inspection.file_path));
     }),
   );
 
@@ -493,6 +596,46 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       if (ownerDriverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', "Cette réservation ne concerne pas vos voyages");
       await repo.cancelReservation(id);
       res.json({ ok: true });
+    }),
+  );
+
+  // Task 6.3 — driver rates the customer of one of their own completed trips.
+  router.post(
+    '/reservations/:id/rate-customer',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const ownerDriverId = await repo.getReservationTripDriver(id);
+      if (!ownerDriverId) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (ownerDriverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne concerne pas vos voyages');
+      const b = rateCustomerSchema.parse(req.body);
+      const ratingId = await repo.submitRating({
+        reservationId: id,
+        direction: 'driver_to_customer',
+        stars: b.stars,
+        review: b.review ?? null,
+        raterDriverId: req.user!.driver_id!,
+      });
+      res.status(201).json({ rating: await repo.getRating(ratingId) });
+    }),
+  );
+
+  router.get(
+    '/reservations/:id/rating-status',
+    wrap(async (req, res) => {
+      const id = uuidParam(req.params.id);
+      const ownerDriverId = await repo.getReservationTripDriver(id);
+      if (!ownerDriverId) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (ownerDriverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne concerne pas vos voyages');
+      res.json(await repo.getReservationRatingStatus(id));
+    }),
+  );
+
+  // Own received ratings (from customers) + cached aggregate, for a "mes
+  // évaluations" screen.
+  router.get(
+    '/ratings',
+    wrap(async (req, res) => {
+      res.json({ ratings: await repo.listRatingsForDriver(req.user!.driver_id!) });
     }),
   );
 

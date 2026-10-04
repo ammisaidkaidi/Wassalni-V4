@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import type { DBHelper } from '../../DB/DBHelper';
-import type { DomainRepository } from '../../DB/domain';
+import type { DomainRepository, PaymentMethod } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
+import { GATEWAY_NAME, generateTransactionId } from '../payments/mockGateway';
 import { requireAuth, requireCustomer } from '../middleware/session';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -25,6 +26,17 @@ const reserveSchema = z.object({
   // coverage, if any) by set_reservation_communes().
   pickup_commune_id: z.number().int().min(1).nullish(),
   dropoff_commune_id: z.number().int().min(1).nullish(),
+});
+
+const checkoutSchema = z.object({
+  method: z.enum(['cib', 'edahabia', 'card', 'bank_transfer']),
+  // Defaults to the full remaining balance when omitted.
+  amount: z.number().positive().optional(),
+});
+
+const rateDriverSchema = z.object({
+  stars: z.number().int().min(1).max(5),
+  review: z.string().max(2000).nullish(),
 });
 
 interface ReservationRow {
@@ -165,6 +177,104 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
         ? result.stops.find((s) => s.wpoint_id === row.dropoff_wpoint_id)
         : result.stops[result.stops.length - 1];
       res.json({ position_age_seconds: result.position_age_seconds, stop: mine ?? null });
+    }),
+  );
+
+  // Task 7.1 — "Reservation → Payment intent → Gateway transaction" step,
+  // initiated by the customer. The actual "→ Payment confirmation" step
+  // only ever happens later, asynchronously, via the webhook
+  // (POST /api/payments/webhook/mock) — never from this route or anything
+  // the browser does — so a client can never just claim "I paid".
+  router.post(
+    '/:id/checkout',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const b = checkoutSchema.parse(req.body);
+      const row = await db.selectOne<{ id: string; customer_id: string; status: string; total_price: string }>('reservation', {
+        columns: ['id', 'customer_id', 'status', 'total_price'],
+        where: { id },
+      });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      if (row.status === 'cancelled') {
+        throw new ApiError(409, 'NOT_PAYABLE', 'Une réservation annulée ne peut pas être payée');
+      }
+
+      // Re-use an already-open checkout instead of piling up duplicate
+      // pending intents if the customer clicks "payer" more than once.
+      const existing = await repo.findOpenGatewayIntent(id);
+      const transactionId = existing?.gateway_transaction_id ?? generateTransactionId();
+      if (!existing) {
+        const balanceDue = Number(row.total_price) - Number(await repo.amountPaid(id));
+        const amount = b.amount ?? Math.max(balanceDue, 0);
+        if (amount <= 0) throw new ApiError(409, 'ALREADY_PAID', 'Cette réservation est déjà entièrement payée');
+        await repo.createGatewayPaymentIntent({
+          reservationId: id,
+          amount,
+          method: b.method as PaymentMethod,
+          gateway: GATEWAY_NAME,
+          gatewayTransactionId: transactionId,
+        });
+      }
+      res.status(201).json({ checkout_url: `/api/payments/checkout/${transactionId}`, transaction_id: transactionId });
+    }),
+  );
+
+  router.get(
+    '/:id/payments',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const row = await db.selectOne<{ id: string; customer_id: string }>('reservation', { columns: ['id', 'customer_id'], where: { id } });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      const payments = await db.raw(
+        `select v.* from v_payment v join payment p on p.id = v.id where p.reservation_id = $1 order by v.created_at desc`,
+        [id],
+      );
+      res.json({ payments });
+    }),
+  );
+
+  // Task 6.3 — customer rates the driver of a completed trip.
+  router.post(
+    '/:id/rate-driver',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const b = rateDriverSchema.parse(req.body);
+      const row = await db.selectOne<{ id: string; customer_id: string }>('reservation', { columns: ['id', 'customer_id'], where: { id } });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      const ratingId = await repo.submitRating({
+        reservationId: id,
+        direction: 'customer_to_driver',
+        stars: b.stars,
+        review: b.review ?? null,
+        raterCustomerId: req.user!.customer_id!,
+      });
+      res.status(201).json({ rating: await repo.getRating(ratingId) });
+    }),
+  );
+
+  router.get(
+    '/:id/rating-status',
+    wrap(async (req, res) => {
+      const id = req.params.id;
+      if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
+      const row = await db.selectOne<{ id: string; customer_id: string }>('reservation', { columns: ['id', 'customer_id'], where: { id } });
+      if (!row) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
+      if (row.customer_id !== req.user!.customer_id) {
+        throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
+      }
+      res.json(await repo.getReservationRatingStatus(id));
     }),
   );
 

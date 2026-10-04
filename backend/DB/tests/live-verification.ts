@@ -29,6 +29,7 @@ import { SupabaseConnection } from '../connection';
 import { DBHelper } from '../DBHelper';
 import { DomainRepository, explainDomainError } from '../domain';
 import { searchTrips } from '../../api/services/tripSearch';
+import { GATEWAY_NAME, generateEventId, generateTransactionId } from '../../api/payments/mockGateway';
 
 let pass = 0;
 let fail = 0;
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
   const createdCustomerIds: string[] = [];
   const createdTripIds: string[] = [];
   const createdDriverIds: string[] = [];
+  const createdVehicleIds: string[] = [];
   let originalNoShowThreshold: number | null = null;
   let trajectoryId: string | null = null;
 
@@ -575,6 +577,421 @@ async function main(): Promise<void> {
     } else {
       bad('6.1: listKycDocumentsForDriver count', String(driverDocs.length));
     }
+
+    // ── Task 6.2: vehicle inspection + publish eligibility ──────────────────
+    console.log('\n=== Task 6.2: vehicle inspection ===');
+    const fmtDateOnly = (d: Date): string => d.toISOString().slice(0, 10);
+    const todayStr = fmtDateOnly(new Date());
+    const pastStr = fmtDateOnly(new Date(Date.now() - 400 * 24 * 3600 * 1000));
+    const futureStr = fmtDateOnly(new Date(Date.now() + 400 * 24 * 3600 * 1000));
+    const expiredStr = fmtDateOnly(new Date(Date.now() - 24 * 3600 * 1000));
+
+    const inspVehicle = await db.insert<{ id: string }>('vehicle', { matricule: `TEST-INSP-${tag}`, seats: 4 });
+    createdVehicleIds.push(inspVehicle.id);
+    const inspDriver = await mkTestDriver(4);
+
+    if ((await repo.isVehicleEligible(inspVehicle.id)) === false) {
+      ok('6.2: a vehicle with no inspection on file is not eligible');
+    } else {
+      bad('6.2: eligibility with no inspection', 'expected false');
+    }
+
+    const tripNoInsp = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 24 * 3600 * 1000),
+      capacity: 4,
+      seatPrice: 500,
+      driverId: inspDriver,
+      vehicleId: inspVehicle.id,
+    });
+    createdTripIds.push(tripNoInsp);
+    await repo.populateTripStops(tripNoInsp);
+    await expectErr('6.2: publishing a trip whose vehicle is not eligible is rejected', () => repo.publishTrip(tripNoInsp), 'DZ714');
+
+    const inspRejected = await repo.submitVehicleInspection(inspVehicle.id, inspDriver, {
+      inspectionDate: todayStr,
+      expiryDate: futureStr,
+      maintenanceStatus: 'ok',
+    });
+    await expectErr(
+      '6.2: rejecting an inspection without a reason is rejected',
+      () => repo.rejectVehicleInspection(inspRejected, adminId, ''),
+      'DZ713',
+    );
+    await repo.rejectVehicleInspection(inspRejected, adminId, 'Document illisible');
+    const rejectedInspRow = await repo.getVehicleInspection(inspRejected);
+    if (rejectedInspRow?.approval_state === 'rejected' && rejectedInspRow.rejection_reason === 'Document illisible') {
+      ok('6.2: rejected inspection records approval_state + rejection_reason');
+    } else {
+      bad('6.2: rejected inspection state', JSON.stringify(rejectedInspRow));
+    }
+    await expectErr(
+      '6.2: reviewing an already-reviewed inspection is rejected',
+      () => repo.approveVehicleInspection(inspRejected, adminId),
+      'DZ712',
+    );
+    await expectErr(
+      '6.2: reviewing an unknown inspection id is rejected',
+      () => repo.approveVehicleInspection(reviewerRow[0].id, adminId),
+      'DZ711',
+    );
+    if ((await repo.isVehicleEligible(inspVehicle.id)) === false) {
+      ok('6.2: a rejected-only inspection history still leaves the vehicle ineligible');
+    } else {
+      bad('6.2: eligibility after rejection only', 'expected false');
+    }
+
+    // vehicle_is_eligible() looks at the approved record with the single
+    // *latest* inspection_date — so each case below must be dated strictly
+    // later than the previous one, or an earlier still-valid record would
+    // keep "winning" the ordering and the assertion would test nothing.
+    const inspExpired = await repo.submitVehicleInspection(inspVehicle.id, inspDriver, {
+      inspectionDate: pastStr,
+      expiryDate: expiredStr,
+      maintenanceStatus: 'ok',
+    });
+    await repo.approveVehicleInspection(inspExpired, adminId);
+    if ((await repo.isVehicleEligible(inspVehicle.id)) === false) {
+      ok('6.2: an approved inspection whose expiry_date has already passed leaves the vehicle ineligible');
+    } else {
+      bad('6.2: eligibility with only an expired approved inspection', 'expected false');
+    }
+
+    const inspApproved = await repo.submitVehicleInspection(inspVehicle.id, inspDriver, {
+      inspectionDate: todayStr,
+      expiryDate: futureStr,
+      maintenanceStatus: 'ok',
+    });
+    await repo.approveVehicleInspection(inspApproved, adminId);
+    if ((await repo.isVehicleEligible(inspVehicle.id)) === true) {
+      ok('6.2: a newer approved, unexpired, OK inspection makes the vehicle eligible again');
+    } else {
+      bad('6.2: eligibility after approval', 'expected true');
+    }
+    await expectOk('6.2: publishing a trip with a now-eligible vehicle succeeds', () => repo.publishTrip(tripNoInsp));
+
+    const inspOutOfService = await repo.submitVehicleInspection(inspVehicle.id, inspDriver, {
+      inspectionDate: fmtDateOnly(new Date(Date.now() + 24 * 3600 * 1000)),
+      expiryDate: fmtDateOnly(new Date(Date.now() + 365 * 24 * 3600 * 1000)),
+      maintenanceStatus: 'out_of_service',
+    });
+    await repo.approveVehicleInspection(inspOutOfService, adminId);
+    if ((await repo.isVehicleEligible(inspVehicle.id)) === false) {
+      ok("6.2: an even-newer approved but 'out_of_service' inspection makes the vehicle ineligible again");
+    } else {
+      bad('6.2: eligibility with out_of_service latest-approved inspection', 'expected false');
+    }
+
+    const listedForVehicle = await repo.listVehicleInspectionsForVehicle(inspVehicle.id);
+    if (listedForVehicle.length === 4) {
+      ok('6.2: listVehicleInspectionsForVehicle returns the full history (4 records)');
+    } else {
+      bad('6.2: listVehicleInspectionsForVehicle count', String(listedForVehicle.length));
+    }
+    const pendingAdminQueue = await repo.listVehicleInspectionsAdmin('pending');
+    if (pendingAdminQueue.every((i) => i.approval_state === 'pending')) {
+      ok('6.2: listVehicleInspectionsAdmin(\'pending\') only returns pending records');
+    } else {
+      bad('6.2: listVehicleInspectionsAdmin filter', 'found a non-pending record');
+    }
+
+    // ── Task 6.3: two-way ratings ─────────────────────────────────────────────
+    console.log('\n=== Task 6.3: ratings ===');
+    const ratingDriver = await mkTestDriver(5);
+    const ratingCustomer = await mkCustomer(6);
+    const otherCustomer = await mkCustomer(7);
+    const tripForRating = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 2 * 3600 * 1000),
+      capacity: 4,
+      seatPrice: 500,
+      driverId: ratingDriver,
+    });
+    createdTripIds.push(tripForRating);
+    await repo.populateTripStops(tripForRating);
+    await repo.publishTrip(tripForRating);
+    await repo.setTripPrice({ tripId: tripForRating, fromWpointId: wpA, toWpointId: wpB, price: 500 });
+    const resForRating = await repo.reserve({ tripId: tripForRating, customerId: ratingCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+
+    await expectErr(
+      '6.3: rating a non-completed reservation is rejected',
+      () => repo.submitRating({ reservationId: resForRating, direction: 'customer_to_driver', stars: 5, raterCustomerId: ratingCustomer }),
+      'DZ721',
+    );
+
+    await repo.confirmReservation(resForRating);
+    const fullPrice = await db.raw<{ total_price: string }>('select total_price from reservation where id = $1', [resForRating]);
+    const payForRating = await repo.recordPayment({ reservationId: resForRating, amount: fullPrice[0].total_price, method: 'cash' });
+    await repo.settlePayment(payForRating);
+    await repo.startTrip(tripForRating);
+    await repo.closeTrip(tripForRating);
+    const resAfterClose = await db.raw<{ status: string }>('select status from reservation where id = $1', [resForRating]);
+    if (resAfterClose[0]?.status === 'completed') {
+      ok('6.3: setup — fully-paid confirmed reservation becomes completed on trip close');
+    } else {
+      bad('6.3: setup reservation status after close', JSON.stringify(resAfterClose[0]));
+    }
+
+    await expectErr(
+      '6.3: submitting an out-of-range star rating is rejected',
+      () => repo.submitRating({ reservationId: resForRating, direction: 'customer_to_driver', stars: 7, raterCustomerId: ratingCustomer }),
+      'DZ001',
+    );
+    await expectErr(
+      '6.3: customer_to_driver rating from a non-owning customer is rejected',
+      () => repo.submitRating({ reservationId: resForRating, direction: 'customer_to_driver', stars: 5, raterCustomerId: otherCustomer }),
+      'DZ723',
+    );
+    const ratingC2D = await expectOk('6.3: customer rates driver (5 stars)', () =>
+      repo.submitRating({ reservationId: resForRating, direction: 'customer_to_driver', stars: 5, review: 'Excellent', raterCustomerId: ratingCustomer }),
+    );
+    await expectErr(
+      '6.3: rating the same reservation/direction twice is rejected',
+      () => repo.submitRating({ reservationId: resForRating, direction: 'customer_to_driver', stars: 4, raterCustomerId: ratingCustomer }),
+      'DZ722',
+    );
+    await expectErr(
+      '6.3: driver_to_customer rating from the wrong driver is rejected',
+      () => repo.submitRating({ reservationId: resForRating, direction: 'driver_to_customer', stars: 5, raterDriverId: inspDriver }),
+      'DZ723',
+    );
+    const ratingD2C = await expectOk('6.3: driver rates customer (4 stars)', () =>
+      repo.submitRating({ reservationId: resForRating, direction: 'driver_to_customer', stars: 4, raterDriverId: ratingDriver }),
+    );
+
+    const ratingStatus = await repo.getReservationRatingStatus(resForRating);
+    if (ratingStatus.customer_to_driver && ratingStatus.driver_to_customer) {
+      ok('6.3: getReservationRatingStatus reports both directions submitted');
+    } else {
+      bad('6.3: getReservationRatingStatus', JSON.stringify(ratingStatus));
+    }
+
+    const ratedDriverProfile = await repo.getDriverProfile(ratingDriver);
+    if (ratedDriverProfile?.rating_count === 1 && Number(ratedDriverProfile.rating_avg) === 5) {
+      ok('6.3: driver.rating_avg/rating_count maintained by trigger after a rating');
+    } else {
+      bad('6.3: driver rating_avg/rating_count', JSON.stringify(ratedDriverProfile));
+    }
+
+    if (ratingC2D) {
+      await expectErr('6.3: moderating (hiding) a rating without a reason is rejected', () => repo.moderateRating(ratingC2D, adminId, true, ''), 'DZ001');
+      await repo.moderateRating(ratingC2D, adminId, true, 'Avis suspect');
+      const hiddenRating = await repo.getRating(ratingC2D);
+      if (hiddenRating?.hidden_at && hiddenRating.moderation_reason === 'Avis suspect') {
+        ok('6.3: hidden rating records hidden_at + moderation_reason');
+      } else {
+        bad('6.3: hidden rating state', JSON.stringify(hiddenRating));
+      }
+      const driverAfterHide = await repo.getDriverProfile(ratingDriver);
+      if (driverAfterHide?.rating_count === 0) {
+        ok('6.3: hiding the only rating recomputes driver.rating_count back to 0');
+      } else {
+        bad('6.3: driver rating_count after hide', JSON.stringify(driverAfterHide));
+      }
+      await repo.moderateRating(ratingC2D, adminId, false);
+      const driverAfterUnhide = await repo.getDriverProfile(ratingDriver);
+      if (driverAfterUnhide?.rating_count === 1) {
+        ok('6.3: unhiding the rating restores driver.rating_count to 1');
+      } else {
+        bad('6.3: driver rating_count after unhide', JSON.stringify(driverAfterUnhide));
+      }
+    }
+    void ratingD2C;
+
+    // ── Task 7.1/7.2: mock payment gateway + webhook ────────────────────────
+    console.log('\n=== Task 7.1/7.2: payment gateway ===');
+    const gwDriver = await mkTestDriver(8);
+    const gwCustomer = await mkCustomer(9);
+    const tripForGw = await repo.createTrip({
+      trajectoryId: trajectoryId!,
+      departureAt: new Date(Date.now() + 3 * 3600 * 1000),
+      capacity: 4,
+      seatPrice: 500,
+      driverId: gwDriver,
+    });
+    createdTripIds.push(tripForGw);
+    await repo.populateTripStops(tripForGw);
+    await repo.publishTrip(tripForGw);
+    await repo.setTripPrice({ tripId: tripForGw, fromWpointId: wpA, toWpointId: wpB, price: 500 });
+
+    const resA = await repo.reserve({ tripId: tripForGw, customerId: gwCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const resATotal = (await db.raw<{ total_price: string }>('select total_price from reservation where id = $1', [resA]))[0].total_price;
+    const txnA = generateTransactionId();
+    const paymentA = await repo.createGatewayPaymentIntent({
+      reservationId: resA,
+      amount: resATotal,
+      method: 'cib',
+      gateway: GATEWAY_NAME,
+      gatewayTransactionId: txnA,
+    });
+
+    const foundIntent = await repo.getPaymentByGatewayTransactionId(txnA);
+    if (foundIntent?.id === paymentA && foundIntent.status === 'pending') {
+      ok('7.1: getPaymentByGatewayTransactionId finds the freshly-created pending intent');
+    } else {
+      bad('7.1: getPaymentByGatewayTransactionId', JSON.stringify(foundIntent));
+    }
+    const openIntent = await repo.findOpenGatewayIntent(resA);
+    if (openIntent?.gateway_transaction_id === txnA) {
+      ok('7.1: findOpenGatewayIntent returns the still-pending checkout session (idempotent re-checkout)');
+    } else {
+      bad('7.1: findOpenGatewayIntent', JSON.stringify(openIntent));
+    }
+
+    const badSigResult = await repo.applyGatewayPaymentEvent({
+      paymentId: paymentA,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: generateEventId(),
+      eventType: 'payment.succeeded',
+      signatureValid: false,
+      rawPayload: { note: 'tampered' },
+    });
+    if (badSigResult === 'rejected') {
+      ok('7.2: an invalid-signature webhook event is rejected without touching payment state');
+    } else {
+      bad('7.2: bad-signature webhook result', badSigResult);
+    }
+    const stillPending = await repo.getPaymentByGatewayTransactionId(txnA);
+    if (stillPending?.status === 'pending') {
+      ok('7.2: payment status is untouched after a rejected (bad-signature) webhook');
+    } else {
+      bad('7.2: payment status after bad-signature webhook', JSON.stringify(stillPending));
+    }
+
+    const unknownPaymentResult = await repo.applyGatewayPaymentEvent({
+      paymentId: reviewerRow[0].id,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: generateEventId(),
+      eventType: 'payment.succeeded',
+      signatureValid: true,
+      rawPayload: {},
+    });
+    if (unknownPaymentResult === 'rejected') {
+      ok('7.2: a webhook event for an unknown payment id is rejected');
+    } else {
+      bad('7.2: unknown-payment webhook result', unknownPaymentResult);
+    }
+
+    const successEventId = generateEventId();
+    const successResult = await repo.applyGatewayPaymentEvent({
+      paymentId: paymentA,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: successEventId,
+      eventType: 'payment.succeeded',
+      signatureValid: true,
+      rawPayload: { ok: true },
+    });
+    if (successResult === 'processed') {
+      ok('7.2: a valid payment.succeeded webhook is processed');
+    } else {
+      bad('7.2: success webhook result', successResult);
+    }
+    const paidRow = await repo.getPaymentByGatewayTransactionId(txnA);
+    if (paidRow?.status === 'paid') {
+      ok('7.2: payment.status flips to paid after the succeeded webhook');
+    } else {
+      bad('7.2: payment status after success webhook', JSON.stringify(paidRow));
+    }
+    const resAStatus = await db.raw<{ status: string }>('select status from reservation where id = $1', [resA]);
+    if (resAStatus[0]?.status === 'confirmed') {
+      ok('7.2: a fully-paid online payment auto-confirms the (still-pending) reservation');
+    } else {
+      bad('7.2: reservation auto-confirm after full online payment', JSON.stringify(resAStatus[0]));
+    }
+    const noLongerOpen = await repo.findOpenGatewayIntent(resA);
+    if (noLongerOpen === null) {
+      ok('7.1: findOpenGatewayIntent no longer returns a resolved (paid) intent');
+    } else {
+      bad('7.1: findOpenGatewayIntent after resolution', JSON.stringify(noLongerOpen));
+    }
+
+    const replayResult = await repo.applyGatewayPaymentEvent({
+      paymentId: paymentA,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: successEventId,
+      eventType: 'payment.succeeded',
+      signatureValid: true,
+      rawPayload: { ok: true },
+    });
+    if (replayResult === 'duplicate') {
+      ok('7.2: replaying the exact same webhook event id is reported as duplicate, not re-processed');
+    } else {
+      bad('7.2: replay webhook result', replayResult);
+    }
+    const alreadyResolvedResult = await repo.applyGatewayPaymentEvent({
+      paymentId: paymentA,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: generateEventId(),
+      eventType: 'payment.succeeded',
+      signatureValid: true,
+      rawPayload: { ok: true },
+    });
+    if (alreadyResolvedResult === 'duplicate') {
+      ok('7.2: a brand-new event id for an already-resolved payment is still reported as duplicate');
+    } else {
+      bad('7.2: already-resolved webhook result', alreadyResolvedResult);
+    }
+
+    // A second, independent reservation/payment to exercise the 'failed' path
+    // without disturbing the already-resolved assertions above.
+    const resB = await repo.reserve({ tripId: tripForGw, customerId: gwCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+    const resBTotal = (await db.raw<{ total_price: string }>('select total_price from reservation where id = $1', [resB]))[0].total_price;
+    const txnB = generateTransactionId();
+    const paymentB = await repo.createGatewayPaymentIntent({
+      reservationId: resB,
+      amount: resBTotal,
+      method: 'edahabia',
+      gateway: GATEWAY_NAME,
+      gatewayTransactionId: txnB,
+    });
+    const failResult = await repo.applyGatewayPaymentEvent({
+      paymentId: paymentB,
+      gateway: GATEWAY_NAME,
+      gatewayEventId: generateEventId(),
+      eventType: 'payment.failed',
+      signatureValid: true,
+      rawPayload: { reason: 'insufficient_funds' },
+    });
+    if (failResult === 'processed') {
+      ok('7.2: a valid payment.failed webhook is processed');
+    } else {
+      bad('7.2: failure webhook result', failResult);
+    }
+    const failedRow = await repo.getPaymentByGatewayTransactionId(txnB);
+    if (failedRow?.status === 'failed' && failedRow.failure_reason === 'insufficient_funds') {
+      ok('7.2: failed payment records status=failed and the gateway-supplied failure_reason');
+    } else {
+      bad('7.2: failed payment state', JSON.stringify(failedRow));
+    }
+    const resBStatus = await db.raw<{ status: string }>('select status from reservation where id = $1', [resB]);
+    if (resBStatus[0]?.status === 'pending') {
+      ok('7.2: a failed online payment does NOT auto-confirm the reservation');
+    } else {
+      bad('7.2: reservation status after failed online payment', JSON.stringify(resBStatus[0]));
+    }
+
+    const eventsForA = await repo.listPaymentGatewayEvents(paymentA);
+    // 3 rows: bad-signature (rejected) + the original success (processed) +
+    // the brand-new-event-id-but-already-resolved call (duplicate). The
+    // literal replay with the SAME event id is correctly NOT a 4th row —
+    // the unique (gateway, gateway_event_id) index silently absorbs it.
+    if (
+      eventsForA.length === 3 &&
+      eventsForA.filter((e) => e.processing_result === 'rejected').length === 1 &&
+      eventsForA.filter((e) => e.processing_result === 'processed').length === 1 &&
+      eventsForA.filter((e) => e.processing_result === 'duplicate').length === 1
+    ) {
+      ok('7.2: listPaymentGatewayEvents(paymentId) shows the full audit trail (rejected + processed + duplicate), literal replay excluded by the unique index');
+    } else {
+      bad('7.2: listPaymentGatewayEvents(paymentA)', JSON.stringify(eventsForA));
+    }
+
+    const fraudSignals = await repo.listFraudSignals();
+    if (Array.isArray(fraudSignals)) {
+      ok(`6.4: listFraudSignals() runs and returns an array (${fraudSignals.length} signal(s) currently)`);
+    } else {
+      bad('6.4: listFraudSignals()', JSON.stringify(fraudSignals));
+    }
   } finally {
     console.log('\n=== Cleanup ===');
     // NOTE: the management-api transport inlines $n params as scalars/jsonb
@@ -591,12 +1008,24 @@ async function main(): Promise<void> {
       }
       if (createdTripIds.length) {
         const trips = uuidList(createdTripIds);
+        // payment_gateway_event.payment_id is ON DELETE SET NULL (not
+        // cascade), and rating.reservation_id IS cascade — so the gateway
+        // audit rows need an explicit delete here, ratings don't.
+        await db.raw(
+          `delete from payment_gateway_event where payment_id in (select id from payment where reservation_id in (select id from reservation where trip_id in (${trips})))`,
+        );
         await db.raw(`delete from payment where reservation_id in (select id from reservation where trip_id in (${trips}))`);
         await db.raw(`delete from reservation where trip_id in (${trips})`);
         await db.raw(`delete from trip_price where trip_id in (${trips})`);
         await db.raw(`delete from trip_stop where trip_id in (${trips})`);
         await db.raw(`delete from trip where id in (${trips})`);
-        console.log(`  - removed ${createdTripIds.length} trip(s) and their stops/prices/reservations/payments`);
+        console.log(`  - removed ${createdTripIds.length} trip(s) and their stops/prices/reservations/payments/ratings/gateway-events`);
+      }
+      if (createdVehicleIds.length) {
+        // vehicle_inspection cascades on vehicle delete; must run after trip
+        // deletion above since trip.vehicle_id has no ON DELETE action.
+        await db.raw(`delete from vehicle where id in (${uuidList(createdVehicleIds)})`);
+        console.log(`  - removed ${createdVehicleIds.length} throwaway vehicle(s) and their inspection records`);
       }
       if (createdDriverIds.length) {
         // Cascades driver_last_location / no_show_event / kyc_document rows
@@ -622,6 +1051,7 @@ async function main(): Promise<void> {
       console.error('⚠ cleanup failed (manual cleanup may be needed):', err instanceof Error ? err.message : err);
       console.error(`  trajectoryId=${trajectoryId}`);
       console.error(`  tripIds=${JSON.stringify(createdTripIds)}`);
+      console.error(`  vehicleIds=${JSON.stringify(createdVehicleIds)}`);
       console.error(`  customerIds=${JSON.stringify(createdCustomerIds)}`);
       fail++;
     }

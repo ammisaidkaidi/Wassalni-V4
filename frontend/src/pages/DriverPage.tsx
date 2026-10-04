@@ -10,12 +10,16 @@ import type {
   DriverTripRow,
   KycDocType,
   KycDocumentRow,
+  MaintenanceStatus,
   PricePair,
+  RatingRow,
+  RatingStatus,
   Stop,
   StopManifestEntry,
   TrajectoryRow,
   TripEtaResult,
   TripManifestRow,
+  VehicleInspectionRow,
   VehicleRow,
   Wilaya,
   WpointRow,
@@ -35,15 +39,23 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: 'Annulé',
 };
 
-type Tab = 'trips' | 'current' | 'reservations' | 'trajectories' | 'kyc' | 'settings';
+type Tab = 'trips' | 'current' | 'reservations' | 'trajectories' | 'kyc' | 'vehicle-inspections' | 'ratings' | 'settings';
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'trips', label: 'Mes voyages' },
   { id: 'current', label: 'Trajet en cours' },
   { id: 'reservations', label: 'Réservations' },
   { id: 'trajectories', label: 'Trajectoires' },
   { id: 'kyc', label: 'Mes documents' },
+  { id: 'vehicle-inspections', label: 'Contrôle technique' },
+  { id: 'ratings', label: 'Mes évaluations' },
   { id: 'settings', label: 'Paramètres' },
 ];
+
+const MAINTENANCE_LABEL: Record<MaintenanceStatus, string> = {
+  ok: 'OK',
+  needs_service: 'Entretien requis',
+  out_of_service: 'Hors service',
+};
 
 const KYC_DOC_LABEL: Record<KycDocType, string> = {
   identity: "Pièce d'identité",
@@ -85,6 +97,8 @@ export default function DriverPage() {
       {tab === 'reservations' && <ReservationsTab />}
       {tab === 'trajectories' && <TrajectoiresTab />}
       {tab === 'kyc' && <KycTab />}
+      {tab === 'vehicle-inspections' && <VehicleInspectionsTab />}
+      {tab === 'ratings' && <DriverRatingsTab />}
       {tab === 'settings' && <ParametresTab />}
     </section>
   );
@@ -701,6 +715,7 @@ function ReservationsTab() {
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="pending">En attente</option>
             <option value="confirmed">Confirmées</option>
+            <option value="completed">Terminées</option>
             <option value="cancelled">Refusées / annulées</option>
             <option value="">Toutes</option>
           </select>
@@ -757,6 +772,7 @@ function ReservationsTab() {
                         </button>
                       </>
                     )}
+                    {r.status === 'completed' && <RateCustomerAction reservationId={r.id} />}
                   </td>
                 </tr>
               ))}
@@ -765,6 +781,62 @@ function ReservationsTab() {
         </div>
       )}
     </div>
+  );
+}
+
+function RateCustomerAction({ reservationId }: { reservationId: string }) {
+  const [status, setStatus] = useState<RatingStatus | null>(null);
+  const [open, setOpen] = useState(false);
+  const [stars, setStars] = useState(5);
+  const [review, setReview] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{ rating_status: RatingStatus }>(`/api/driver/reservations/${reservationId}/rating-status`)
+      .then((r) => setStatus(r.rating_status))
+      .catch(() => setStatus(null));
+  }, [reservationId]);
+
+  const submit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setBusy(true);
+    setMsg('');
+    try {
+      await api(`/api/driver/reservations/${reservationId}/rate-customer`, { method: 'POST', body: { stars, review: review || undefined } });
+      setStatus({ customer_to_driver: status?.customer_to_driver ?? false, driver_to_customer: true });
+      setOpen(false);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (status?.driver_to_customer) return <span className="chip confirmed">✔ client noté</span>;
+
+  return (
+    <span>
+      <button className="btn ghost small" onClick={() => setOpen(!open)}>
+        Noter le client
+      </button>
+      {open && (
+        <form className="form-inline" style={{ marginTop: 6 }} onSubmit={(e) => void submit(e)}>
+          {msg && <span className="alert error small">{msg}</span>}
+          <select value={stars} onChange={(e) => setStars(Number(e.target.value))}>
+            {[5, 4, 3, 2, 1].map((n) => (
+              <option key={n} value={n}>
+                {'★'.repeat(n)}
+              </option>
+            ))}
+          </select>
+          <input placeholder="Avis (optionnel)" value={review} onChange={(e) => setReview(e.target.value)} />
+          <button className="btn primary small" disabled={busy}>
+            Envoyer
+          </button>
+        </form>
+      )}
+    </span>
   );
 }
 
@@ -1065,6 +1137,20 @@ function ParametresTab() {
         <p className="muted small">
           Identité officielle (NIN {profile.nin}) non modifiable ici — contactez l'administrateur pour toute correction.
         </p>
+        <p>
+          {profile.rating_count > 0 ? (
+            <>
+              ★ {Number(profile.rating_avg).toFixed(1)} / 5 ({profile.rating_count} évaluation{profile.rating_count > 1 ? 's' : ''})
+            </>
+          ) : (
+            <span className="muted">Aucune évaluation reçue pour le moment.</span>
+          )}
+          {profile.trust_badge && (
+            <span className="chip confirmed" style={{ marginLeft: 8 }}>
+              ✔ Chauffeur de confiance
+            </span>
+          )}
+        </p>
         {profile.no_show_count > 0 && (
           <p className={`alert ${profile.flagged_at ? 'error' : 'info'}`}>
             ⚠ {profile.no_show_count} absence(s) enregistrée(s){profile.flagged_at ? ' — compte signalé à l\u2019administration' : ''}.
@@ -1099,6 +1185,11 @@ function ParametresTab() {
       <div className="card">
         <h2 style={{ marginTop: 0 }}>Mon véhicule</h2>
         {!vehicle && <p className="muted small">Vous n'avez pas encore de véhicule enregistré — créez-le ci-dessous.</p>}
+        {vehicle && (
+          <p className="muted small">
+            Le contrôle technique (requis pour publier un voyage) se gère dans l'onglet « Contrôle technique ».
+          </p>
+        )}
         <form className="form-grid" onSubmit={(e) => void saveVehicle(e)}>
           <label>
             Matricule
@@ -1129,6 +1220,196 @@ function ParametresTab() {
           </label>
           <button className="btn primary">{vehicle ? 'Mettre à jour' : 'Enregistrer'}</button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Contrôle technique (Task 6.2) ────────────────────────────────────────────
+
+function VehicleInspectionsTab() {
+  const [inspections, setInspections] = useState<VehicleInspectionRow[]>([]);
+  const [eligible, setEligible] = useState(false);
+  const [form, setForm] = useState({ inspection_date: '', expiry_date: '', maintenance_status: 'ok' as MaintenanceStatus, notes: '' });
+  const [file, setFile] = useState<File | null>(null);
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api<{ inspections: VehicleInspectionRow[]; eligible: boolean }>('/api/driver/vehicle/inspections');
+      setInspections(r.inspections);
+      setEligible(r.eligible);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const submit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setBusy(true);
+    setMsg('');
+    try {
+      if (file) {
+        await apiUpload('/api/driver/vehicle/inspections', file, {
+          inspection_date: form.inspection_date,
+          expiry_date: form.expiry_date,
+          maintenance_status: form.maintenance_status,
+          notes: form.notes,
+        });
+      } else {
+        await api('/api/driver/vehicle/inspections', { method: 'POST', body: { ...form, notes: form.notes || undefined } });
+      }
+      setForm({ inspection_date: '', expiry_date: '', maintenance_status: 'ok', notes: '' });
+      setFile(null);
+      setMsg('✔ Contrôle technique envoyé pour vérification');
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <p className="muted">
+        Un voyage ne peut être publié que si votre véhicule a un contrôle technique approuvé par l'administration, non
+        expiré, et non marqué « hors service ».
+      </p>
+      <p>
+        {eligible ? (
+          <span className="chip confirmed">✔ Véhicule éligible à la publication de voyages</span>
+        ) : (
+          <span className="chip cancelled">⚠ Véhicule non éligible — soumettez un contrôle technique valide</span>
+        )}
+      </p>
+      {msg && <p className="alert info">{msg}</p>}
+      <form className="card form-grid" onSubmit={(e) => void submit(e)}>
+        <label>
+          Date de contrôle
+          <input type="date" required value={form.inspection_date} onChange={(e) => setForm({ ...form, inspection_date: e.target.value })} />
+        </label>
+        <label>
+          Date d'expiration
+          <input type="date" required value={form.expiry_date} onChange={(e) => setForm({ ...form, expiry_date: e.target.value })} />
+        </label>
+        <label>
+          État d'entretien
+          <select value={form.maintenance_status} onChange={(e) => setForm({ ...form, maintenance_status: e.target.value as MaintenanceStatus })}>
+            <option value="ok">OK</option>
+            <option value="needs_service">Entretien requis</option>
+            <option value="out_of_service">Hors service</option>
+          </select>
+        </label>
+        <label>
+          Notes (optionnel)
+          <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+        </label>
+        <label>
+          Fiche de contrôle (optionnel, PDF/image)
+          <input type="file" accept=".pdf,image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        </label>
+        <button className="btn primary" disabled={busy}>
+          Envoyer
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Contrôle</th>
+              <th>Expiration</th>
+              <th>Entretien</th>
+              <th>Fichier</th>
+              <th>Statut</th>
+            </tr>
+          </thead>
+          <tbody>
+            {inspections.map((i) => (
+              <tr key={i.id}>
+                <td>{i.inspection_date}</td>
+                <td>{i.expiry_date}</td>
+                <td>{MAINTENANCE_LABEL[i.maintenance_status]}</td>
+                <td>
+                  {i.file_path ? (
+                    <a href={fileUrl(`/api/driver/vehicle/inspections/${i.id}/file`)} target="_blank" rel="noreferrer">
+                      voir
+                    </a>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td>
+                  <span className={`chip ${i.approval_state === 'approved' ? 'confirmed' : i.approval_state === 'rejected' ? 'cancelled' : 'pending'}`}>
+                    {i.approval_state}
+                  </span>
+                  {i.approval_state === 'rejected' && i.rejection_reason && <div className="muted small">{i.rejection_reason}</div>}
+                </td>
+              </tr>
+            ))}
+            {inspections.length === 0 && (
+              <tr>
+                <td colSpan={5} className="empty">
+                  Aucun contrôle technique soumis.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Mes évaluations (Task 6.3) ───────────────────────────────────────────────
+
+function DriverRatingsTab() {
+  const [rows, setRows] = useState<RatingRow[]>([]);
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    api<{ ratings: RatingRow[] }>('/api/driver/ratings')
+      .then((r) => setRows(r.ratings))
+      .catch((e) => setMsg(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  return (
+    <div>
+      <p className="muted">Évaluations laissées par vos clients après un trajet terminé.</p>
+      {msg && <p className="alert info">{msg}</p>}
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Réservation</th>
+              <th>Client</th>
+              <th>Note</th>
+              <th>Avis</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>{r.reservation_code}</td>
+                <td>{r.rater_customer_name ?? '—'}</td>
+                <td>{'★'.repeat(r.stars)}</td>
+                <td className="muted small">{r.review ?? '—'}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="empty">
+                  Aucune évaluation reçue pour le moment.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

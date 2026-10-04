@@ -8,13 +8,18 @@ import type {
   CustomerRow,
   DomainErrorRow,
   DriverRow,
+  FraudSignalRow,
   KycDocType,
   KycDocumentRow,
+  MaintenanceStatus,
   NoShowEventRow,
+  PaymentGatewayEventRow,
   PaymentRow,
+  RatingRow,
   RefundWorklistRow,
   TrackingRow,
   TrajectoryRow,
+  VehicleInspectionRow,
   VehicleRow,
   Wilaya,
   WpointRow,
@@ -31,6 +36,9 @@ type Tab =
   | 'tracking'
   | 'no-show'
   | 'kyc'
+  | 'vehicle-inspections'
+  | 'ratings'
+  | 'fraud'
   | 'errors';
 
 const TABS: Array<{ id: Tab; label: string }> = [
@@ -44,6 +52,9 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'tracking', label: 'Suivi GPS' },
   { id: 'no-show', label: 'Absences' },
   { id: 'kyc', label: 'KYC chauffeurs' },
+  { id: 'vehicle-inspections', label: 'Contrôles techniques' },
+  { id: 'ratings', label: 'Évaluations' },
+  { id: 'fraud', label: 'Fraude' },
   { id: 'errors', label: 'Codes erreurs' },
 ];
 
@@ -99,6 +110,9 @@ export default function AdminPage() {
       {tab === 'tracking' && <TrackingTab />}
       {tab === 'no-show' && <NoShowTab />}
       {tab === 'kyc' && <KycReviewTab />}
+      {tab === 'vehicle-inspections' && <VehicleInspectionReviewTab />}
+      {tab === 'ratings' && <RatingsModerationTab />}
+      {tab === 'fraud' && <FraudSignalsTab />}
       {tab === 'errors' && <ErrorsTab />}
     </section>
   );
@@ -505,6 +519,7 @@ function DriversTab() {
               <th>Nom</th>
               <th>NIN</th>
               <th>Téléphone</th>
+              <th>Évaluation</th>
               <th>Absences</th>
               <th />
             </tr>
@@ -516,6 +531,10 @@ function DriversTab() {
                   <td>{d.full_name}</td>
                   <td>{d.nin}</td>
                   <td>{d.phone}</td>
+                  <td>
+                    {d.rating_count ? `★ ${Number(d.rating_avg).toFixed(1)} (${d.rating_count})` : '—'}
+                    {d.trust_badge && <span className="chip confirmed" style={{ marginLeft: 6 }}>✔ confiance</span>}
+                  </td>
                   <td>
                     {d.no_show_count ?? 0}
                     {d.flagged_at && <span className="chip cancelled" style={{ marginLeft: 6 }}>⚠ signalé</span>}
@@ -531,7 +550,7 @@ function DriversTab() {
                 </tr>
                 {accountFor === d.id && (
                   <tr>
-                    <td colSpan={5}>
+                    <td colSpan={6}>
                       <DriverAccountPanel driverId={d.id} defaultEmail={d.email} />
                     </td>
                   </tr>
@@ -685,6 +704,7 @@ function VehiclesTab() {
               <th>Matricule</th>
               <th>Places</th>
               <th>Marque / modèle</th>
+              <th>Contrôle technique</th>
               <th />
             </tr>
           </thead>
@@ -695,6 +715,15 @@ function VehiclesTab() {
                 <td>{v.seats}</td>
                 <td>
                   {[v.make, v.model].filter(Boolean).join(' ') || '—'}
+                </td>
+                <td>
+                  {v.is_eligible ? (
+                    <span className="chip confirmed">✔ éligible</span>
+                  ) : (
+                    <span className="chip cancelled" title="Aucun contrôle technique approuvé et valide — ce véhicule ne pourra pas être affecté à un voyage publié">
+                      ⚠ non éligible
+                    </span>
+                  )}
                 </td>
                 <td>
                   <button className="btn danger small" onClick={() => void remove(v.id)}>
@@ -766,6 +795,7 @@ function CustomersTab() {
               <th>Téléphone</th>
               <th>Email</th>
               <th>Créé le</th>
+              <th>Évaluation</th>
               <th>Absences</th>
             </tr>
           </thead>
@@ -776,6 +806,7 @@ function CustomersTab() {
                 <td>{c.phone}</td>
                 <td>{c.email ?? '—'}</td>
                 <td>{fmtDateTime(c.created_at)}</td>
+                <td>{c.rating_count ? `★ ${Number(c.rating_avg).toFixed(1)} (${c.rating_count})` : '—'}</td>
                 <td>
                   {c.no_show_count ?? 0}
                   {c.flagged_at && <span className="chip cancelled" style={{ marginLeft: 6 }}>⚠ signalé</span>}
@@ -784,7 +815,7 @@ function CustomersTab() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={5} className="empty">
+                <td colSpan={6} className="empty">
                   Aucun client.
                 </td>
               </tr>
@@ -1017,6 +1048,7 @@ function PaymentsTab() {
               <th>Montant</th>
               <th>Remboursé</th>
               <th>Méthode</th>
+              <th>Origine</th>
               <th>Statut</th>
               <th>Actions</th>
             </tr>
@@ -1032,8 +1064,10 @@ function PaymentsTab() {
                 </td>
                 <td>{Number(p.refunded_amount).toLocaleString('fr-DZ')}</td>
                 <td>{p.method}</td>
+                <td>{p.gateway ? <span className="chip pending">en ligne ({p.gateway})</span> : 'manuel'}</td>
                 <td>
                   <span className={`chip ${p.status}`}>{p.status}</span>
+                  {p.status === 'failed' && p.failure_reason && <div className="muted small">{p.failure_reason}</div>}
                 </td>
                 <td className="actions">
                   {p.status === 'pending' && (
@@ -1051,7 +1085,7 @@ function PaymentsTab() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="empty">
+                <td colSpan={9} className="empty">
                   Aucun paiement.
                 </td>
               </tr>
@@ -1059,6 +1093,8 @@ function PaymentsTab() {
           </tbody>
         </table>
       </div>
+
+      <PaymentGatewayEventsPanel />
 
       <h2>
         Remboursements en attente
@@ -1478,6 +1514,450 @@ function KycReviewTab() {
               <tr>
                 <td colSpan={6} className="empty">
                   Aucun document.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Paiements en ligne — journal des webhooks (Task 7.2) ────────────────────────
+
+function PaymentGatewayEventsPanel() {
+  const [events, setEvents] = useState<PaymentGatewayEventRow[]>([]);
+  const [open, setOpen] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setEvents((await api<{ events: PaymentGatewayEventRow[] }>('/api/admin/payment-gateway-events')).events);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) void load();
+  }, [open, load]);
+
+  return (
+    <div style={{ margin: '20px 0' }}>
+      <button className="btn ghost small" onClick={() => setOpen(!open)}>
+        {open ? 'Masquer' : 'Afficher'} le journal des webhooks de paiement en ligne
+      </button>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          <p className="muted small">
+            Chaque tentative de livraison d'un webhook de la passerelle de paiement (simulée) — y compris les signatures
+            invalides et les livraisons en double (idempotence) — audit complet, jamais recalculé ni déduit.
+          </p>
+          {msg && <p className="alert info">{msg}</p>}
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Reçu le</th>
+                  <th>Passerelle</th>
+                  <th>Événement</th>
+                  <th>Signature</th>
+                  <th>Résultat</th>
+                  <th>Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((e) => (
+                  <tr key={e.id}>
+                    <td>{fmtDateTime(e.received_at)}</td>
+                    <td>{e.gateway}</td>
+                    <td>{e.event_type}</td>
+                    <td>{e.signature_valid ? '✔' : '❌ invalide'}</td>
+                    <td>
+                      <span
+                        className={`chip ${e.processing_result === 'processed' ? 'confirmed' : e.processing_result === 'rejected' ? 'cancelled' : 'pending'}`}
+                      >
+                        {e.processing_result}
+                      </span>
+                    </td>
+                    <td className="muted small">{e.processing_note ?? '—'}</td>
+                  </tr>
+                ))}
+                {events.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="empty">
+                      Aucun événement webhook reçu pour le moment.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Contrôles techniques (Task 6.2) ─────────────────────────────────────────────
+
+const MAINTENANCE_LABEL: Record<MaintenanceStatus, string> = {
+  ok: 'OK',
+  needs_service: 'Entretien requis',
+  out_of_service: 'Hors service',
+};
+
+function VehicleInspectionReviewTab() {
+  const [rows, setRows] = useState<VehicleInspectionRow[]>([]);
+  const [vehicles, setVehicles] = useState<VehicleRow[]>([]);
+  const [statusFilter, setStatusFilter] = useState<'' | VehicleInspectionRow['approval_state']>('pending');
+  const [msg, setMsg] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [form, setForm] = useState({ vehicle_id: '', inspection_date: '', expiry_date: '', maintenance_status: 'ok' as MaintenanceStatus, notes: '' });
+
+  const load = useCallback(async (status: '' | VehicleInspectionRow['approval_state']) => {
+    try {
+      const qs = status ? `?status=${status}` : '';
+      const [insp, veh] = await Promise.all([
+        api<{ inspections: VehicleInspectionRow[] }>(`/api/admin/vehicle-inspections${qs}`),
+        api<{ vehicles: VehicleRow[] }>('/api/admin/vehicles'),
+      ]);
+      setRows(insp.inspections);
+      setVehicles(veh.vehicles);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load(statusFilter);
+  }, [load, statusFilter]);
+
+  const create = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setMsg('');
+    try {
+      await api('/api/admin/vehicle-inspections', {
+        method: 'POST',
+        body: { ...form, notes: form.notes || undefined },
+      });
+      setForm({ vehicle_id: '', inspection_date: '', expiry_date: '', maintenance_status: 'ok', notes: '' });
+      setMsg('✔ Contrôle technique enregistré (en attente)');
+      await load(statusFilter);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const approve = async (id: string): Promise<void> => {
+    setBusyId(id);
+    setMsg('');
+    try {
+      await api(`/api/admin/vehicle-inspections/${id}/approve`, { method: 'POST', body: {} });
+      setMsg('✔ Contrôle technique approuvé');
+      await load(statusFilter);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const reject = async (id: string): Promise<void> => {
+    const reason = window.prompt('Motif du refus :', '');
+    if (!reason) return;
+    setBusyId(id);
+    setMsg('');
+    try {
+      await api(`/api/admin/vehicle-inspections/${id}/reject`, { method: 'POST', body: { reason } });
+      setMsg('✔ Contrôle technique refusé');
+      await load(statusFilter);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div>
+      <p className="muted">
+        File de vérification des contrôles techniques de véhicules. Un voyage ne peut être publié que si son véhicule a un
+        contrôle technique approuvé, non expiré, et non marqué hors service.
+      </p>
+      {msg && <p className="alert info">{msg}</p>}
+      <form className="card form-grid" onSubmit={(e) => void create(e)}>
+        <label>
+          Véhicule
+          <select required value={form.vehicle_id} onChange={(e) => setForm({ ...form, vehicle_id: e.target.value })}>
+            <option value="">—</option>
+            {vehicles.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.matricule}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Date de contrôle
+          <input type="date" required value={form.inspection_date} onChange={(e) => setForm({ ...form, inspection_date: e.target.value })} />
+        </label>
+        <label>
+          Date d'expiration
+          <input type="date" required value={form.expiry_date} onChange={(e) => setForm({ ...form, expiry_date: e.target.value })} />
+        </label>
+        <label>
+          État d'entretien
+          <select value={form.maintenance_status} onChange={(e) => setForm({ ...form, maintenance_status: e.target.value as MaintenanceStatus })}>
+            <option value="ok">OK</option>
+            <option value="needs_service">Entretien requis</option>
+            <option value="out_of_service">Hors service</option>
+          </select>
+        </label>
+        <label>
+          Notes (optionnel)
+          <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+        </label>
+        <button className="btn primary">Enregistrer</button>
+      </form>
+      <div style={{ margin: '12px 0' }}>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as '' | VehicleInspectionRow['approval_state'])}>
+          <option value="pending">En attente</option>
+          <option value="approved">Approuvés</option>
+          <option value="rejected">Refusés</option>
+          <option value="">Tous</option>
+        </select>
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Véhicule</th>
+              <th>Contrôle</th>
+              <th>Expiration</th>
+              <th>Entretien</th>
+              <th>Fichier</th>
+              <th>Statut</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>{r.vehicle_matricule}</td>
+                <td>{r.inspection_date}</td>
+                <td>{r.expiry_date}</td>
+                <td>{MAINTENANCE_LABEL[r.maintenance_status]}</td>
+                <td>
+                  {r.file_path ? (
+                    <a href={fileUrl(`/api/admin/vehicle-inspections/${r.id}/file`)} target="_blank" rel="noreferrer">
+                      voir
+                    </a>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td>
+                  <span className={`chip ${r.approval_state === 'approved' ? 'confirmed' : r.approval_state === 'rejected' ? 'cancelled' : 'pending'}`}>
+                    {r.approval_state}
+                  </span>
+                  {r.approval_state === 'rejected' && r.rejection_reason && <div className="muted small">{r.rejection_reason}</div>}
+                </td>
+                <td className="actions">
+                  {r.approval_state === 'pending' && (
+                    <>
+                      <button className="btn primary small" disabled={busyId === r.id} onClick={() => void approve(r.id)}>
+                        Approuver
+                      </button>
+                      <button className="btn danger small" disabled={busyId === r.id} onClick={() => void reject(r.id)}>
+                        Refuser
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={7} className="empty">
+                  Aucun contrôle technique.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Évaluations (Task 6.3) ───────────────────────────────────────────────────
+
+function RatingsModerationTab() {
+  const [rows, setRows] = useState<RatingRow[]>([]);
+  const [msg, setMsg] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRows((await api<{ ratings: RatingRow[] }>('/api/admin/ratings')).ratings);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const toggleHide = async (r: RatingRow): Promise<void> => {
+    setBusyId(r.id);
+    setMsg('');
+    try {
+      if (r.hidden_at) {
+        await api(`/api/admin/ratings/${r.id}/moderate`, { method: 'POST', body: { hide: false } });
+        setMsg('✔ Évaluation réaffichée');
+      } else {
+        const reason = window.prompt("Motif de masquage de cette évaluation :", '');
+        if (!reason) {
+          setBusyId(null);
+          return;
+        }
+        await api(`/api/admin/ratings/${r.id}/moderate`, { method: 'POST', body: { hide: true, reason } });
+        setMsg('✔ Évaluation masquée');
+      }
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div>
+      <p className="muted">
+        Toutes les évaluations client ↔ chauffeur. Masquer une évaluation la retire du calcul de la moyenne affichée sans
+        la supprimer (trace d'audit conservée).
+      </p>
+      {msg && <p className="alert info">{msg}</p>}
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Réservation</th>
+              <th>Sens</th>
+              <th>De</th>
+              <th>Vers</th>
+              <th>Note</th>
+              <th>Avis</th>
+              <th>Statut</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>{r.reservation_code}</td>
+                <td>{r.direction === 'customer_to_driver' ? 'Client → Chauffeur' : 'Chauffeur → Client'}</td>
+                <td>{r.rater_customer_name ?? r.rater_driver_name}</td>
+                <td>{r.ratee_driver_name ?? r.ratee_customer_name}</td>
+                <td>{'★'.repeat(r.stars)}</td>
+                <td className="muted small">{r.review ?? '—'}</td>
+                <td>
+                  {r.hidden_at ? <span className="chip cancelled">masquée</span> : <span className="chip confirmed">visible</span>}
+                  {r.hidden_at && r.moderation_reason && <div className="muted small">{r.moderation_reason}</div>}
+                </td>
+                <td className="actions">
+                  <button className="btn ghost small" disabled={busyId === r.id} onClick={() => void toggleHide(r)}>
+                    {r.hidden_at ? 'Réafficher' : 'Masquer'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={8} className="empty">
+                  Aucune évaluation.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Fraude (Task 6.4) ────────────────────────────────────────────────────────
+
+const FRAUD_SIGNAL_LABEL: Record<FraudSignalRow['signal_type'], string> = {
+  duplicate_nin: 'NIN en double',
+  duplicate_phone: 'Téléphone en double',
+  rapid_cancel_rebook: 'Annulation / reréservation rapide',
+  repeated_no_show: 'Absences répétées',
+  suspicious_payment: 'Paiement suspect',
+  account_burst: 'Création de comptes en rafale',
+};
+
+function FraudSignalsTab() {
+  const [rows, setRows] = useState<FraudSignalRow[]>([]);
+  const [msg, setMsg] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setRows((await api<{ signals: FraudSignalRow[] }>('/api/admin/fraud-signals')).signals);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <div>
+      <p className="muted">
+        Signaux déterministes (sans ML) calculés à la demande à partir des données existantes — NIN/téléphone en double,
+        annulation puis reréservation rapide sur le même trajet, absences répétées (Task 5.3), paiements en ligne
+        échoués en rafale, et créations de comptes clients en rafale. Chaque ligne est une piste à vérifier
+        manuellement, pas une décision automatique.
+      </p>
+      {msg && <p className="alert info">{msg}</p>}
+      <button className="btn ghost small" onClick={() => void load()}>
+        Actualiser
+      </button>
+      <div className="table-wrap" style={{ marginTop: 10 }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Gravité</th>
+              <th>Concerné</th>
+              <th>Détail</th>
+              <th>Détecté le</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s, i) => (
+              <tr key={i}>
+                <td>{FRAUD_SIGNAL_LABEL[s.signal_type]}</td>
+                <td>
+                  <span className={`chip ${s.severity === 'high' ? 'cancelled' : s.severity === 'medium' ? 'pending' : 'confirmed'}`}>
+                    {s.severity}
+                  </span>
+                </td>
+                <td>{s.subject_label}</td>
+                <td className="muted small">{s.detail}</td>
+                <td>{fmtDateTime(s.detected_at)}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} className="empty">
+                  Aucun signal détecté pour le moment.
                 </td>
               </tr>
             )}

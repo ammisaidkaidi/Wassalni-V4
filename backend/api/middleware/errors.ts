@@ -54,6 +54,16 @@ const USER_MESSAGES: Readonly<Record<string, string>> = {
   DZ701: 'Document KYC introuvable.',
   DZ702: 'Ce document a déjà été examiné (approuvé ou refusé).',
   DZ703: 'Un motif de refus est requis.',
+  DZ711: 'Fiche de contrôle technique introuvable.',
+  DZ712: 'Cette fiche de contrôle technique a déjà été examinée.',
+  DZ713: 'Un motif de refus est requis.',
+  DZ714: 'Ce véhicule n’a pas de contrôle technique approuvé et valide (ou est signalé hors service) — le voyage ne peut pas être publié.',
+  DZ721: 'Seule une réservation terminée peut être notée.',
+  DZ722: 'Cette note a déjà été soumise.',
+  DZ723: 'Vous ne pouvez noter que vos propres réservations.',
+  DZ731: 'Transaction de paiement introuvable.',
+  DZ732: 'La signature du webhook de paiement est invalide.',
+  DZ733: 'Ce paiement a déjà été traité.',
 };
 
 type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;

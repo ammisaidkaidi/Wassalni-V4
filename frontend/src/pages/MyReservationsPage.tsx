@@ -1,8 +1,140 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, api, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
-import type { ReservationEtaResult, ReservationRow } from '../types';
+import type { PaymentRow, ReservationEtaResult, ReservationRow, RatingStatus } from '../types';
+
+const PAYMENT_METHOD_LABEL: Record<string, string> = {
+  cib: 'Carte CIB',
+  edahabia: 'Carte Edahabia',
+  card: 'Carte bancaire',
+  bank_transfer: 'Virement bancaire',
+};
+
+/**
+ * Task 7.1/7.2 — "Payer en ligne". Opens the mock gateway's hosted checkout
+ * page in a new tab (it's a plain unauthenticated page served by the
+ * backend) and polls OUR server for the payment's actual status — the tab
+ * itself is never trusted, only `GET /:id/payments` is, since the webhook
+ * that marks a payment paid is asynchronous and server-to-server.
+ */
+function PayOnlineAction({ reservationId, onSettled }: { reservationId: string; onSettled: () => void }) {
+  const [method, setMethod] = useState('cib');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const pollRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+  }, []);
+
+  const pay = async (): Promise<void> => {
+    setBusy(true);
+    setMsg('');
+    try {
+      const r = await api<{ checkout_url: string }>(`/api/reservations/${reservationId}/checkout`, { method: 'POST', body: { method } });
+      window.open(r.checkout_url, '_blank', 'noopener');
+      setMsg('Fenêtre de paiement ouverte — en attente de la confirmation de la banque…');
+      let attempts = 0;
+      pollRef.current = window.setInterval(async () => {
+        attempts += 1;
+        try {
+          const p = await api<{ payments: PaymentRow[] }>(`/api/reservations/${reservationId}/payments`);
+          const settled = p.payments.find((pay) => pay.status === 'paid' || pay.status === 'failed');
+          if (settled) {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            setBusy(false);
+            setMsg(settled.status === 'paid' ? '✔ Paiement confirmé' : `❌ Paiement échoué${settled.failure_reason ? ` — ${settled.failure_reason}` : ''}`);
+            onSettled();
+          }
+        } catch {
+          // transient — keep polling until the timeout below
+        }
+        if (attempts >= 40 && pollRef.current) {
+          window.clearInterval(pollRef.current);
+          setBusy(false);
+          setMsg('Toujours en attente — vérifiez le statut plus tard, le paiement sera mis à jour automatiquement.');
+        }
+      }, 3000);
+    } catch (err) {
+      setBusy(false);
+      setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+      <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={busy}>
+        {Object.entries(PAYMENT_METHOD_LABEL).map(([k, label]) => (
+          <option key={k} value={k}>
+            {label}
+          </option>
+        ))}
+      </select>
+      <button className="btn primary small" disabled={busy} onClick={() => void pay()}>
+        Payer en ligne
+      </button>
+      {msg && <span className="muted small">{msg}</span>}
+    </span>
+  );
+}
+
+/** Task 6.3 — customer rates the driver once the reservation is completed. */
+function RateDriverAction({ reservationId }: { reservationId: string }) {
+  const [status, setStatus] = useState<RatingStatus | null>(null);
+  const [open, setOpen] = useState(false);
+  const [stars, setStars] = useState(5);
+  const [review, setReview] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{ rating_status: RatingStatus }>(`/api/reservations/${reservationId}/rating-status`)
+      .then((r) => setStatus(r.rating_status))
+      .catch(() => setStatus(null));
+  }, [reservationId]);
+
+  const submit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setBusy(true);
+    setMsg('');
+    try {
+      await api(`/api/reservations/${reservationId}/rate-driver`, { method: 'POST', body: { stars, review: review || undefined } });
+      setStatus({ driver_to_customer: status?.driver_to_customer ?? false, customer_to_driver: true });
+      setOpen(false);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (status?.customer_to_driver) return <span className="chip confirmed">✔ chauffeur noté</span>;
+
+  return (
+    <span>
+      <button className="btn ghost small" onClick={() => setOpen(!open)}>
+        Noter le chauffeur
+      </button>
+      {open && (
+        <form className="form-inline" style={{ marginTop: 6 }} onSubmit={(e) => void submit(e)}>
+          {msg && <span className="alert error small">{msg}</span>}
+          <select value={stars} onChange={(e) => setStars(Number(e.target.value))}>
+            {[5, 4, 3, 2, 1].map((n) => (
+              <option key={n} value={n}>
+                {'★'.repeat(n)}
+              </option>
+            ))}
+          </select>
+          <input placeholder="Avis (optionnel)" value={review} onChange={(e) => setReview(e.target.value)} />
+          <button className="btn primary small" disabled={busy}>
+            Envoyer
+          </button>
+        </form>
+      )}
+    </span>
+  );
+}
 
 const ETA_REASON_LABEL: Record<string, string> = {
   not_in_progress: "Le voyage n'a pas encore démarré",
@@ -135,6 +267,7 @@ export default function MyReservationsPage() {
               {r.status !== 'cancelled' && Number(r.balance_due) > 0 && (
                 <span>⏳ Reste à payer : {Number(r.balance_due).toLocaleString('fr-DZ')} {r.currency}</span>
               )}
+              {r.status !== 'cancelled' && Number(r.balance_due) > 0 && <PayOnlineAction reservationId={r.id} onSettled={() => void load()} />}
               {r.refund_status !== 'none' && (
                 <span>
                   ↩ Remboursé {r.refund_status === 'full' ? 'intégralement' : 'partiellement'} :{' '}
@@ -155,6 +288,7 @@ export default function MyReservationsPage() {
                   Supprimer
                 </button>
               )}
+              {r.status === 'completed' && <RateDriverAction reservationId={r.id} />}
             </div>
           </div>
         ))}

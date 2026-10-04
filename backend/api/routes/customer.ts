@@ -76,5 +76,13 @@ export function customerRoutes(repo: DomainRepository): Router {
     }),
   );
 
+  // Task 6.3 — own received ratings (from drivers), for a "mes évaluations" screen.
+  router.get(
+    '/me/ratings',
+    wrap(async (req, res) => {
+      res.json({ ratings: await repo.listRatingsForCustomer(req.user!.customer_id!) });
+    }),
+  );
+
   return router;
 }

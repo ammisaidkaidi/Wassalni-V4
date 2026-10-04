@@ -124,6 +124,9 @@ export interface DriverRow {
   email: string | null;
   no_show_count?: number;
   flagged_at?: string | null;
+  rating_avg?: string | null;
+  rating_count?: number;
+  trust_badge?: boolean;
 }
 
 export interface VehicleRow {
@@ -132,6 +135,7 @@ export interface VehicleRow {
   seats: number;
   make: string | null;
   model: string | null;
+  is_eligible?: boolean;
 }
 
 export interface TrajectoryRow {
@@ -174,6 +178,8 @@ export interface CustomerRow {
   created_at: string;
   no_show_count?: number;
   flagged_at?: string | null;
+  rating_avg?: string | null;
+  rating_count?: number;
 }
 
 export interface AdminReservationRow {
@@ -209,6 +215,9 @@ export interface PaymentRow {
   reservation_status: string;
   customer_name: string;
   trip_code: string;
+  gateway: string | null;
+  gateway_transaction_id: string | null;
+  failure_reason: string | null;
 }
 
 export interface RefundDueRow {
@@ -286,6 +295,9 @@ export interface DriverProfileRow {
   vehicle_id: string | null;
   no_show_count: number;
   flagged_at: string | null;
+  rating_avg: string | null;
+  rating_count: number;
+  trust_badge: boolean;
 }
 
 export interface DriverReservationRow {
@@ -413,4 +425,86 @@ export interface DomainErrorRow {
   code_name: string;
   ts_equivalent: string;
   description: string;
+}
+
+// ── Task 6.2 — vehicle inspection ────────────────────────────────────────────
+
+export type MaintenanceStatus = 'ok' | 'needs_service' | 'out_of_service';
+
+export interface VehicleInspectionRow {
+  id: string;
+  vehicle_id: string;
+  vehicle_matricule: string;
+  submitted_by_driver: string | null;
+  inspection_date: string;
+  expiry_date: string;
+  maintenance_status: MaintenanceStatus;
+  file_path: string | null;
+  file_name: string | null;
+  mime_type: string | null;
+  notes: string | null;
+  approval_state: 'pending' | 'approved' | 'rejected';
+  rejection_reason: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Task 6.3 — ratings & reviews ─────────────────────────────────────────────
+
+export type RatingDirection = 'customer_to_driver' | 'driver_to_customer';
+
+export interface RatingRow {
+  id: string;
+  reservation_id: string;
+  reservation_code: string;
+  direction: RatingDirection;
+  rater_customer_id: string | null;
+  rater_customer_name: string | null;
+  rater_driver_id: string | null;
+  rater_driver_name: string | null;
+  ratee_customer_id: string | null;
+  ratee_customer_name: string | null;
+  ratee_driver_id: string | null;
+  ratee_driver_name: string | null;
+  stars: number;
+  review: string | null;
+  hidden_at: string | null;
+  moderation_reason: string | null;
+  moderated_by: string | null;
+  created_at: string;
+}
+
+export interface RatingStatus {
+  customer_to_driver: boolean;
+  driver_to_customer: boolean;
+}
+
+// ── Task 6.4 — fraud / anomaly signals ───────────────────────────────────────
+
+export interface FraudSignalRow {
+  signal_type: 'duplicate_nin' | 'duplicate_phone' | 'rapid_cancel_rebook' | 'repeated_no_show' | 'suspicious_payment' | 'account_burst';
+  severity: 'low' | 'medium' | 'high';
+  subject_type: 'customer' | 'driver';
+  subject_id: string | null;
+  subject_label: string;
+  detail: string;
+  detected_at: string;
+}
+
+// ── Task 7.1/7.2 — payment gateway ───────────────────────────────────────────
+
+export interface PaymentGatewayEventRow {
+  id: string;
+  payment_id: string | null;
+  gateway: string;
+  gateway_event_id: string;
+  event_type: 'payment.succeeded' | 'payment.failed';
+  signature_valid: boolean;
+  raw_payload: Record<string, unknown>;
+  processing_result: 'processed' | 'duplicate' | 'rejected';
+  processing_note: string | null;
+  received_at: string;
 }

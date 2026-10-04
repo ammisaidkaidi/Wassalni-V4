@@ -16,6 +16,7 @@ import { driverRoutes } from './routes/driver';
 import { registryRoutes } from './routes/registry';
 import { reservationsRoutes } from './routes/reservations';
 import { customerRoutes } from './routes/customer';
+import { paymentsRoutes } from './routes/payments';
 import { tripsRoutes } from './routes/trips';
 
 async function main(): Promise<void> {
@@ -56,7 +57,18 @@ async function main(): Promise<void> {
   const app = express();
   app.set('trust proxy', true);
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '256kb' }));
+  // `verify` stashes the exact raw bytes alongside the parsed body so the
+  // mock payment gateway's webhook route (Task 7.2) can recompute an HMAC
+  // signature over precisely what was received — without needing a
+  // separate raw-body-only parser/route ordering trick.
+  app.use(
+    express.json({
+      limit: '256kb',
+      verify: (req, _res, buf) => {
+        (req as unknown as { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+      },
+    }),
+  );
   app.use(cookieParser());
   // In production, only reflect an explicitly configured origin (credentialed
   // cross-site requests otherwise stay disallowed). In dev, reflect any origin
@@ -79,6 +91,11 @@ async function main(): Promise<void> {
   app.use('/api/customer', customerRoutes(repo));
   app.use('/api/driver', driverRoutes(db, repo));
   app.use('/api/admin', requireAdmin, adminRoutes(db, repo, auth));
+  // Public (unauthenticated) — this is where an external gateway's hosted
+  // checkout page and webhook delivery would land; neither carries our own
+  // session cookies, so each route authenticates itself via its own opaque
+  // transaction id / signature instead (same posture a real gateway has).
+  app.use('/api/payments', paymentsRoutes(db, repo, cfg.port));
 
   app.use((_req, res) => {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route inconnue' } });

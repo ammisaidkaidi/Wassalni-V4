@@ -28,6 +28,17 @@ const vehicleSchema = z.object({
   make: z.string().optional(),
   model: z.string().optional(),
 });
+const vehicleInspectionSchema = z.object({
+  vehicle_id: z.string().uuid(),
+  inspection_date: z.string().min(1),
+  expiry_date: z.string().min(1),
+  maintenance_status: z.enum(['ok', 'needs_service', 'out_of_service']),
+  notes: z.string().nullish(),
+});
+const moderateRatingSchema = z.object({
+  hide: z.boolean(),
+  reason: z.string().nullish(),
+});
 const priceSchema = z.object({
   from_wpoint_id: z.string().uuid(),
   to_wpoint_id: z.string().uuid(),
@@ -143,7 +154,13 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/vehicles',
     wrap(async (_req, res) => {
       res.json({
-        vehicles: await db.select('vehicle', { columns: ['id', 'matricule', 'seats', 'make', 'model'], orderBy: 'matricule' }),
+        // Task 6.2 — surfaces publish-eligibility (vehicle_is_eligible(),
+        // same function sp_publish_trip itself enforces) right next to the
+        // fleet list so admins see at a glance which vehicles need a fresh
+        // inspection before their driver can publish a trip.
+        vehicles: await db.raw(
+          `select id, matricule, seats, make, model, vehicle_is_eligible(id) as is_eligible from vehicle order by matricule`,
+        ),
       });
     }),
   );
@@ -588,6 +605,97 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
       const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
       await repo.rejectKycDocument(uuidParam(req.params.id), req.user!.id, reason);
       res.json({ document: await repo.getKycDocument(req.params.id) });
+    }),
+  );
+
+  // ── Task 6.2: vehicle inspection review queue ────────────────────────────────
+
+  router.get(
+    '/vehicle-inspections',
+    wrap(async (req, res) => {
+      const status = typeof req.query.status === 'string' ? (req.query.status as 'pending' | 'approved' | 'rejected') : undefined;
+      res.json({ inspections: await repo.listVehicleInspectionsAdmin(status) });
+    }),
+  );
+
+  // Admin can also directly log an inspection result for any vehicle (fleet
+  // vehicles without a driver-submitted flow) — it still starts 'pending'
+  // and goes through the same approve/reject actions below, no special-casing.
+  router.post(
+    '/vehicle-inspections',
+    wrap(async (req, res) => {
+      const b = vehicleInspectionSchema.parse(req.body);
+      const id = await repo.submitVehicleInspection(b.vehicle_id, null, {
+        inspectionDate: b.inspection_date,
+        expiryDate: b.expiry_date,
+        maintenanceStatus: b.maintenance_status,
+        notes: b.notes ?? null,
+      });
+      res.status(201).json({ inspection: await repo.getVehicleInspection(id) });
+    }),
+  );
+
+  router.get(
+    '/vehicle-inspections/:id/file',
+    wrap(async (req, res) => {
+      const inspection = await repo.getVehicleInspection(uuidParam(req.params.id));
+      if (!inspection || !inspection.file_path) throw new ApiError(404, 'NOT_FOUND', 'Document introuvable');
+      res.setHeader('Content-Type', inspection.mime_type ?? 'application/octet-stream');
+      res.sendFile(path.resolve(inspection.file_path));
+    }),
+  );
+
+  router.post(
+    '/vehicle-inspections/:id/approve',
+    wrap(async (req, res) => {
+      await repo.approveVehicleInspection(uuidParam(req.params.id), req.user!.id);
+      res.json({ inspection: await repo.getVehicleInspection(req.params.id) });
+    }),
+  );
+
+  router.post(
+    '/vehicle-inspections/:id/reject',
+    wrap(async (req, res) => {
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
+      await repo.rejectVehicleInspection(uuidParam(req.params.id), req.user!.id, reason);
+      res.json({ inspection: await repo.getVehicleInspection(req.params.id) });
+    }),
+  );
+
+  // ── Task 6.3: ratings moderation ──────────────────────────────────────────────
+
+  router.get(
+    '/ratings',
+    wrap(async (_req, res) => {
+      res.json({ ratings: await repo.listRatingsAdmin() });
+    }),
+  );
+
+  router.post(
+    '/ratings/:id/moderate',
+    wrap(async (req, res) => {
+      const b = moderateRatingSchema.parse(req.body);
+      await repo.moderateRating(uuidParam(req.params.id), req.user!.id, b.hide, b.reason ?? null);
+      res.json({ rating: await repo.getRating(req.params.id) });
+    }),
+  );
+
+  // ── Task 6.4: deterministic fraud / anomaly signals ───────────────────────────
+
+  router.get(
+    '/fraud-signals',
+    wrap(async (_req, res) => {
+      res.json({ signals: await repo.listFraudSignals() });
+    }),
+  );
+
+  // ── Task 7.1/7.2: payment gateway webhook audit ledger ────────────────────────
+
+  router.get(
+    '/payment-gateway-events',
+    wrap(async (req, res) => {
+      const paymentId = typeof req.query.payment_id === 'string' ? req.query.payment_id : undefined;
+      res.json({ events: await repo.listPaymentGatewayEvents(paymentId) });
     }),
   );
 

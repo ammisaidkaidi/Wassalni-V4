@@ -447,7 +447,17 @@ select * from (values
   ('DZ309','DRIVER_NO_SHOW_INVALID_STATE',  'DomainError',                 'Driver no-show can only be recorded on a trip that has not started'),
   ('DZ701','KYC_DOCUMENT_NOT_FOUND',        'DomainError',                 'Unknown KYC document id'),
   ('DZ702','KYC_ALREADY_REVIEWED',          'DomainError',                 'KYC document has already been approved or rejected'),
-  ('DZ703','KYC_REJECTION_REASON_REQUIRED', 'DomainError',                 'A rejection reason is required')
+  ('DZ703','KYC_REJECTION_REASON_REQUIRED', 'DomainError',                 'A rejection reason is required'),
+  ('DZ711','VEHICLE_INSPECTION_NOT_FOUND',  'DomainError',                 'Unknown vehicle inspection record id'),
+  ('DZ712','VEHICLE_INSPECTION_REVIEWED',   'DomainError',                 'Vehicle inspection record has already been approved or rejected'),
+  ('DZ713','VEHICLE_INSPECTION_REASON_REQUIRED','DomainError',             'A rejection reason is required'),
+  ('DZ714','VEHICLE_NOT_ELIGIBLE',          'DomainError',                 'Vehicle has no approved, unexpired inspection on file (or is marked out of service); trip cannot be published'),
+  ('DZ721','RATING_NOT_ELIGIBLE',           'DomainError',                 'Only a completed reservation can be rated'),
+  ('DZ722','RATING_ALREADY_SUBMITTED',      'DomainError',                 'This relationship has already been rated'),
+  ('DZ723','RATING_RATER_MISMATCH',         'DomainError',                 'Rater does not match this reservation'),
+  ('DZ731','PAYMENT_INTENT_NOT_FOUND',      'DomainError',                 'Unknown payment gateway transaction'),
+  ('DZ732','PAYMENT_WEBHOOK_SIGNATURE_INVALID','DomainError',              'Webhook signature verification failed'),
+  ('DZ733','PAYMENT_INTENT_NOT_PENDING',    'DomainError',                 'Payment intent has already been resolved (not pending)')
 ) as t(sqlstate, code_name, ts_equivalent, description);
 
 
@@ -469,7 +479,20 @@ $$
   limit 1;
 $$;
 
-create or replace function resolve_daira(p_wilaya_id smallint, p_name text)
+-- p_wilaya_id is `integer`, not `smallint` — deliberately, same reasoning as
+-- submit_rating's p_stars below: the management-api SQL transport this
+-- project runs on (DB/sql-utils.ts sqlLiteral) inlines JS numbers as bare
+-- numeric literals, which Postgres parses as `integer`, and int4→int2 is
+-- only an assignment cast (not implicit), so a `smallint` parameter here
+-- made every call from DomainRepository.resolveDaira/resolveCommune fail to
+-- resolve ("function does not exist") — found live while auditing for other
+-- occurrences of this exact bug class after fixing submit_rating.
+-- Explicit drops first: `create or replace` cannot change a function's
+-- parameter types in place (that's a distinct overload, not a replacement).
+drop function if exists resolve_daira(smallint, text);
+drop function if exists resolve_commune(smallint, text);
+
+create or replace function resolve_daira(p_wilaya_id integer, p_name text)
 returns smallint language sql stable as
 $$
   select d.id
@@ -483,7 +506,7 @@ $$
   limit 1;
 $$;
 
-create or replace function resolve_commune(p_wilaya_id smallint, p_name text)
+create or replace function resolve_commune(p_wilaya_id integer, p_name text)
 returns integer language sql stable as
 $$
   select c.id
@@ -936,6 +959,14 @@ begin
 
   if v.driver_id is null then
     raise exception 'Trip must have driver_id before publishing' using errcode = 'DZ001';
+  end if;
+
+  -- Task 6.2 — publish eligibility must respect vehicle inspection status.
+  -- Only enforced when a vehicle is actually assigned to the trip (matches
+  -- the existing optional-vehicle convention used by trg_trip_vehicle_capacity_guard,
+  -- which also no-ops when vehicle_id is null).
+  if v.vehicle_id is not null and not vehicle_is_eligible(v.vehicle_id) then
+    raise exception 'Vehicle is not eligible for publishing (no approved, unexpired inspection on file, or marked out of service)' using errcode = 'DZ714';
   end if;
 
   update trip
@@ -1955,6 +1986,530 @@ $$;
 
 
 -- ───────────────────────────────────────────────────────────────────────────────
+-- SECTION 13C — VEHICLE INSPECTION (6.2) + RATINGS (6.3) + FRAUD SIGNALS (6.4)
+--               + PAYMENT GATEWAY / WEBHOOK (7.1 / 7.2)
+-- ───────────────────────────────────────────────────────────────────────────────
+
+-- Task 6.2 — vehicle inspection records. A driver submits their own
+-- vehicle's technical-control certificate (date/expiry/maintenance status,
+-- optional file) and an admin reviews it — same pending/approved/rejected
+-- review pattern as kyc_document above, for the same reason: every
+-- submission is a new row, so the full inspection/renewal history survives.
+create table if not exists vehicle_inspection (
+  id                  uuid primary key default gen_random_uuid(),
+  vehicle_id          uuid not null references vehicle(id) on delete cascade,
+  submitted_by_driver uuid references driver(id) on delete set null,
+  inspection_date     date not null,
+  expiry_date         date not null check (expiry_date > inspection_date),
+  maintenance_status  text not null default 'ok' check (maintenance_status in ('ok','needs_service','out_of_service')),
+  file_path           text,
+  file_name           text,
+  mime_type           text,
+  notes               text,
+  approval_state      text not null default 'pending' check (approval_state in ('pending','approved','rejected')),
+  rejection_reason    text,
+  reviewed_by         uuid,
+  reviewed_at         timestamptz,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+create index if not exists idx_vehicle_inspection_vehicle on vehicle_inspection (vehicle_id, created_at desc);
+
+create or replace function vehicle_inspection_approve(p_inspection uuid, p_admin uuid)
+returns void language plpgsql as
+$$
+declare v_status text;
+begin
+  select approval_state into v_status from vehicle_inspection where id = p_inspection for update;
+  if v_status is null then
+    raise exception 'Vehicle inspection record not found' using errcode = 'DZ711';
+  end if;
+  if v_status <> 'pending' then
+    raise exception 'Vehicle inspection record has already been reviewed' using errcode = 'DZ712';
+  end if;
+  update vehicle_inspection
+     set approval_state = 'approved', reviewed_by = p_admin, reviewed_at = now(),
+         rejection_reason = null, updated_at = now()
+   where id = p_inspection;
+end;
+$$;
+
+create or replace function vehicle_inspection_reject(p_inspection uuid, p_admin uuid, p_reason text)
+returns void language plpgsql as
+$$
+declare v_status text;
+begin
+  if p_reason is null or btrim(p_reason) = '' then
+    raise exception 'Rejection reason required' using errcode = 'DZ713';
+  end if;
+  select approval_state into v_status from vehicle_inspection where id = p_inspection for update;
+  if v_status is null then
+    raise exception 'Vehicle inspection record not found' using errcode = 'DZ711';
+  end if;
+  if v_status <> 'pending' then
+    raise exception 'Vehicle inspection record has already been reviewed' using errcode = 'DZ712';
+  end if;
+  update vehicle_inspection
+     set approval_state = 'rejected', reviewed_by = p_admin, reviewed_at = now(),
+         rejection_reason = btrim(p_reason), updated_at = now()
+   where id = p_inspection;
+end;
+$$;
+
+-- True iff the vehicle's most recently *approved* inspection record is not
+-- expired and does not mark the vehicle out of service. A vehicle with no
+-- approved record at all (never submitted / still pending / rejected) is
+-- not eligible. Single source of truth — used by sp_publish_trip above and
+-- exposed to the UI so drivers/admins see exactly the same verdict.
+create or replace function vehicle_is_eligible(p_vehicle uuid)
+returns boolean language sql stable as
+$$
+  select coalesce(
+    (select expiry_date >= current_date and maintenance_status <> 'out_of_service'
+       from vehicle_inspection
+      where vehicle_id = p_vehicle and approval_state = 'approved'
+      order by inspection_date desc, created_at desc
+      limit 1),
+    false);
+$$;
+
+-- Task 6.3 — two-way ratings (customer→driver, driver→customer), one per
+-- reservation per direction, only once that specific reservation resolved
+-- to 'completed' (not cancelled/no_show). rater/ratee columns are mutually
+-- exclusive per direction (enforced by the check constraint) so a single
+-- table serves both directions without a discriminated pair of tables.
+create table if not exists rating (
+  id                 uuid primary key default gen_random_uuid(),
+  reservation_id     uuid not null references reservation(id) on delete cascade,
+  direction          text not null check (direction in ('customer_to_driver','driver_to_customer')),
+  rater_customer_id  uuid references customer(id) on delete cascade,
+  rater_driver_id    uuid references driver(id) on delete cascade,
+  ratee_customer_id  uuid references customer(id) on delete cascade,
+  ratee_driver_id    uuid references driver(id) on delete cascade,
+  stars              smallint not null check (stars between 1 and 5),
+  review             text,
+  hidden_at          timestamptz,
+  moderation_reason  text,
+  moderated_by       uuid,
+  created_at         timestamptz not null default now(),
+  constraint rating_direction_shape check (
+    (direction = 'customer_to_driver' and rater_customer_id is not null and rater_driver_id is null
+       and ratee_driver_id is not null and ratee_customer_id is null) or
+    (direction = 'driver_to_customer' and rater_driver_id is not null and rater_customer_id is null
+       and ratee_customer_id is not null and ratee_driver_id is null)
+  ),
+  unique (reservation_id, direction)
+);
+create index if not exists idx_rating_ratee_driver   on rating (ratee_driver_id)   where ratee_driver_id   is not null;
+create index if not exists idx_rating_ratee_customer on rating (ratee_customer_id) where ratee_customer_id is not null;
+
+alter table driver   add column if not exists rating_avg   numeric(3,2);
+alter table driver   add column if not exists rating_count integer not null default 0;
+alter table customer add column if not exists rating_avg   numeric(3,2);
+alter table customer add column if not exists rating_count integer not null default 0;
+
+-- Cached rating_avg/rating_count are maintained here only — never computed
+-- ad hoc elsewhere — and recomputed from scratch each time (not incremented)
+-- so moderation (hiding a rating) keeps them correct automatically.
+create or replace function trg_rating_apply()
+returns trigger language plpgsql as
+$$
+declare
+  v_driver   uuid := coalesce(new.ratee_driver_id, old.ratee_driver_id);
+  v_customer uuid := coalesce(new.ratee_customer_id, old.ratee_customer_id);
+begin
+  if v_driver is not null then
+    update driver d set
+      rating_count = sub.cnt,
+      rating_avg   = sub.avg_stars
+    from (
+      select count(*) as cnt, round(avg(stars)::numeric, 2) as avg_stars
+      from rating where ratee_driver_id = v_driver and hidden_at is null
+    ) sub
+    where d.id = v_driver;
+  end if;
+
+  if v_customer is not null then
+    update customer c set
+      rating_count = sub.cnt,
+      rating_avg   = sub.avg_stars
+    from (
+      select count(*) as cnt, round(avg(stars)::numeric, 2) as avg_stars
+      from rating where ratee_customer_id = v_customer and hidden_at is null
+    ) sub
+    where c.id = v_customer;
+  end if;
+
+  return null;
+end;
+$$;
+
+drop trigger if exists trg_rating_apply_ins on rating;
+create trigger trg_rating_apply_ins after insert on rating
+  for each row execute function trg_rating_apply();
+
+drop trigger if exists trg_rating_apply_upd on rating;
+create trigger trg_rating_apply_upd after update of hidden_at on rating
+  for each row execute function trg_rating_apply();
+
+-- p_stars is `integer`, not `smallint` — deliberately, even though it's
+-- stored into rating.stars (smallint): the management-api transport this
+-- project runs on (DB/sql-utils.ts sqlLiteral) inlines JS numbers as bare
+-- numeric literals, which Postgres parses as `integer`, and int4→int2 is
+-- only an assignment cast (not implicit), so a `smallint` parameter here
+-- would make every call fail to resolve with "function does not exist".
+-- The eventual INSERT into the smallint column still works fine (that IS
+-- an assignment-cast context).
+-- Explicit drop first: `create or replace` cannot change a function's
+-- parameter types in place (that's a distinct overload, not a replacement)
+-- — without this, a re-run of db:init would leave the old smallint-typed
+-- overload behind forever, re-creating the exact bug being fixed here.
+drop function if exists submit_rating(uuid, text, smallint, text, uuid, uuid);
+create or replace function submit_rating(
+  p_reservation    uuid,
+  p_direction      text,
+  p_stars          integer,
+  p_review         text default null,
+  p_rater_customer uuid default null,
+  p_rater_driver   uuid default null
+) returns uuid language plpgsql as
+$$
+declare
+  v_res  reservation%rowtype;
+  v_trip trip%rowtype;
+  v_id   uuid;
+begin
+  if p_stars is null or p_stars < 1 or p_stars > 5 then
+    raise exception 'Rating must be between 1 and 5 stars' using errcode = 'DZ001';
+  end if;
+
+  select * into v_res from reservation where id = p_reservation for update;
+  if not found then
+    raise exception 'Reservation not found' using errcode = 'DZ401';
+  end if;
+  if v_res.status <> 'completed' then
+    raise exception 'Only a completed reservation can be rated' using errcode = 'DZ721';
+  end if;
+
+  select * into v_trip from trip where id = v_res.trip_id;
+
+  if p_direction = 'customer_to_driver' then
+    if v_trip.driver_id is null then
+      raise exception 'Trip has no assigned driver to rate' using errcode = 'DZ721';
+    end if;
+    if p_rater_customer is distinct from v_res.customer_id then
+      raise exception 'Rater does not match this reservation' using errcode = 'DZ723';
+    end if;
+    if exists (select 1 from rating where reservation_id = p_reservation and direction = 'customer_to_driver') then
+      raise exception 'This relationship has already been rated' using errcode = 'DZ722';
+    end if;
+    insert into rating (reservation_id, direction, rater_customer_id, ratee_driver_id, stars, review)
+    values (p_reservation, 'customer_to_driver', p_rater_customer, v_trip.driver_id, p_stars, nullif(btrim(coalesce(p_review, '')), ''))
+    returning id into v_id;
+
+  elsif p_direction = 'driver_to_customer' then
+    if p_rater_driver is distinct from v_trip.driver_id then
+      raise exception 'Rater does not match this reservation' using errcode = 'DZ723';
+    end if;
+    if exists (select 1 from rating where reservation_id = p_reservation and direction = 'driver_to_customer') then
+      raise exception 'This relationship has already been rated' using errcode = 'DZ722';
+    end if;
+    insert into rating (reservation_id, direction, rater_driver_id, ratee_customer_id, stars, review)
+    values (p_reservation, 'driver_to_customer', p_rater_driver, v_res.customer_id, p_stars, nullif(btrim(coalesce(p_review, '')), ''))
+    returning id into v_id;
+
+  else
+    raise exception 'Invalid rating direction' using errcode = 'DZ001';
+  end if;
+
+  return v_id;
+end;
+$$;
+
+create or replace function moderate_rating(p_rating uuid, p_admin uuid, p_hide boolean, p_reason text default null)
+returns void language plpgsql as
+$$
+begin
+  if p_hide and (p_reason is null or btrim(p_reason) = '') then
+    raise exception 'A moderation reason is required to hide a rating' using errcode = 'DZ001';
+  end if;
+  update rating
+     set hidden_at         = case when p_hide then now() else null end,
+         moderation_reason = case when p_hide then btrim(p_reason) else null end,
+         moderated_by      = p_admin
+   where id = p_rating;
+  if not found then
+    raise exception 'Rating not found' using errcode = 'DZ001';
+  end if;
+end;
+$$;
+
+-- Simple, documented trust-badge thresholds — a single SQL expression so the
+-- UI and any future query always agree on what "trusted" means.
+create or replace function trust_badge(p_rating_avg numeric, p_rating_count integer, p_flagged_at timestamptz)
+returns boolean language sql immutable as
+$$
+  select p_rating_avg is not null and p_rating_avg >= 4.5 and p_rating_count >= 5 and p_flagged_at is null;
+$$;
+
+-- payment.gateway / gateway_transaction_id / failure_reason are added here
+-- (ahead of list_fraud_signals() below, which reads payment.gateway) even
+-- though they conceptually belong to the Task 7.1/7.2 gateway section
+-- further down — `language sql` functions are validated against the
+-- catalog at CREATE time, unlike plpgsql, so the columns must already
+-- exist by the time list_fraud_signals() is defined.
+alter table payment add column if not exists gateway                text;
+alter table payment add column if not exists gateway_transaction_id text;
+alter table payment add column if not exists failure_reason         text;
+create unique index if not exists uq_payment_gateway_transaction
+  on payment (gateway_transaction_id) where gateway_transaction_id is not null;
+
+-- Task 6.4 — deterministic fraud/anomaly heuristics (no ML). Exposed as one
+-- unified feed for the admin "Fraude" screen. Each heuristic is a plain,
+-- auditable SQL predicate over data the schema already has — no new
+-- tracking/telemetry was added to produce these.
+create or replace function list_fraud_signals()
+returns table(
+  signal_type   text,
+  severity      text,
+  subject_type  text,
+  subject_id    uuid,
+  subject_label text,
+  detail        text,
+  detected_at   timestamptz
+) language sql stable as
+$$
+  -- Duplicate NIN: same NIN used by more than one customer, or shared
+  -- between a customer and a driver (driver.nin is already DB-unique, so
+  -- same-table driver duplicates cannot exist; customer.nin has no such
+  -- constraint, so cross-checking it is the actual gap worth watching).
+  select 'duplicate_nin'::text, 'high'::text, 'customer'::text, c.id, c.full_name,
+         'NIN partagé avec ' ||
+           ((select count(*) from customer c2 where c2.nin = c.nin and c2.id <> c.id)
+            + (select count(*) from driver d2 where d2.nin = c.nin))::text ||
+           ' autre(s) compte(s)',
+         now()
+  from customer c
+  where c.nin is not null and (
+    exists (select 1 from customer c2 where c2.nin = c.nin and c2.id <> c.id)
+    or exists (select 1 from driver d2 where d2.nin = c.nin)
+  )
+
+  union all
+  -- Duplicate phone across roles: each table already enforces its own
+  -- uniqueness, so the only way to see a duplicate is the same number
+  -- registered as both a customer and a driver.
+  select 'duplicate_phone', 'medium', 'customer', c.id, c.full_name,
+         'Numéro de téléphone également enregistré comme chauffeur', now()
+  from customer c
+  join driver d on d.phone = c.phone
+
+  union all
+  -- Rapid cancel/rebook: a customer cancels a reservation then creates a
+  -- new one on the SAME trip within 10 minutes (seat-squatting pattern).
+  select 'rapid_cancel_rebook', 'medium', 'customer', r2.customer_id, cu.full_name,
+         'Réservation ' || r1.code || ' annulée puis ' || r2.code || ' recréée sur le même trajet en moins de 10 minutes',
+         r2.created_at
+  from reservation r1
+  join reservation r2 on r2.customer_id = r1.customer_id and r2.trip_id = r1.trip_id and r2.id <> r1.id
+  join customer cu    on cu.id = r2.customer_id
+  where r1.status = 'cancelled'
+    and r2.created_at > r1.updated_at
+    and r2.created_at <= r1.updated_at + interval '10 minutes'
+
+  union all
+  -- Repeated no-shows: reuses the Task 5.3 strike/flag mechanism directly —
+  -- not recomputed here, just surfaced in the unified feed.
+  select 'repeated_no_show', 'high', 'customer', c.id, c.full_name,
+         c.no_show_count || ' absence(s) enregistrée(s)', c.flagged_at
+  from customer c where c.flagged_at is not null
+  union all
+  select 'repeated_no_show', 'high', 'driver', d.id, d.full_name,
+         d.no_show_count || ' absence(s) enregistrée(s)', d.flagged_at
+  from driver d where d.flagged_at is not null
+
+  union all
+  -- Suspicious payment behaviour: >= 3 failed online-gateway payments for
+  -- the same customer within the last hour (card-testing pattern). Manual
+  -- cash/bank-transfer entries (gateway is null) never produce 'failed'
+  -- status through admin tooling, so this only ever fires for genuine
+  -- gateway attempts.
+  select 'suspicious_payment', 'high', 'customer', r.customer_id, cu.full_name,
+         count(*)::text || ' paiement(s) en ligne échoué(s) en moins d''une heure',
+         max(p.updated_at)
+  from payment p
+  join reservation r on r.id = p.reservation_id
+  join customer cu   on cu.id = r.customer_id
+  where p.status = 'failed' and p.gateway is not null
+    and p.updated_at > now() - interval '1 hour'
+  group by r.customer_id, cu.full_name
+  having count(*) >= 3
+
+  union all
+  -- Suspicious account creation: a burst of >= 5 new customer accounts
+  -- within a 10-minute window of each other. Coarse-grained on purpose —
+  -- this schema stores no IP/device fingerprint to correlate on, so
+  -- timestamp velocity is the only signal available; a real implementation
+  -- would combine this with request-level telemetry.
+  select 'account_burst', 'low', 'customer', w.id, w.full_name,
+         w.nearby_count || ' comptes clients créés à moins de 10 minutes d''intervalle', w.created_at
+  from (
+    select c.id, c.full_name, c.created_at,
+           (select count(*) from customer c2
+             where c2.created_at between c.created_at - interval '10 minutes' and c.created_at + interval '10 minutes'
+           ) as nearby_count
+    from customer c
+  ) w
+  where w.nearby_count >= 5;
+$$;
+
+-- Task 7.1 / 7.2 — payment gateway (mock/sandbox adapter) + webhook.
+--
+-- Architecture, kept deliberately separated per the task brief:
+--   Reservation            → unchanged `reservation` row.
+--   Payment intent         → a `payment` row in 'pending' status (the
+--                             existing concept from record_payment(),
+--                             Task 1.x) tagged with `gateway` + a
+--                             `gateway_transaction_id`.
+--   Gateway transaction     → the mock gateway's own transaction id/checkout
+--                             session, stored on that same payment row
+--                             (gateway_transaction_id).
+--   Payment confirmation    → `payment.status` flips to 'paid'/'failed' in
+--                             ONE place only: gateway_apply_payment_event()
+--                             below, never from a client-facing route.
+--   Webhook                 → payment_gateway_event is the append-only,
+--                             idempotent audit ledger of every delivery
+--                             attempt (processed/duplicate/rejected), which
+--                             is what gateway_apply_payment_event() writes
+--                             to. The client (browser) is never trusted to
+--                             say "I paid" — only this function can.
+create table if not exists payment_gateway_event (
+  id                 uuid primary key default gen_random_uuid(),
+  payment_id         uuid references payment(id) on delete set null,
+  gateway            text not null,
+  gateway_event_id   text not null,
+  event_type         text not null check (event_type in ('payment.succeeded', 'payment.failed')),
+  signature_valid    boolean not null,
+  raw_payload        jsonb not null,
+  processing_result  text not null check (processing_result in ('processed', 'duplicate', 'rejected')),
+  processing_note    text,
+  received_at        timestamptz not null default now(),
+  unique (gateway, gateway_event_id)
+);
+create index if not exists idx_payment_gateway_event_payment on payment_gateway_event (payment_id, received_at desc);
+
+-- Creates the payment intent ("Reservation → Payment intent" step). Reuses
+-- record_payment() for every existing validation (reservation exists / not
+-- cancelled / amount > 0 / doesn't exceed remaining total) — the gateway
+-- path adds only the gateway tagging on top, it does not re-implement any
+-- of that checking.
+create or replace function create_payment_intent(
+  p_reservation            uuid,
+  p_amount                 numeric,
+  p_method                 payment_method,
+  p_gateway                text,
+  p_gateway_transaction_id text
+) returns uuid language plpgsql as
+$$
+declare v_id uuid;
+begin
+  v_id := record_payment(p_reservation, p_amount, p_method, p_gateway_transaction_id);
+  update payment
+     set gateway = p_gateway, gateway_transaction_id = p_gateway_transaction_id, updated_at = now()
+   where id = v_id;
+  return v_id;
+end;
+$$;
+
+-- The ONLY function allowed to turn a gateway payment intent into
+-- paid/failed. Idempotent two ways: (1) once payment.status is no longer
+-- 'pending', any further event for it is reported 'duplicate' and ignored,
+-- regardless of event id; (2) the unique (gateway, gateway_event_id) index
+-- additionally rejects a literal replay of the same event id as 'duplicate'
+-- even in a race. A bad signature is reported 'rejected' and never touches
+-- payment state at all.
+create or replace function gateway_apply_payment_event(
+  p_payment          uuid,
+  p_gateway          text,
+  p_gateway_event_id text,
+  p_event_type       text,
+  p_signature_valid  boolean,
+  p_raw_payload      jsonb
+) returns text language plpgsql as
+$$
+declare
+  v_pay    payment%rowtype;
+  v_found  boolean;
+  v_result text;
+  v_note   text;
+begin
+  -- Looked up unconditionally (even for an invalid signature) only so the
+  -- audit row below can still record a real payment_id when one exists;
+  -- a bad signature never otherwise influences this lookup's result.
+  select * into v_pay from payment where id = p_payment for update;
+  v_found := found;
+
+  if not p_signature_valid then
+    v_result := 'rejected';
+    v_note := 'Invalid webhook signature';
+  elsif not v_found then
+    v_result := 'rejected';
+    v_note := 'Unknown payment';
+  elsif v_pay.status <> 'pending' then
+    v_result := 'duplicate';
+    v_note := 'Payment already resolved (status=' || v_pay.status || '); webhook ignored';
+  elsif p_event_type = 'payment.succeeded' then
+    update payment set status = 'paid', paid_at = now(), updated_at = now() where id = p_payment;
+    v_result := 'processed';
+    v_note := 'Payment marked paid';
+
+    -- "Reservation state update": an online gateway payment that fully
+    -- covers the reservation auto-confirms it (money is already captured
+    -- by the gateway) — manual/cash payments recorded by admin do NOT do
+    -- this; they still go through the driver/admin approval workflow
+    -- (Task 5.1) untouched. Reuses confirm_reservation() as-is, so the
+    -- same capacity-revalidation guard (trg_reservation_capacity_guard)
+    -- still applies; if capacity is gone by now the auto-confirm is
+    -- simply skipped (payment stays paid, reservation stays pending) and
+    -- that is recorded in the audit note for an admin to follow up on.
+    if amount_paid(v_pay.reservation_id) >= (select total_price from reservation where id = v_pay.reservation_id)
+       and (select status from reservation where id = v_pay.reservation_id) = 'pending' then
+      begin
+        perform confirm_reservation(v_pay.reservation_id);
+        v_note := v_note || '; reservation auto-confirmed (fully paid online)';
+      exception when others then
+        v_note := v_note || '; could NOT auto-confirm reservation (' || sqlerrm || ') — needs manual admin review';
+      end;
+    end if;
+  elsif p_event_type = 'payment.failed' then
+    update payment
+       set status = 'failed', failure_reason = p_raw_payload ->> 'reason', updated_at = now()
+     where id = p_payment;
+    v_result := 'processed';
+    v_note := 'Payment marked failed';
+  else
+    v_result := 'rejected';
+    v_note := 'Unknown event type';
+  end if;
+
+  begin
+    -- A payment_id that doesn't actually exist (p_found = false) is logged
+    -- as null — the column allows it (on delete set null) — rather than
+    -- attempting an impossible foreign key reference, which would otherwise
+    -- turn a well-formed "unknown payment" rejection into an uncaught
+    -- foreign_key_violation instead of the clean 'rejected' result above.
+    insert into payment_gateway_event (payment_id, gateway, gateway_event_id, event_type, signature_valid, raw_payload, processing_result, processing_note)
+    values (case when v_found then p_payment else null end, p_gateway, p_gateway_event_id, p_event_type, p_signature_valid, p_raw_payload, v_result, v_note);
+  exception when unique_violation then
+    return 'duplicate';
+  end;
+
+  return v_result;
+end;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
 -- SECTION 14 — PROCEDURES (CANCEL / CLOSE) + IMPORTER
 -- ───────────────────────────────────────────────────────────────────────────────
 
@@ -2210,7 +2765,10 @@ select p.id,
        r.code       as reservation_code,
        r.status     as reservation_status,
        cs.full_name as customer_name,
-       tr.code      as trip_code
+       tr.code      as trip_code,
+       p.gateway,
+       p.gateway_transaction_id,
+       p.failure_reason
 from payment p
 join reservation r on r.id = p.reservation_id
 join customer cs   on cs.id = r.customer_id

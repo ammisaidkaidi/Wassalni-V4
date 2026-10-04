@@ -630,17 +630,17 @@ Implement:
 
 TASK 6.2 — Vehicle inspection
 
-[ ] inspection records
+[x] inspection records
 
-[ ] inspection date
+[x] inspection date
 
-[ ] expiry
+[x] expiry
 
-[ ] maintenance status
+[x] maintenance status
 
-[ ] approval state
+[x] approval state
 
-[ ] publish eligibility
+[x] publish eligibility
 
 Trip publication must respect vehicle eligibility.
 
@@ -652,37 +652,37 @@ Customer → Driver Driver → Customer
 
 Implement:
 
-[ ] rating
+[x] rating
 
-[ ] optional review
+[x] optional review
 
-[ ] completed-trip eligibility
+[x] completed-trip eligibility
 
-[ ] one rating per eligible relationship
+[x] one rating per eligible relationship
 
-[ ] reputation score
+[x] reputation score
 
-[ ] moderation
+[x] moderation
 
-[ ] admin moderation tools
+[x] admin moderation tools
 
-[ ] trust badge
+[x] trust badge
 
 TASK 6.4 — Fraud/anomaly detection
 
 Detect patterns such as:
 
-[ ] duplicate NIN
+[x] duplicate NIN
 
-[ ] duplicate phone
+[x] duplicate phone
 
-[ ] suspicious account creation
+[x] suspicious account creation
 
-[ ] rapid cancel/rebook
+[x] rapid cancel/rebook
 
-[ ] repeated no-shows
+[x] repeated no-shows
 
-[ ] suspicious payment behavior
+[x] suspicious payment behavior
 
 Start with deterministic heuristics before adding ML.
 
@@ -700,17 +700,17 @@ Never trust a client-side "paid" flag.
 
 TASK 7.2 — Payment webhook
 
-[ ] signature verification
+[x] signature verification
 
-[ ] idempotency
+[x] idempotency
 
-[ ] duplicate webhook protection
+[x] duplicate webhook protection
 
-[ ] reservation state update
+[x] reservation state update
 
-[ ] payment state update
+[x] payment state update
 
-[ ] audit information
+[x] audit information
 
 TASK 7.3 — Payment expiration
 

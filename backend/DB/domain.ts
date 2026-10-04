@@ -105,6 +105,9 @@ export interface PaymentViewRow {
   reservation_status: ReservationStatus;
   customer_name: string;
   trip_code: string;
+  gateway: string | null;
+  gateway_transaction_id: string | null;
+  failure_reason: string | null;
 }
 
 export interface RefundDueRow {
@@ -155,6 +158,8 @@ export interface CustomerRow {
   created_at: string;
   no_show_count: number;
   flagged_at: string | null;
+  rating_avg: string | null;
+  rating_count: number;
 }
 
 const CUSTOMER_PROFILE_COLS = [
@@ -173,6 +178,8 @@ const CUSTOMER_PROFILE_COLS = [
   'created_at',
   'no_show_count',
   'flagged_at',
+  'rating_avg',
+  'rating_count',
 ];
 
 export interface WilayaOverviewRow {
@@ -278,6 +285,77 @@ export interface KycDocumentRow {
   updated_at: string;
 }
 
+/** Task 6.2 — vehicle inspection submission/review record. */
+export interface VehicleInspectionRow {
+  id: string;
+  vehicle_id: string;
+  vehicle_matricule: string;
+  submitted_by_driver: string | null;
+  inspection_date: string;
+  expiry_date: string;
+  maintenance_status: 'ok' | 'needs_service' | 'out_of_service';
+  file_path: string | null;
+  file_name: string | null;
+  mime_type: string | null;
+  notes: string | null;
+  approval_state: 'pending' | 'approved' | 'rejected';
+  rejection_reason: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type RatingDirection = 'customer_to_driver' | 'driver_to_customer';
+
+/** Task 6.3 — a single rating (either direction). */
+export interface RatingRow {
+  id: string;
+  reservation_id: string;
+  reservation_code: string;
+  direction: RatingDirection;
+  rater_customer_id: string | null;
+  rater_customer_name: string | null;
+  rater_driver_id: string | null;
+  rater_driver_name: string | null;
+  ratee_customer_id: string | null;
+  ratee_customer_name: string | null;
+  ratee_driver_id: string | null;
+  ratee_driver_name: string | null;
+  stars: number;
+  review: string | null;
+  hidden_at: string | null;
+  moderation_reason: string | null;
+  moderated_by: string | null;
+  created_at: string;
+}
+
+/** Task 6.4 — one row of the unified deterministic fraud-signal feed. */
+export interface FraudSignalRow {
+  signal_type: 'duplicate_nin' | 'duplicate_phone' | 'rapid_cancel_rebook' | 'repeated_no_show' | 'suspicious_payment' | 'account_burst';
+  severity: 'low' | 'medium' | 'high';
+  subject_type: 'customer' | 'driver';
+  subject_id: string | null;
+  subject_label: string;
+  detail: string;
+  detected_at: string;
+}
+
+/** Task 7.1/7.2 — one payment-gateway webhook delivery attempt (audit ledger). */
+export interface PaymentGatewayEventRow {
+  id: string;
+  payment_id: string | null;
+  gateway: string;
+  gateway_event_id: string;
+  event_type: 'payment.succeeded' | 'payment.failed';
+  signature_valid: boolean;
+  raw_payload: Record<string, unknown>;
+  processing_result: 'processed' | 'duplicate' | 'rejected';
+  processing_note: string | null;
+  received_at: string;
+}
+
 export interface DriverProfileRow {
   id: string;
   full_name: string;
@@ -288,6 +366,9 @@ export interface DriverProfileRow {
   vehicle_id: string | null;
   no_show_count: number;
   flagged_at: string | null;
+  rating_avg: string | null;
+  rating_count: number;
+  trust_badge: boolean;
 }
 
 export interface DriverReservationRow {
@@ -394,6 +475,16 @@ export const DOMAIN_ERRORS: Readonly<Record<string, string>> = {
   DZ701: 'Unknown KYC document id',
   DZ702: 'KYC document has already been approved or rejected',
   DZ703: 'A rejection reason is required',
+  DZ711: 'Unknown vehicle inspection record id',
+  DZ712: 'Vehicle inspection record has already been approved or rejected',
+  DZ713: 'A rejection reason is required',
+  DZ714: 'Vehicle has no approved, unexpired inspection on file (or is marked out of service)',
+  DZ721: 'Only a completed reservation can be rated',
+  DZ722: 'This relationship has already been rated',
+  DZ723: 'Rater does not match this reservation',
+  DZ731: 'Unknown payment gateway transaction',
+  DZ732: 'Webhook signature verification failed',
+  DZ733: 'Payment intent has already been resolved',
 };
 
 export interface DomainErrorInfo {
@@ -814,10 +905,13 @@ export class DomainRepository {
   // ── driver self-service (driver UI) ─────────────────────────────────────────
 
   async getDriverProfile(driverId: string): Promise<DriverProfileRow | null> {
-    return this.db.selectOne<DriverProfileRow>('driver', {
-      columns: ['id', 'full_name', 'nin', 'phone', 'email', 'address', 'vehicle_id', 'no_show_count', 'flagged_at'],
-      where: { id: driverId },
-    });
+    const rows = await this.db.raw<DriverProfileRow>(
+      `select id, full_name, nin, phone, email, address, vehicle_id, no_show_count, flagged_at,
+              rating_avg, rating_count, trust_badge(rating_avg, rating_count, flagged_at) as trust_badge
+         from driver where id = $1`,
+      [driverId],
+    );
+    return rows[0] ?? null;
   }
 
   /** Editable self-service fields only — nin/nif stay admin-managed (identity documents). */
@@ -1407,6 +1501,224 @@ export class DomainRepository {
 
   async rejectKycDocument(id: string, adminId: string, reason: string): Promise<void> {
     await this.db.callScalar('kyc_reject', id, adminId, reason);
+  }
+
+  // ── Vehicle inspection (Task 6.2) ────────────────────────────────────────────
+
+  async submitVehicleInspection(
+    vehicleId: string,
+    submittedByDriver: string | null,
+    data: {
+      inspectionDate: string;
+      expiryDate: string;
+      maintenanceStatus: VehicleInspectionRow['maintenance_status'];
+      notes?: string | null;
+    },
+    file?: { path: string; fileName: string; mimeType: string } | null,
+  ): Promise<string> {
+    const row = await this.db.insert<{ id: string }>('vehicle_inspection', {
+      vehicle_id: vehicleId,
+      submitted_by_driver: submittedByDriver,
+      inspection_date: data.inspectionDate,
+      expiry_date: data.expiryDate,
+      maintenance_status: data.maintenanceStatus,
+      notes: data.notes ?? null,
+      file_path: file?.path ?? null,
+      file_name: file?.fileName ?? null,
+      mime_type: file?.mimeType ?? null,
+    });
+    return row.id;
+  }
+
+  private static readonly VEHICLE_INSPECTION_SELECT = `
+    select i.id, i.vehicle_id, v.matricule as vehicle_matricule, i.submitted_by_driver,
+           i.inspection_date, i.expiry_date, i.maintenance_status,
+           i.file_path, i.file_name, i.mime_type, i.notes,
+           i.approval_state, i.rejection_reason, i.reviewed_by, au.full_name as reviewed_by_name,
+           i.reviewed_at, i.created_at, i.updated_at
+      from vehicle_inspection i
+      join vehicle v on v.id = i.vehicle_id
+      left join app_user au on au.id = i.reviewed_by`;
+
+  async getVehicleInspection(id: string): Promise<VehicleInspectionRow | null> {
+    const rows = await this.db.raw<VehicleInspectionRow>(`${DomainRepository.VEHICLE_INSPECTION_SELECT} where i.id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async listVehicleInspectionsForVehicle(vehicleId: string): Promise<VehicleInspectionRow[]> {
+    return this.db.raw<VehicleInspectionRow>(`${DomainRepository.VEHICLE_INSPECTION_SELECT} where i.vehicle_id = $1 order by i.created_at desc`, [
+      vehicleId,
+    ]);
+  }
+
+  async listVehicleInspectionsAdmin(status?: VehicleInspectionRow['approval_state']): Promise<VehicleInspectionRow[]> {
+    const sql = status
+      ? `${DomainRepository.VEHICLE_INSPECTION_SELECT} where i.approval_state = $1 order by i.created_at`
+      : `${DomainRepository.VEHICLE_INSPECTION_SELECT} order by i.created_at desc`;
+    return this.db.raw<VehicleInspectionRow>(sql, status ? [status] : []);
+  }
+
+  async approveVehicleInspection(id: string, adminId: string): Promise<void> {
+    await this.db.callScalar('vehicle_inspection_approve', id, adminId);
+  }
+
+  async rejectVehicleInspection(id: string, adminId: string, reason: string): Promise<void> {
+    await this.db.callScalar('vehicle_inspection_reject', id, adminId, reason);
+  }
+
+  async isVehicleEligible(vehicleId: string): Promise<boolean> {
+    return (await this.db.callScalar<boolean>('vehicle_is_eligible', vehicleId)) ?? false;
+  }
+
+  // ── Ratings & reviews (Task 6.3) ─────────────────────────────────────────────
+
+  async submitRating(params: {
+    reservationId: string;
+    direction: RatingDirection;
+    stars: number;
+    review?: string | null;
+    raterCustomerId?: string | null;
+    raterDriverId?: string | null;
+  }): Promise<string> {
+    const id = await this.db.callScalar<string>(
+      'submit_rating',
+      params.reservationId,
+      params.direction,
+      params.stars,
+      params.review ?? null,
+      params.raterCustomerId ?? null,
+      params.raterDriverId ?? null,
+    );
+    if (!id) throw new Error('submit_rating returned no id');
+    return id;
+  }
+
+  private static readonly RATING_SELECT = `
+    select r.id, r.reservation_id, res.code as reservation_code, r.direction,
+           r.rater_customer_id, rc.full_name as rater_customer_name,
+           r.rater_driver_id, rd.full_name as rater_driver_name,
+           r.ratee_customer_id, tc.full_name as ratee_customer_name,
+           r.ratee_driver_id, td.full_name as ratee_driver_name,
+           r.stars, r.review, r.hidden_at, r.moderation_reason, r.moderated_by, r.created_at
+      from rating r
+      join reservation res      on res.id = r.reservation_id
+      left join customer rc     on rc.id = r.rater_customer_id
+      left join driver   rd     on rd.id = r.rater_driver_id
+      left join customer tc     on tc.id = r.ratee_customer_id
+      left join driver   td     on td.id = r.ratee_driver_id`;
+
+  async getRating(id: string): Promise<RatingRow | null> {
+    const rows = await this.db.raw<RatingRow>(`${DomainRepository.RATING_SELECT} where r.id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async listRatingsForDriver(driverId: string, includeHidden = false): Promise<RatingRow[]> {
+    const hiddenFilter = includeHidden ? '' : ' and r.hidden_at is null';
+    return this.db.raw<RatingRow>(
+      `${DomainRepository.RATING_SELECT} where r.ratee_driver_id = $1${hiddenFilter} order by r.created_at desc`,
+      [driverId],
+    );
+  }
+
+  async listRatingsForCustomer(customerId: string, includeHidden = false): Promise<RatingRow[]> {
+    const hiddenFilter = includeHidden ? '' : ' and r.hidden_at is null';
+    return this.db.raw<RatingRow>(
+      `${DomainRepository.RATING_SELECT} where r.ratee_customer_id = $1${hiddenFilter} order by r.created_at desc`,
+      [customerId],
+    );
+  }
+
+  async listRatingsAdmin(): Promise<RatingRow[]> {
+    return this.db.raw<RatingRow>(`${DomainRepository.RATING_SELECT} order by r.created_at desc`);
+  }
+
+  /** Which direction(s) of a reservation's two-way rating already exist — lets the UI hide an already-used rate button. */
+  async getReservationRatingStatus(reservationId: string): Promise<{ customer_to_driver: boolean; driver_to_customer: boolean }> {
+    const rows = await this.db.raw<{ direction: RatingDirection }>('select direction from rating where reservation_id = $1', [reservationId]);
+    return {
+      customer_to_driver: rows.some((r) => r.direction === 'customer_to_driver'),
+      driver_to_customer: rows.some((r) => r.direction === 'driver_to_customer'),
+    };
+  }
+
+  async moderateRating(id: string, adminId: string, hide: boolean, reason?: string | null): Promise<void> {
+    await this.db.callScalar('moderate_rating', id, adminId, hide, reason ?? null);
+  }
+
+  // ── Fraud / anomaly signals (Task 6.4) ───────────────────────────────────────
+
+  async listFraudSignals(): Promise<FraudSignalRow[]> {
+    return this.db.raw<FraudSignalRow>('select * from list_fraud_signals()');
+  }
+
+  // ── Payment gateway (mock/sandbox adapter) + webhook (Task 7.1 / 7.2) ────────
+
+  async createGatewayPaymentIntent(params: {
+    reservationId: string;
+    amount: number | string;
+    method: PaymentMethod;
+    gateway: string;
+    gatewayTransactionId: string;
+  }): Promise<string> {
+    const id = await this.db.callScalar<string>(
+      'create_payment_intent',
+      params.reservationId,
+      params.amount,
+      params.method,
+      params.gateway,
+      params.gatewayTransactionId,
+    );
+    if (!id) throw new Error('create_payment_intent returned no id');
+    return id;
+  }
+
+  /** An existing still-open (pending) gateway intent for this reservation, if any — avoids piling up duplicate checkout sessions on repeated clicks. */
+  async findOpenGatewayIntent(reservationId: string): Promise<PaymentViewRow | null> {
+    const rows = await this.db.raw<PaymentViewRow>(
+      `select v.* from v_payment v
+        join payment p on p.id = v.id
+        where p.reservation_id = $1 and v.status = 'pending' and v.gateway_transaction_id is not null
+        order by v.created_at desc limit 1`,
+      [reservationId],
+    );
+    return rows[0] ?? null;
+  }
+
+  async getPaymentByGatewayTransactionId(transactionId: string): Promise<PaymentViewRow | null> {
+    const rows = await this.db.raw<PaymentViewRow>('select * from v_payment where gateway_transaction_id = $1', [transactionId]);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * The only entry point allowed to resolve a gateway payment intent —
+   * wraps gateway_apply_payment_event(), which is itself the single place
+   * payment.status is ever flipped to paid/failed from a webhook. Never
+   * call settle_payment()/update payment directly for a gateway-tagged row.
+   */
+  async applyGatewayPaymentEvent(params: {
+    paymentId: string;
+    gateway: string;
+    gatewayEventId: string;
+    eventType: 'payment.succeeded' | 'payment.failed';
+    signatureValid: boolean;
+    rawPayload: Record<string, unknown>;
+  }): Promise<'processed' | 'duplicate' | 'rejected'> {
+    const result = await this.db.callScalar<'processed' | 'duplicate' | 'rejected'>(
+      'gateway_apply_payment_event',
+      params.paymentId,
+      params.gateway,
+      params.gatewayEventId,
+      params.eventType,
+      params.signatureValid,
+      JSON.stringify(params.rawPayload),
+    );
+    return result ?? 'rejected';
+  }
+
+  async listPaymentGatewayEvents(paymentId?: string): Promise<PaymentGatewayEventRow[]> {
+    return paymentId
+      ? this.db.raw<PaymentGatewayEventRow>('select * from payment_gateway_event where payment_id = $1 order by received_at desc', [paymentId])
+      : this.db.raw<PaymentGatewayEventRow>('select * from payment_gateway_event order by received_at desc limit 200');
   }
 }
 

@@ -338,3 +338,171 @@ so the review history is permanent and auditable).
 - Reject with an empty reason: rejected `DZ703`.
 - Review (approve) of an unknown document id: rejected `DZ701`.
 - `listKycDocumentsForDriver` returns the driver's full 3-document submission history.
+
+## 9. Vehicle inspection review (Task 6.2)
+
+`vehicle_inspection.approval_state` enum: `pending` → `approved` | `rejected`
+(terminal either way — same append-only-history convention as `kyc_document`:
+a renewal/correction is a new row, never a reopened one).
+
+| From ↓ \ To → | pending | approved | rejected |
+|---|---|---|---|
+| **pending** | — | ✅ `vehicle_inspection_approve(id, admin)` | ✅ `vehicle_inspection_reject(id, admin, reason)` |
+| **approved** | ❌ `DZ712` | ❌ `DZ712` | ❌ `DZ712` |
+| **rejected** | ❌ `DZ712` | ❌ `DZ712` | ❌ `DZ712` |
+
+- `vehicle_inspection_reject` requires a non-blank `reason` (`DZ713`).
+- Both review functions raise `DZ711` if the inspection id doesn't exist.
+- `vehicle_is_eligible(vehicle_id)` is a pure, single-source-of-truth
+  derivation — **not** a stored flag — computed from the vehicle's most
+  recently *approved* record only (ordered by `inspection_date desc,
+  created_at desc`): eligible iff that record's `expiry_date >=
+  current_date` and `maintenance_status <> 'out_of_service'`. A vehicle with
+  no approved record at all (never submitted / still pending / rejected) is
+  not eligible. This feeds directly into `sp_publish_trip`, which now raises
+  `DZ714` when a trip has an assigned vehicle that isn't eligible (only
+  enforced when a vehicle is actually assigned — publishing without one
+  assigned is unaffected, matching the existing optional-vehicle model).
+
+### Test evidence (live, Task 6.2 section of `live-verification.ts`)
+- A vehicle with no inspection record at all: `vehicle_is_eligible` is `false`; publishing a trip assigned to it is rejected `DZ714`.
+- Reject without a reason: rejected `DZ713`. Review of an unknown inspection id: rejected `DZ711`.
+- Approving an inspection whose `expiry_date` is already in the past leaves the vehicle ineligible (expired ≠ eligible even though approved).
+- Approving a newer, unexpired, `ok` record makes the vehicle eligible; publishing the same trip then succeeds.
+- Approving a still-newer record marked `out_of_service` flips the vehicle back to ineligible — confirms the function always keys off the single most recent *approved* row, not "any approved row ever".
+- Re-reviewing an already-reviewed inspection record: rejected `DZ712`.
+
+## 10. Ratings & reviews (Task 6.3)
+
+One `rating` row per `(reservation_id, direction)` pair, `direction` ∈
+`customer_to_driver` | `driver_to_customer`. A check constraint
+(`rating_direction_shape`) enforces the rater/ratee columns are mutually
+exclusive per direction, so a single table serves both directions without a
+discriminated pair of tables. A `unique (reservation_id, direction)`
+constraint is the DB-level backstop against double-rating.
+
+### Eligibility gate (`submit_rating`)
+| Precondition | Enforcement |
+|---|---|
+| Reservation must be `completed` | `DZ721` otherwise (covers not-yet-finished, cancelled, no_show) |
+| Trip must have an assigned driver (for `customer_to_driver`) | `DZ721` if null |
+| Rater must be the actual party to the reservation | `DZ723` otherwise (customer id / driver id mismatch) |
+| Same reservation+direction not already rated | `DZ722` (the unique index is the hard backstop; the explicit `exists` check gives a clean domain error first) |
+| `stars` between 1 and 5 | `DZ001` otherwise |
+
+### Cached aggregates — recompute, never increment
+`trg_rating_apply` (`AFTER INSERT`, and `AFTER UPDATE OF hidden_at`, on
+`rating`) recomputes `driver.rating_avg`/`rating_count` or
+`customer.rating_avg`/`rating_count` **from scratch** (a full `count`/`avg`
+over `rating where hidden_at is null`) every time, rather than
+incrementing/decrementing a running total. This is why admin moderation
+(hiding or unhiding a rating via `hidden_at`) always keeps the cached values
+correct automatically — there is no separate "recompute after moderation"
+step anywhere, because the same trigger already fires on that column.
+
+### Trust badge
+`trust_badge(rating_avg, rating_count, flagged_at)` is the single documented
+threshold function used everywhere a "trusted" badge is shown: average ≥
+4.5 **and** count ≥ 5 **and** not no-show-flagged (reuses Task 5.3's
+`flagged_at`). No UI/route computes this threshold independently.
+
+### Test evidence (live, Task 6.3 section of `live-verification.ts`)
+- Rating a non-`completed` reservation: rejected `DZ721`.
+- Stars outside 1–5: rejected `DZ001`.
+- A rater who isn't the actual reservation party: rejected `DZ723`.
+- Rating the same reservation+direction twice: rejected `DZ722`.
+- Both directions on the same reservation succeed independently; `getReservationRatingStatus` correctly reports each.
+- `driver.rating_avg`/`rating_count` update correctly immediately after a rating is submitted.
+- Hiding a rating (admin moderation, reason required) recomputes the average back to its pre-rating value; unhiding restores it — proving the recompute-not-increment design.
+
+## 11. Fraud/anomaly signals (Task 6.4)
+
+`list_fraud_signals()` is a read-only, deterministic (no ML/scoring model)
+`union all` of plain SQL predicates over data the schema already records —
+every signal is independently auditable by reading its own query. It is a
+**lead feed for manual admin review only**; nothing it produces triggers an
+automatic account action.
+
+| Signal | Severity | Predicate (summary) |
+|---|---|---|
+| `duplicate_nin` | high | Same NIN on two customers, or shared between a customer and a driver |
+| `duplicate_phone` | medium | Same phone number registered as both a customer and a driver |
+| `rapid_cancel_rebook` | medium | A customer cancels a reservation then creates a new one on the **same trip** within 10 minutes (seat-squatting pattern) |
+| repeated no-shows | (reuses Task 5.3's `no_show_count`/`flagged_at` as-is) | Surfaced, not recomputed — no duplicated logic |
+| suspicious payment behaviour | high | ≥3 failed gateway payments for one customer within a 1-hour window (card-testing pattern) |
+| account-creation burst | medium | ≥5 new customer accounts created within the same 10-minute window |
+
+### Test evidence
+`list_fraud_signals()` runs cleanly against the live demo+test data and
+returns a well-formed, correctly-shaped array (columns: `signal_type`,
+`severity`, `subject_type`, `subject_id`, `subject_label`, `detail`,
+`detected_at`). The specific signal count produced by incidental demo data
+is not asserted — only that the function executes without error and the
+shape is correct, since the point of the test is "the detection logic runs
+correctly," not "today's demo data happens to contain fraud."
+
+## 12. Payment gateway & webhook lifecycle (Tasks 7.1 / 7.2)
+
+**Scope decision (user-directed):** no real Algerian payment-gateway
+merchant account/credentials exist for this project, so a provider-agnostic
+**mock/sandbox gateway** (`backend/api/payments/mockGateway.ts`) simulates
+the full real-world flow — hosted checkout page, HMAC-signed asynchronous
+webhook, idempotent event processing — so that swapping in a real provider
+later is a matter of replacing that one adapter file, not re-architecting
+the payment/reservation domain logic.
+
+### Payment status machine (`payment.status`)
+`pending` → `paid` | `failed`, both terminal. The **only** function allowed
+to make this transition from a gateway event is `gateway_apply_payment_event`.
+
+| Event received | Payment currently... | Result | Side effect |
+|---|---|---|---|
+| any event, bad signature | any status | `rejected` | none — payment untouched |
+| any event, payment id unknown | n/a | `rejected` | none — audit row still logged with `payment_id = null` (no FK crash on an impossible reference) |
+| valid event, payment no longer `pending` | `paid`/`failed` | `duplicate` | none — idempotent whether it's a literal event-id replay or a fresh event id for an already-resolved payment |
+| `payment.succeeded`, valid, still `pending` | `pending` | `processed` | `payment.status='paid'`, `paid_at=now()`; **auto-confirms** the reservation via `confirm_reservation()` (same capacity-revalidation guard as a manual confirm — if capacity is gone by now, the auto-confirm is silently skipped, payment stays `paid`, and the audit note records this for manual admin follow-up) |
+| `payment.failed`, valid, still `pending` | `pending` | `processed` | `payment.status='failed'` + gateway-supplied `failure_reason`; reservation is left untouched (no auto-confirm on failure) |
+
+Manual/cash payments recorded directly by an admin (`record_payment()`, the
+pre-existing Task-1-era path) deliberately do **not** auto-confirm — they
+still require the driver/admin approval workflow from Task 5.1, unchanged.
+
+### Idempotency, twice over
+1. Status-based: once `payment.status` leaves `pending`, every further event
+   for that payment is `duplicate`, regardless of event id (covers both a
+   literal replay and a legitimately-different event id arriving for an
+   already-resolved payment).
+2. Index-based backstop: a unique `(gateway, gateway_event_id)` index on the
+   `payment_gateway_event` audit ledger additionally catches a literal
+   same-event-id replay even under a race, independent of #1.
+
+### Audit trail
+Every webhook delivery attempt — `processed`, `duplicate`, or `rejected` —
+is recorded as its own row in the append-only `payment_gateway_event`
+ledger, including attempts for an unknown payment id (a real FK-violation
+bug found and fixed live this batch: the insert now uses `case when v_found
+then p_payment else null end` so an unresolvable payment id logs as `null`
+instead of crashing on an impossible foreign key). Exposed via `GET
+/api/admin/payment-gateway-events` + an expandable panel on `AdminPage.tsx`.
+
+### Test evidence (live, Task 7.2 section of `live-verification.ts`, plus manual HTTP smoke test)
+DB-level (`npm run test:live`): bad signature → `rejected`, payment
+untouched; unknown payment id → `rejected`, no crash; valid success →
+`processed`, payment `paid`, reservation auto-confirmed; literal replay of
+the same event id → `duplicate`; a brand-new event id against an
+already-resolved payment → also `duplicate`; valid failure → `processed`,
+`status='failed'` + failure reason, reservation stays `pending`; the full
+audit trail for one payment correctly shows exactly 3 distinct rows — one
+each of `rejected`/`processed`/`duplicate` — across its test scenario.
+
+HTTP-level (manual curl smoke test against the real running Express server,
+not just the DB function directly, to exercise the actual HMAC/route
+wiring): `GET /api/payments/checkout/:transactionId` → 200 with a rendered
+checkout page while the payment is `pending`, 404 once it's resolved;
+`POST /api/payments/webhook/mock` with a tampered signature → HTTP 400
+`{"result":"rejected"}`, checkout page still 200 afterward (state
+untouched); with the correct HMAC signature → HTTP 200
+`{"result":"processed"}`, checkout page then 404; replaying the identical
+signed body again → HTTP 200 `{"result":"duplicate"}` (a duplicate/replay is
+correctly a non-error 200 response — the right behaviour is to tell a real
+gateway "received, don't retry," not to error on it).
