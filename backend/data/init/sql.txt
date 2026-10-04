@@ -2396,115 +2396,17 @@ $$
 $$;
 
 -- payment.gateway / gateway_transaction_id / failure_reason are added here
--- (ahead of list_fraud_signals() below, which reads payment.gateway) even
+-- (ahead of list_fraud_signals(), which reads payment.gateway) even
 -- though they conceptually belong to the Task 7.1/7.2 gateway section
 -- further down — `language sql` functions are validated against the
 -- catalog at CREATE time, unlike plpgsql, so the columns must already
--- exist by the time list_fraud_signals() is defined.
+-- exist by the time list_fraud_signals() is defined (further down still,
+-- after the Task 9.4 referral tables it also reports on).
 alter table payment add column if not exists gateway                text;
 alter table payment add column if not exists gateway_transaction_id text;
 alter table payment add column if not exists failure_reason         text;
 create unique index if not exists uq_payment_gateway_transaction
   on payment (gateway_transaction_id) where gateway_transaction_id is not null;
-
--- Task 6.4 — deterministic fraud/anomaly heuristics (no ML). Exposed as one
--- unified feed for the admin "Fraude" screen. Each heuristic is a plain,
--- auditable SQL predicate over data the schema already has — no new
--- tracking/telemetry was added to produce these.
-create or replace function list_fraud_signals()
-returns table(
-  signal_type   text,
-  severity      text,
-  subject_type  text,
-  subject_id    uuid,
-  subject_label text,
-  detail        text,
-  detected_at   timestamptz
-) language sql stable as
-$$
-  -- Duplicate NIN: same NIN used by more than one customer, or shared
-  -- between a customer and a driver (driver.nin is already DB-unique, so
-  -- same-table driver duplicates cannot exist; customer.nin has no such
-  -- constraint, so cross-checking it is the actual gap worth watching).
-  select 'duplicate_nin'::text, 'high'::text, 'customer'::text, c.id, c.full_name,
-         'NIN partagé avec ' ||
-           ((select count(*) from customer c2 where c2.nin = c.nin and c2.id <> c.id)
-            + (select count(*) from driver d2 where d2.nin = c.nin))::text ||
-           ' autre(s) compte(s)',
-         now()
-  from customer c
-  where c.nin is not null and (
-    exists (select 1 from customer c2 where c2.nin = c.nin and c2.id <> c.id)
-    or exists (select 1 from driver d2 where d2.nin = c.nin)
-  )
-
-  union all
-  -- Duplicate phone across roles: each table already enforces its own
-  -- uniqueness, so the only way to see a duplicate is the same number
-  -- registered as both a customer and a driver.
-  select 'duplicate_phone', 'medium', 'customer', c.id, c.full_name,
-         'Numéro de téléphone également enregistré comme chauffeur', now()
-  from customer c
-  join driver d on d.phone = c.phone
-
-  union all
-  -- Rapid cancel/rebook: a customer cancels a reservation then creates a
-  -- new one on the SAME trip within 10 minutes (seat-squatting pattern).
-  select 'rapid_cancel_rebook', 'medium', 'customer', r2.customer_id, cu.full_name,
-         'Réservation ' || r1.code || ' annulée puis ' || r2.code || ' recréée sur le même trajet en moins de 10 minutes',
-         r2.created_at
-  from reservation r1
-  join reservation r2 on r2.customer_id = r1.customer_id and r2.trip_id = r1.trip_id and r2.id <> r1.id
-  join customer cu    on cu.id = r2.customer_id
-  where r1.status = 'cancelled'
-    and r2.created_at > r1.updated_at
-    and r2.created_at <= r1.updated_at + interval '10 minutes'
-
-  union all
-  -- Repeated no-shows: reuses the Task 5.3 strike/flag mechanism directly —
-  -- not recomputed here, just surfaced in the unified feed.
-  select 'repeated_no_show', 'high', 'customer', c.id, c.full_name,
-         c.no_show_count || ' absence(s) enregistrée(s)', c.flagged_at
-  from customer c where c.flagged_at is not null
-  union all
-  select 'repeated_no_show', 'high', 'driver', d.id, d.full_name,
-         d.no_show_count || ' absence(s) enregistrée(s)', d.flagged_at
-  from driver d where d.flagged_at is not null
-
-  union all
-  -- Suspicious payment behaviour: >= 3 failed online-gateway payments for
-  -- the same customer within the last hour (card-testing pattern). Manual
-  -- cash/bank-transfer entries (gateway is null) never produce 'failed'
-  -- status through admin tooling, so this only ever fires for genuine
-  -- gateway attempts.
-  select 'suspicious_payment', 'high', 'customer', r.customer_id, cu.full_name,
-         count(*)::text || ' paiement(s) en ligne échoué(s) en moins d''une heure',
-         max(p.updated_at)
-  from payment p
-  join reservation r on r.id = p.reservation_id
-  join customer cu   on cu.id = r.customer_id
-  where p.status = 'failed' and p.gateway is not null
-    and p.updated_at > now() - interval '1 hour'
-  group by r.customer_id, cu.full_name
-  having count(*) >= 3
-
-  union all
-  -- Suspicious account creation: a burst of >= 5 new customer accounts
-  -- within a 10-minute window of each other. Coarse-grained on purpose —
-  -- this schema stores no IP/device fingerprint to correlate on, so
-  -- timestamp velocity is the only signal available; a real implementation
-  -- would combine this with request-level telemetry.
-  select 'account_burst', 'low', 'customer', w.id, w.full_name,
-         w.nearby_count || ' comptes clients créés à moins de 10 minutes d''intervalle', w.created_at
-  from (
-    select c.id, c.full_name, c.created_at,
-           (select count(*) from customer c2
-             where c2.created_at between c.created_at - interval '10 minutes' and c.created_at + interval '10 minutes'
-           ) as nearby_count
-    from customer c
-  ) w
-  where w.nearby_count >= 5;
-$$;
 
 -- Task 7.1 / 7.2 — payment gateway (mock/sandbox adapter) + webhook.
 --
@@ -3434,6 +3336,129 @@ create trigger trg_referral_reward_on_first_completed_trip
   when (new.status = 'completed' and old.status is distinct from 'completed')
   execute function trg_referral_reward_on_first_completed_trip();
 
+-- Task 6.4 — deterministic fraud/anomaly heuristics (no ML). Exposed as one
+-- unified feed for the admin "Fraude" screen. Each heuristic is a plain,
+-- auditable SQL predicate over data the schema already has — no new
+-- tracking/telemetry was added to produce these.
+--
+-- Defined here (rather than right after Task 6.4's own section further up)
+-- because the last heuristic below (excessive_referral_rewards, added for
+-- Task 14.3) reports on the referral_reward table from Section 13K just
+-- above — `language sql` functions are validated against the catalog at
+-- CREATE time, unlike plpgsql, so that table must already exist.
+create or replace function list_fraud_signals()
+returns table(
+  signal_type   text,
+  severity      text,
+  subject_type  text,
+  subject_id    uuid,
+  subject_label text,
+  detail        text,
+  detected_at   timestamptz
+) language sql stable as
+$$
+  -- Duplicate NIN: same NIN used by more than one customer, or shared
+  -- between a customer and a driver (driver.nin is already DB-unique, so
+  -- same-table driver duplicates cannot exist; customer.nin has no such
+  -- constraint, so cross-checking it is the actual gap worth watching).
+  select 'duplicate_nin'::text, 'high'::text, 'customer'::text, c.id, c.full_name,
+         'NIN partagé avec ' ||
+           ((select count(*) from customer c2 where c2.nin = c.nin and c2.id <> c.id)
+            + (select count(*) from driver d2 where d2.nin = c.nin))::text ||
+           ' autre(s) compte(s)',
+         now()
+  from customer c
+  where c.nin is not null and (
+    exists (select 1 from customer c2 where c2.nin = c.nin and c2.id <> c.id)
+    or exists (select 1 from driver d2 where d2.nin = c.nin)
+  )
+
+  union all
+  -- Duplicate phone across roles: each table already enforces its own
+  -- uniqueness, so the only way to see a duplicate is the same number
+  -- registered as both a customer and a driver.
+  select 'duplicate_phone', 'medium', 'customer', c.id, c.full_name,
+         'Numéro de téléphone également enregistré comme chauffeur', now()
+  from customer c
+  join driver d on d.phone = c.phone
+
+  union all
+  -- Rapid cancel/rebook: a customer cancels a reservation then creates a
+  -- new one on the SAME trip within 10 minutes (seat-squatting pattern).
+  select 'rapid_cancel_rebook', 'medium', 'customer', r2.customer_id, cu.full_name,
+         'Réservation ' || r1.code || ' annulée puis ' || r2.code || ' recréée sur le même trajet en moins de 10 minutes',
+         r2.created_at
+  from reservation r1
+  join reservation r2 on r2.customer_id = r1.customer_id and r2.trip_id = r1.trip_id and r2.id <> r1.id
+  join customer cu    on cu.id = r2.customer_id
+  where r1.status = 'cancelled'
+    and r2.created_at > r1.updated_at
+    and r2.created_at <= r1.updated_at + interval '10 minutes'
+
+  union all
+  -- Repeated no-shows: reuses the Task 5.3 strike/flag mechanism directly —
+  -- not recomputed here, just surfaced in the unified feed.
+  select 'repeated_no_show', 'high', 'customer', c.id, c.full_name,
+         c.no_show_count || ' absence(s) enregistrée(s)', c.flagged_at
+  from customer c where c.flagged_at is not null
+  union all
+  select 'repeated_no_show', 'high', 'driver', d.id, d.full_name,
+         d.no_show_count || ' absence(s) enregistrée(s)', d.flagged_at
+  from driver d where d.flagged_at is not null
+
+  union all
+  -- Suspicious payment behaviour: >= 3 failed online-gateway payments for
+  -- the same customer within the last hour (card-testing pattern). Manual
+  -- cash/bank-transfer entries (gateway is null) never produce 'failed'
+  -- status through admin tooling, so this only ever fires for genuine
+  -- gateway attempts.
+  select 'suspicious_payment', 'high', 'customer', r.customer_id, cu.full_name,
+         count(*)::text || ' paiement(s) en ligne échoué(s) en moins d''une heure',
+         max(p.updated_at)
+  from payment p
+  join reservation r on r.id = p.reservation_id
+  join customer cu   on cu.id = r.customer_id
+  where p.status = 'failed' and p.gateway is not null
+    and p.updated_at > now() - interval '1 hour'
+  group by r.customer_id, cu.full_name
+  having count(*) >= 3
+
+  union all
+  -- Suspicious account creation: a burst of >= 5 new customer accounts
+  -- within a 10-minute window of each other. Coarse-grained on purpose —
+  -- this schema stores no IP/device fingerprint to correlate on, so
+  -- timestamp velocity is the only signal available; a real implementation
+  -- would combine this with request-level telemetry.
+  select 'account_burst', 'low', 'customer', w.id, w.full_name,
+         w.nearby_count || ' comptes clients créés à moins de 10 minutes d''intervalle', w.created_at
+  from (
+    select c.id, c.full_name, c.created_at,
+           (select count(*) from customer c2
+             where c2.created_at between c.created_at - interval '10 minutes' and c.created_at + interval '10 minutes'
+           ) as nearby_count
+    from customer c
+  ) w
+  where w.nearby_count >= 5
+
+  union all
+  -- Task 14.3 — Referral-farming: a referrer who has collected an unusually
+  -- high number of referral payouts is worth a manual look (multi-accounting
+  -- + "real" first trips is the only way to currently farm this program,
+  -- since rewards already require the referred customer's genuine first
+  -- completed trip — see trg_referral_reward_on_first_completed_trip above
+  -- — so this heuristic exists purely to catch volume, not to re-validate
+  -- eligibility, which is already enforced where the reward is granted).
+  select 'excessive_referral_rewards', 'medium', 'customer', rr.referrer_id, cu.full_name,
+         count(*)::text || ' récompenses de parrainage perçues, dont ' ||
+           count(*) filter (where rr.created_at > now() - interval '24 hours')::text ||
+           ' au cours des dernières 24h',
+         max(rr.created_at)
+  from referral_reward rr
+  join customer cu on cu.id = rr.referrer_id
+  group by rr.referrer_id, cu.full_name
+  having count(*) >= 10
+      or count(*) filter (where rr.created_at > now() - interval '24 hours') >= 5;
+$$;
 
 -- ───────────────────────────────────────────────────────────────────────────────
 -- SECTION 13L — DYNAMIC PRICING SUGGESTIONS (Task 9.1)
@@ -4126,36 +4151,52 @@ $$;
 --                        (sp_close_trip), which itself resolves each
 --                        confirmed reservation to completed/no_show
 --                        exactly as a manual close would.
--- Also opportunistically re-runs promote_waitlist() for every trip it
--- touches (bonus safety net toward Task 13.3, not claimed complete here)
--- and fires the T-1h reminder notification (11.1) for trips about to
--- depart that haven't been reminded yet.
+-- Task 13.3 — waitlist promotion is already fully automatic as of Task
+-- 10.2's promote_waitlist(): it is called (a) from the reservation-cancel
+-- trigger, (b) from sp_cancel_trip's refund cascade, and (c) opportunistically
+-- here for every trip this tick touches, as a self-healing safety net. It is
+-- concurrency-safe via pg_advisory_xact_lock(trip_id) + a live
+-- seats_available() recheck per candidate, so two ticks (or a tick racing a
+-- manual cancellation) can never double-promote the same freed seat.
+--
+-- Task 11.1/13.4 — fires both the T-24h and T-1h reminder notifications for
+-- trips about to depart, each deduplicated independently via its own
+-- one-shot timestamp column (reminder_24h_sent_at / reminder_sent_at) so a
+-- trip is reminded at most once per stage no matter how many ticks run.
 
 alter table trip add column if not exists reminder_sent_at timestamptz;
+-- Task 13.4 — second, independent reminder stage (T-24h). Kept as its own
+-- one-shot column (same pattern as reminder_sent_at for T-1h) so the two
+-- reminders are deduplicated completely independently of each other.
+alter table trip add column if not exists reminder_24h_sent_at timestamptz;
 
 insert into app_setting (key, value) values
   ('trip_scheduler_grace_minutes', '30'),
   ('trip_scheduler_autoclose_grace_minutes', '120'),
-  ('trip_reminder_lead_minutes', '60')
+  ('trip_reminder_lead_minutes', '60'),
+  ('trip_reminder_24h_lead_minutes', '1440')
 on conflict (key) do nothing;
 
 create or replace function run_trip_lifecycle_tick()
 returns jsonb language plpgsql as
 $$
 declare
-  v_grace_min    integer;
-  v_close_min    integer;
-  v_reminder_min integer;
-  v_trip         record;
-  v_started      integer := 0;
-  v_noshow       integer := 0;
-  v_cancelled    integer := 0;
-  v_closed       integer := 0;
-  v_reminded     integer := 0;
+  v_grace_min       integer;
+  v_close_min       integer;
+  v_reminder_min    integer;
+  v_reminder24_min  integer;
+  v_trip            record;
+  v_started         integer := 0;
+  v_noshow          integer := 0;
+  v_cancelled       integer := 0;
+  v_closed          integer := 0;
+  v_reminded        integer := 0;
+  v_reminded24      integer := 0;
 begin
   select coalesce((select value from app_setting where key = 'trip_scheduler_grace_minutes')::int, 30) into v_grace_min;
   select coalesce((select value from app_setting where key = 'trip_scheduler_autoclose_grace_minutes')::int, 120) into v_close_min;
   select coalesce((select value from app_setting where key = 'trip_reminder_lead_minutes')::int, 60) into v_reminder_min;
+  select coalesce((select value from app_setting where key = 'trip_reminder_24h_lead_minutes')::int, 1440) into v_reminder24_min;
 
   -- scheduled, past departure, still within grace -> auto-start
   for v_trip in
@@ -4197,7 +4238,23 @@ begin
     v_closed := v_closed + 1;
   end loop;
 
-  -- Task 11.1 — T-1h reminder (one-shot per trip via reminder_sent_at)
+  -- Task 11.1/13.4 — T-24h reminder (one-shot per trip via reminder_24h_sent_at)
+  for v_trip in
+    select id from trip
+    where status = 'scheduled' and published_at is not null and reminder_24h_sent_at is null
+      and departure_at <= now() + make_interval(mins => v_reminder24_min) and departure_at > now()
+    for update skip locked
+  loop
+    perform notify_customer(r.customer_id, 'trip_reminder', 'Départ demain',
+      'Votre voyage ' || r.code || ' part dans environ 24 heures.',
+      jsonb_build_object('reservation_id', r.id, 'trip_id', v_trip.id, 'lead', '24h'))
+    from reservation r where r.trip_id = v_trip.id and r.status in ('pending','confirmed');
+
+    update trip set reminder_24h_sent_at = now() where id = v_trip.id;
+    v_reminded24 := v_reminded24 + 1;
+  end loop;
+
+  -- Task 11.1/13.4 — T-1h reminder (one-shot per trip via reminder_sent_at)
   for v_trip in
     select id from trip
     where status = 'scheduled' and published_at is not null and reminder_sent_at is null
@@ -4206,7 +4263,7 @@ begin
   loop
     perform notify_customer(r.customer_id, 'trip_reminder', 'Départ dans moins d''une heure',
       'Votre voyage ' || r.code || ' part bientôt, soyez prêt !',
-      jsonb_build_object('reservation_id', r.id, 'trip_id', v_trip.id))
+      jsonb_build_object('reservation_id', r.id, 'trip_id', v_trip.id, 'lead', '1h'))
     from reservation r where r.trip_id = v_trip.id and r.status in ('pending','confirmed');
 
     update trip set reminder_sent_at = now() where id = v_trip.id;
@@ -4215,10 +4272,11 @@ begin
 
   return jsonb_build_object(
     'started', v_started, 'driver_no_show', v_noshow, 'cancelled_no_driver', v_cancelled,
-    'auto_closed', v_closed, 'reminded', v_reminded
+    'auto_closed', v_closed, 'reminded', v_reminded, 'reminded_24h', v_reminded24
   );
 end;
 $$;
+
 
 -- ───────────────────────────────────────────────────────────────────────────────
 -- SECTION 13R — RECURRING TRIP TEMPLATES (Task 10.3)

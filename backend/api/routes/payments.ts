@@ -2,7 +2,15 @@ import { Router } from 'express';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
+import { rateLimit } from '../middleware/rateLimit';
 import { GATEWAY_NAME, generateEventId, signPayload, verifySignature, type MockWebhookPayload } from '../payments/mockGateway';
+
+// Task 14.2 — limits the two customer-facing pages (hosted checkout view +
+// its "submit" action, i.e. where a real gateway's own card form would be).
+// Deliberately NOT applied to /webhook/mock below — that's the gateway's own
+// signed, trusted server-to-server callback, equivalent to a real provider's
+// webhook delivery, which must never be throttled away.
+const checkoutLimiter = rateLimit({ windowMs: 60_000, max: 30, message: 'Trop de tentatives — patientez un instant' });
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -21,6 +29,7 @@ export function paymentsRoutes(_db: DBHelper, repo: DomainRepository, selfPort: 
 
   router.get(
     '/checkout/:transactionId',
+    checkoutLimiter,
     wrap(async (req, res) => {
       const payment = await repo.getPaymentByGatewayTransactionId(req.params.transactionId);
       if (!payment || payment.status !== 'pending') {
@@ -60,6 +69,7 @@ export function paymentsRoutes(_db: DBHelper, repo: DomainRepository, selfPort: 
 
   router.post(
     '/checkout/:transactionId/submit',
+    checkoutLimiter,
     wrap(async (req, res) => {
       const payment = await repo.getPaymentByGatewayTransactionId(req.params.transactionId);
       if (!payment) throw new ApiError(404, 'NOT_FOUND', 'Session de paiement introuvable');

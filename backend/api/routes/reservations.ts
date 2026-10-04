@@ -5,8 +5,15 @@ import type { DomainRepository, PaymentMethod } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
 import { GATEWAY_NAME, generateTransactionId } from '../payments/mockGateway';
 import { requireAuth, requireCustomer } from '../middleware/session';
+import { rateLimit } from '../middleware/rateLimit';
 import { streamReceiptPdf } from '../services/receipt';
 import { randomToken, sha256 } from '../auth/passwords';
+
+// Task 14.2 — dedicated limits for the two genuinely sensitive write actions
+// here (creating a booking, attempting a payment); every other route on this
+// router is either read-only or already covered by the generic global limit.
+const bookingLimiter = rateLimit({ windowMs: 60_000, max: 20, message: 'Trop de réservations — patientez un instant' });
+const paymentAttemptLimiter = rateLimit({ windowMs: 60_000, max: 20, message: 'Trop de tentatives de paiement — patientez un instant' });
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -122,6 +129,7 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
 
   router.post(
     '/',
+    bookingLimiter,
     wrap(async (req, res) => {
       const b = reserveSchema.parse(req.body);
       const customerId = req.user!.customer_id!;
@@ -189,6 +197,7 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
   // the browser does — so a client can never just claim "I paid".
   router.post(
     '/:id/checkout',
+    paymentAttemptLimiter,
     wrap(async (req, res) => {
       const id = req.params.id;
       if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');
@@ -231,6 +240,7 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
   // fully paid, exactly like a successful gateway webhook would.
   router.post(
     '/:id/pay-wallet',
+    paymentAttemptLimiter,
     wrap(async (req, res) => {
       const id = req.params.id;
       if (!UUID_RE.test(id)) throw new ApiError(400, 'BAD_PARAM', 'id invalide');

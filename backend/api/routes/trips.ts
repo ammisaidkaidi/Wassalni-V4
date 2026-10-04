@@ -2,9 +2,15 @@ import { Router } from 'express';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
+import { rateLimit } from '../middleware/rateLimit';
 import { getTripDetail, searchTrips } from '../services/tripSearch';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+// Task 14.2 — dedicated, tighter-than-generic limit on search specifically
+// (the endpoint most useful to scrape/enumerate), separate from trip-detail
+// page views which a legitimate customer may open many of while browsing.
+const searchLimiter = rateLimit({ windowMs: 60_000, max: 60, message: 'Trop de recherches — patientez un instant' });
 
 /** Public trip search + detail (published, scheduled, future trips only). */
 export function tripsRoutes(db: DBHelper, repo: DomainRepository): Router {
@@ -12,6 +18,7 @@ export function tripsRoutes(db: DBHelper, repo: DomainRepository): Router {
 
   router.get(
     '/',
+    searchLimiter,
     wrap(async (req, res) => {
       const from = Number(req.query.from);
       const to = Number(req.query.to);

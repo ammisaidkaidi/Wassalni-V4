@@ -1211,73 +1211,73 @@ For every expired hold:
 
 Must be idempotent.
 
-TASK 13.3 — Waitlist promotion
+[x] TASK 13.3 — Waitlist promotion
 
 Automatically promote eligible waitlisted customers after capacity becomes available.
 
-TASK 13.4 — Reminder scheduler
+[x] TASK 13.4 — Reminder scheduler
 
 Send:
 
-[ ] T-24h
+[x] T-24h
 
-[ ] T-1h
+[x] T-1h
 
-[ ] relevant state-change notifications
+[x] relevant state-change notifications
 
 Avoid duplicate notifications.
 
 PHASE 14 — SECURITY
 
-TASK 14.1 — Authorization audit
+[x] TASK 14.1 — Authorization audit
 
 Verify every protected endpoint.
 
 Test:
 
-[ ] customer accessing another customer's reservation
+[x] customer accessing another customer's reservation
 
-[ ] driver accessing another driver's trip
+[x] driver accessing another driver's trip
 
-[ ] driver modifying another driver's trajectory
+[x] driver modifying another driver's trajectory
 
-[ ] customer accessing admin endpoint
+[x] customer accessing admin endpoint
 
-[ ] support role attempting privileged operation
+[x] support role attempting privileged operation
 
-TASK 14.2 — Rate limiting
+[x] TASK 14.2 — Rate limiting
 
 Protect:
 
-[ ] login
+[x] login
 
-[ ] OTP
+[x] OTP
 
-[ ] search
+[x] search
 
-[ ] booking
+[x] booking
 
-[ ] payment
+[x] payment
 
-[ ] SOS
+[x] SOS
 
-[ ] messaging
+[x] messaging
 
-TASK 14.3 — Fraud protection
+[x] TASK 14.3 — Fraud protection
 
 Add appropriate controls for:
 
-[ ] account creation abuse
+[x] account creation abuse
 
-[ ] OTP abuse
+[x] OTP abuse
 
-[ ] repeated booking/cancellation
+[x] repeated booking/cancellation
 
-[ ] payment retries
+[x] payment retries
 
-[ ] referral abuse
+[x] referral abuse
 
-[ ] wallet abuse
+[x] wallet abuse
 
 PHASE 15 — INTERNATIONALIZATION AND UX
 

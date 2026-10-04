@@ -7,6 +7,8 @@ export interface ApiConfig {
   sessionTtlHours: number;
   otpTtlMinutes: number;
   otpMaxAttempts: number;
+  /** Task 14.3 — minimum delay before a pending login challenge may be re-sent (anti-OTP-bombing). */
+  otpResendCooldownSeconds: number;
   maxFailedLogins: number;
   lockMinutes: number;
   cookieName: string;
@@ -41,6 +43,7 @@ export function loadApiConfig(): ApiConfig {
     sessionTtlHours: intEnv('SESSION_TTL_HOURS', 24 * 7),
     otpTtlMinutes: intEnv('OTP_TTL_MINUTES', 10),
     otpMaxAttempts: intEnv('OTP_MAX_ATTEMPTS', 5),
+    otpResendCooldownSeconds: intEnv('OTP_RESEND_COOLDOWN_SECONDS', 30),
     maxFailedLogins: intEnv('MAX_FAILED_LOGINS', 5),
     lockMinutes: intEnv('LOCK_MINUTES', 15),
     cookieName: 'wassalni_sid',

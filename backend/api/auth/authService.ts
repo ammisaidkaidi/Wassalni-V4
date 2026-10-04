@@ -100,14 +100,25 @@ export class AuthService {
     return this.issueChallenge(user.id, user.email);
   }
 
-  /** Re-send the OTP for a pending challenge. */
+  /**
+   * Re-send the OTP for a pending challenge.
+   * Task 14.3 — OTP abuse control: a minimum cooldown between resends, on
+   * top of the generic per-IP /api/auth rate limit, so a single click-spam
+   * (or someone else's IP sharing that limit) can't be used to bombard a
+   * victim's inbox with repeated codes.
+   */
   async resendChallenge(otpToken: string): Promise<LoginChallenge> {
-    const rows = await this.db.raw<{ user_id: string; email: string }>(
-      `select o.user_id, u.email from app_user_otp o join app_user u on u.id = o.user_id where o.id = $1`,
+    const rows = await this.db.raw<{ user_id: string; email: string; created_at: string }>(
+      `select o.user_id, u.email, o.created_at from app_user_otp o join app_user u on u.id = o.user_id where o.id = $1`,
       [otpToken],
     );
     const row = rows[0];
     if (!row) throw new ApiError(400, 'OTP_NOT_FOUND', 'Demande introuvable — reconnectez-vous');
+    const elapsedSeconds = (Date.now() - new Date(row.created_at).getTime()) / 1000;
+    const waitSeconds = Math.ceil(this.cfg.otpResendCooldownSeconds - elapsedSeconds);
+    if (waitSeconds > 0) {
+      throw new ApiError(429, 'OTP_RESEND_TOO_SOON', `Veuillez patienter ${waitSeconds}s avant de redemander un code`);
+    }
     return this.issueChallenge(row.user_id, row.email);
   }
 
