@@ -12,6 +12,7 @@
     "api": "ts-node api/server.ts",
     "start": "node dist/api/server.js",
     "user:create": "ts-node api/scripts/create-user.ts",
+    "verify:env": "ts-node api/scripts/verify-env.ts",
     "db": "ts-node DB/cli.ts",
     "db:init": "ts-node DB/cli.ts init",
     "db:reset": "ts-node DB/cli.ts reset",
@@ -21,7 +22,8 @@
     "test:utils": "ts-node DB/tests/sql-utils.test.ts",
     "test:live": "ts-node DB/tests/live-verification.ts",
     "test:api": "ts-node api/tests/api-verification.ts",
-    "test:e2e": "ts-node api/tests/e2e-booking.ts"
+    "test:e2e": "ts-node api/tests/e2e-booking.ts",
+    "test:smoke": "ts-node api/tests/smoke.ts"
   },
   "dependencies": {
     "@types/multer": "^2.3.0",

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
+import { log } from '../logger';
 import { rateLimit } from '../middleware/rateLimit';
 import { GATEWAY_NAME, generateEventId, signPayload, verifySignature, type MockWebhookPayload } from '../payments/mockGateway';
 
@@ -74,6 +75,10 @@ export function paymentsRoutes(_db: DBHelper, repo: DomainRepository, selfPort: 
       const payment = await repo.getPaymentByGatewayTransactionId(req.params.transactionId);
       if (!payment) throw new ApiError(404, 'NOT_FOUND', 'Session de paiement introuvable');
       const outcome = (req.body?.outcome as string) === 'failure' ? 'failure' : 'success';
+      // Task 20.2 — payment event logging: the checkout outcome a customer
+      // chose on the (mock) gateway's hosted page, before the signed
+      // webhook round-trip even starts.
+      log.info('payment.checkout_submitted', { payment_id: payment.id, reservation_code: payment.reservation_code, outcome, method: payment.method });
 
       if (payment.status === 'pending') {
         // Simulates the gateway's own async confirmation: builds the exact
@@ -132,6 +137,7 @@ h1{font-size:20px}</style></head>
       if (!payment) {
         // Still log the attempt for audit purposes even when we can't match
         // a payment, but there's nothing to update — not a server error.
+        log.warn('payment.webhook_unmatched', { transaction_id: transactionId, event_id: eventId, signature_valid: signatureValid });
         res.status(signatureValid ? 404 : 400).json({ result: 'rejected', reason: !signatureValid ? 'invalid_signature' : 'unknown_transaction' });
         return;
       }
@@ -143,6 +149,16 @@ h1{font-size:20px}</style></head>
         eventType,
         signatureValid,
         rawPayload: (body as Record<string, unknown>) ?? {},
+      });
+      // Task 20.2 — payment event logging: the durable, queryable record of
+      // this webhook lives in payment_gateway_event (DB/domain.ts); this is
+      // the app-log line correlating it with the request id that handled it.
+      (signatureValid ? log.info : log.warn)('payment.webhook_processed', {
+        payment_id: payment.id,
+        reservation_code: payment.reservation_code,
+        event_type: eventType,
+        signature_valid: signatureValid,
+        result,
       });
 
       res.status(result === 'rejected' ? 400 : 200).json({ result });

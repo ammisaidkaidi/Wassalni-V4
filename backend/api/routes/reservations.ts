@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository, PaymentMethod } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
+import { log } from '../logger';
 import { GATEWAY_NAME, generateTransactionId } from '../payments/mockGateway';
 import { requireAuth, requireCustomer } from '../middleware/session';
 import { rateLimit } from '../middleware/rateLimit';
@@ -156,6 +157,8 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
         });
       }
       const rows = await reservationSelect(db, 'r.id = $1', [reservationId]);
+      // Task 20.2 — reservation lifecycle logging.
+      log.info('reservation.created', { reservation_id: reservationId, trip_id: b.trip_id, customer_id: customerId, seats: b.seats });
       res.status(201).json({ reservation: rows[0] });
     }),
   );
@@ -230,6 +233,9 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
           gatewayTransactionId: transactionId,
         });
       }
+      if (!existing) {
+        log.info('payment.checkout_opened', { reservation_id: id, transaction_id: transactionId, method: b.method });
+      }
       res.status(201).json({ checkout_url: `/api/payments/checkout/${transactionId}`, transaction_id: transactionId });
     }),
   );
@@ -258,6 +264,7 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
       }
       const paymentId = await repo.payReservationWithWallet(id, b.amount ?? null);
       const balance = await repo.walletBalance(req.user!.customer_id!);
+      log.info('payment.wallet_paid', { reservation_id: id, payment_id: paymentId, customer_id: req.user!.customer_id });
       res.status(201).json({ ok: true, payment_id: paymentId, wallet_balance: balance });
     }),
   );
@@ -368,6 +375,7 @@ export function reservationsRoutes(db: DBHelper, repo: DomainRepository): Router
         throw new ApiError(403, 'FORBIDDEN', 'Cette réservation ne vous appartient pas');
       }
       await repo.cancelReservation(id);
+      log.info('reservation.cancelled', { reservation_id: id, cancelled_by: 'customer', customer_id: req.user!.customer_id });
       res.json({ ok: true });
     }),
   );

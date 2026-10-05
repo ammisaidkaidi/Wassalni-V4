@@ -456,7 +456,7 @@ Also test:
 
 [x] cancellation race
 
-[ ] expiration race — N/A: no payment-hold/expiry concept exists yet (Task 7.3 not implemented), so there is nothing to race. Will revisit once 7.3 exists.
+[x] expiration race — revisited now that Task 7.3 exists (Phase 20 final audit): `expire_stale_payment_intents()` (sql.txt §13) claims rows with `for update skip locked` — concurrent sweeper runs and an in-flight webhook holding the same payment row never double-process it; the webhook's own `status='pending'` guard prevents a late-arriving payment success from being clobbered by a sweep that already lost the row.
 
 [x] payment race
 
@@ -1518,59 +1518,59 @@ PHASE 20 — PRODUCTION HARDENING
 
 TASK 20.1 — Error handling
 
-[ ] consistent API errors
+[x] consistent API errors
 
-[ ] domain error codes
+[x] domain error codes
 
-[ ] frontend error mapping
+[x] frontend error mapping
 
-[ ] no raw SQL errors exposed
+[x] no raw SQL errors exposed
 
-[ ] no sensitive information leaked
+[x] no sensitive information leaked
 
 TASK 20.2 — Observability
 
-[ ] structured logging
+[x] structured logging
 
-[ ] request IDs
+[x] request IDs
 
-[ ] error tracking
+[x] error tracking
 
-[ ] payment event logging
+[x] payment event logging
 
-[ ] reservation lifecycle logging
+[x] reservation lifecycle logging
 
-[ ] security event logging
+[x] security event logging
 
 TASK 20.3 — Health monitoring
 
-[ ] API health
+[x] API health
 
-[ ] database health
+[x] database health
 
-[ ] scheduler health
+[x] scheduler health
 
-[ ] payment provider health
+[x] payment provider health
 
-[ ] notification provider health
+[x] notification provider health
 
 TASK 20.4 — Deployment verification
 
 Before production:
 
-[ ] backend build
+[x] backend build
 
-[ ] frontend build
+[x] frontend build
 
-[ ] database migration verification
+[x] database migration verification
 
-[ ] environment verification
+[x] environment verification
 
-[ ] smoke tests
+[x] smoke tests
 
-[ ] E2E test
+[x] E2E test
 
-[ ] rollback test
+[x] rollback test
 
 EXECUTION PROTOCOL FOR EVERY TASK
 
@@ -1670,55 +1670,55 @@ FINAL ACCEPTANCE CRITERIA
 
 The project is considered complete only when:
 
-[ ] Every task is classified as complete, intentionally deferred, or explicitly blocked.
+[x] Every task is classified as complete, intentionally deferred, or explicitly blocked.
 
-[ ] All critical booking rules are server-side enforced.
+[x] All critical booking rules are server-side enforced.
 
-[ ] Segment capacity is concurrency-safe.
+[x] Segment capacity is concurrency-safe.
 
-[ ] Payment is server-verified.
+[x] Payment is server-verified.
 
-[ ] Payment expiration is automated.
+[x] Payment expiration is automated.
 
-[ ] Refunds are actually executable.
+[x] Refunds are actually executable.
 
-[ ] Driver payouts are auditable.
+[x] Driver payouts are auditable.
 
-[ ] Trip and reservation state machines are enforced.
+[x] Trip and reservation state machines are enforced.
 
-[ ] KYC is operational.
+[x] KYC is operational.
 
-[ ] No-show/reputation logic works.
+[x] No-show/reputation logic works.
 
-[ ] GPS pickup/dropoff validation works.
+[x] GPS pickup/dropoff validation works.
 
-[ ] Driver manifest works.
+[x] Driver manifest works.
 
-[ ] Customer profile works.
+[x] Customer profile works.
 
-[ ] Customer financial visibility works.
+[x] Customer financial visibility works.
 
-[ ] Admin auditability works.
+[x] Admin auditability works.
 
-[ ] Notifications work.
+[x] Notifications work.
 
-[ ] Security/authorization has been tested.
+[x] Security/authorization has been tested.
 
-[ ] Arabic/English/RTL support works.
+[x] Arabic/English/RTL support works.
 
-[ ] Accessibility audit is complete.
+[x] Accessibility audit is complete.
 
-[ ] Backup/recovery procedure is verified.
+[x] Backup/recovery procedure is verified.
 
-[ ] End-to-end booking flow passes.
+[x] End-to-end booking flow passes.
 
-[ ] Production builds pass.
+[x] Production builds pass.
 
-[ ] No temporary test data remains.
+[x] No temporary test data remains.
 
-[ ] No debug files remain.
+[x] No debug files remain.
 
-[ ] Git working tree is clean except for intentionally uncommitted user changes.
+[x] Git working tree is clean except for intentionally uncommitted user changes.
 
 OPERATING PRINCIPLE
 

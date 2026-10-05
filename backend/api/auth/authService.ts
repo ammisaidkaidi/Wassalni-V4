@@ -2,6 +2,7 @@ import type { ApiConfig } from '../config';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import { ApiError } from '../middleware/errors';
+import { log } from '../logger';
 import { countRecentSmsToPhone, otpSmsText, recordSmsLog, type SmsSender } from '../sms';
 import { hashPassword, randomToken, sha256, sixDigitCode, verifyPassword } from './passwords';
 import { otpEmailHtml, type Mailer } from './email';
@@ -115,18 +116,28 @@ export class AuthService {
       email.trim().toLowerCase(),
     ]);
     const user = rows[0];
-    if (!user) throw new ApiError(401, 'INVALID_CREDENTIALS', 'Email ou mot de passe incorrect');
+    if (!user) {
+      // Task 20.2 — security event logging. Deliberately never logs the
+      // password itself, and the email is already the account identifier
+      // the user themselves supplied, not newly-exposed secret data.
+      log.warn('security.login_failed', { email: email.trim().toLowerCase(), reason: 'no_such_account' });
+      throw new ApiError(401, 'INVALID_CREDENTIALS', 'Email ou mot de passe incorrect');
+    }
     if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
+      log.warn('security.login_rejected_locked', { user_id: user.id, locked_until: user.locked_until });
       throw new ApiError(429, 'ACCOUNT_LOCKED', 'Compte temporairement verrouillé — réessayez plus tard');
     }
     if (!(await verifyPassword(password, user.password_hash))) {
       const failed = user.failed_attempts + 1;
+      const willLock = failed >= this.cfg.maxFailedLogins;
       await this.db.raw(
         `update app_user set failed_attempts = $2,
             locked_until = case when $2 >= $3 then now() + make_interval(mins => $4) else locked_until end
           where id = $1`,
         [user.id, failed, this.cfg.maxFailedLogins, this.cfg.lockMinutes],
       );
+      log.warn('security.login_failed', { user_id: user.id, reason: 'bad_password', failed_attempts: failed, account_locked: willLock });
+      if (willLock) log.warn('security.account_locked', { user_id: user.id, lock_minutes: this.cfg.lockMinutes });
       throw new ApiError(401, 'INVALID_CREDENTIALS', 'Email ou mot de passe incorrect');
     }
     await this.db.raw(`update app_user set failed_attempts = 0, locked_until = null where id = $1`, [user.id]);
@@ -195,6 +206,7 @@ export class AuthService {
           where id = $1`,
         [otp.id, attempts, this.cfg.otpMaxAttempts],
       );
+      log.warn('security.otp_failed', { user_id: otp.user_id, attempts, max_attempts: this.cfg.otpMaxAttempts });
       throw new ApiError(401, 'OTP_WRONG', 'Code incorrect');
     }
     await this.db.raw(`update app_user_otp set consumed_at = now() where id = $1`, [otp.id]);
@@ -208,6 +220,7 @@ export class AuthService {
     );
     const user = await this.getUserById(otp.user_id);
     if (!user) throw new ApiError(500, 'INTERNAL', 'Utilisateur introuvable');
+    log.info('security.login_succeeded', { user_id: user.id, role: user.role, ip: meta.ip ?? null });
     return { token, user };
   }
 

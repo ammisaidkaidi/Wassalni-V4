@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository, KycDocumentRow } from '../../DB/domain';
 import { ApiError, wrap } from '../middleware/errors';
+import { log } from '../logger';
 import { requireAuth, requireDriver } from '../middleware/session';
 import { getTripDetailForDriver } from '../services/tripSearch';
 
@@ -537,6 +538,7 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       const tripId = uuidParam(req.params.id);
       await ownTripOrThrow(req, tripId);
       await repo.startTrip(tripId);
+      log.info('trip.started', { trip_id: tripId, driver_id: req.user!.driver_id });
       res.json({ ok: true });
     }),
   );
@@ -553,6 +555,7 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       // here left reservations permanently stuck at 'confirmed' when a driver
       // (rather than an admin) closed out their own trip.
       await repo.closeTrip(tripId);
+      log.info('trip.completed', { trip_id: tripId, driver_id: req.user!.driver_id });
       res.json({ ok: true });
     }),
   );
@@ -594,6 +597,7 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       if (!ownerDriverId) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
       if (ownerDriverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', "Cette réservation ne concerne pas vos voyages");
       await repo.confirmReservation(id);
+      log.info('reservation.confirmed', { reservation_id: id, driver_id: req.user!.driver_id });
       res.json({ ok: true });
     }),
   );
@@ -606,6 +610,7 @@ export function driverRoutes(db: DBHelper, repo: DomainRepository): Router {
       if (!ownerDriverId) throw new ApiError(404, 'NOT_FOUND', 'Réservation introuvable');
       if (ownerDriverId !== req.user!.driver_id) throw new ApiError(403, 'FORBIDDEN', "Cette réservation ne concerne pas vos voyages");
       await repo.cancelReservation(id);
+      log.info('reservation.cancelled', { reservation_id: id, cancelled_by: 'driver', driver_id: req.user!.driver_id });
       res.json({ ok: true });
     }),
   );

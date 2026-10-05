@@ -6,6 +6,7 @@ import type { DBHelper } from '../../DB/DBHelper';
 import type { DomainRepository } from '../../DB/domain';
 import type { AuthService } from '../auth/authService';
 import { ApiError, wrap } from '../middleware/errors';
+import { log } from '../logger';
 import { requirePermission } from '../middleware/session';
 import { streamReceiptPdf } from '../services/receipt';
 import { sendCsv, sendPdfTable, type ExportColumn } from '../services/export';
@@ -455,6 +456,7 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/trips/:id/start',
     wrap(async (req, res) => {
       await repo.startTrip(uuidParam(req.params.id));
+      log.info('trip.started', { trip_id: req.params.id, started_by: 'admin', admin_id: req.user!.id });
       res.json({ ok: true });
     }),
   );
@@ -462,6 +464,7 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/trips/:id/complete',
     wrap(async (req, res) => {
       await repo.completeTrip(uuidParam(req.params.id));
+      log.info('trip.completed', { trip_id: req.params.id, completed_by: 'admin', admin_id: req.user!.id });
       res.json({ ok: true });
     }),
   );
@@ -469,6 +472,7 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/trips/:id/close',
     wrap(async (req, res) => {
       await repo.closeTrip(uuidParam(req.params.id));
+      log.info('trip.closed', { trip_id: req.params.id, closed_by: 'admin', admin_id: req.user!.id });
       res.json({ ok: true });
     }),
   );
@@ -550,6 +554,7 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
     '/reservations/:id/confirm',
     wrap(async (req, res) => {
       await repo.confirmReservation(uuidParam(req.params.id));
+      log.info('reservation.confirmed', { reservation_id: req.params.id, confirmed_by: 'admin', admin_id: req.user!.id });
       res.json({ ok: true });
     }),
   );
@@ -559,6 +564,7 @@ export function adminRoutes(db: DBHelper, repo: DomainRepository, auth: AuthServ
       await repo.cancelReservation(uuidParam(req.params.id));
       // Task 12.4 example — "decline reservation" (admin-side cancel acts as the decline here).
       await repo.logAdminAction({ adminId: req.user!.id, action: 'decline_reservation', targetType: 'reservation', targetId: req.params.id });
+      log.info('reservation.cancelled', { reservation_id: req.params.id, cancelled_by: 'admin', admin_id: req.user!.id });
       res.json({ ok: true });
     }),
   );

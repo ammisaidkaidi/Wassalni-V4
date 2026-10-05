@@ -1,6 +1,19 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { ZodError } from 'zod';
 import { DomainValidationError, explainDomainError } from '../../DB/domain';
+import { log, reportError } from '../logger';
+// Type-only, side-effect imports: pull in the `req.user`/`req.requestId`
+// ambient `express-serve-static-core` augmentations declared in
+// session.ts/requestId.ts so this file's own use of them below type-checks
+// under every entry point (scripts/tests that import errors.ts without
+// separately importing those two files too — a whole-project `tsc -p .`
+// never needed this since it merges every ambient declaration regardless,
+// but single-file `ts-node <script>.ts` runs only see what's reachable from
+// that script's own import graph). `import type {}` is erased at runtime —
+// no circular-import risk even though session.ts itself imports ApiError
+// from this file.
+import type {} from './session';
+import type {} from './requestId';
 
 /** HTTP error with a machine-readable code — thrown anywhere, mapped by errorHandler. */
 export class ApiError extends Error {
@@ -117,13 +130,19 @@ export const wrap =
     fn(req, res, next).catch(next);
   };
 
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
+  // Task 20.2 — every error response carries the same request_id the access
+  // log line for this request was tagged with, so a user-reported problem
+  // ("I got an error") can be matched to its exact server-side log line
+  // without ever needing to expose stack traces/internals to the client.
+  const requestId = req.requestId;
   if (err instanceof ApiError) {
-    res.status(err.status).json({ error: { code: err.code, message: err.message } });
+    if (err.status >= 500) log.error('http.error', { request_id: requestId, status: err.status, code: err.code, message: err.message });
+    res.status(err.status).json({ error: { code: err.code, message: err.message, request_id: requestId } });
     return;
   }
   if (err instanceof DomainValidationError) {
-    res.status(400).json({ error: { code: err.code, message: err.message } });
+    res.status(400).json({ error: { code: err.code, message: err.message, request_id: requestId } });
     return;
   }
   if (err instanceof ZodError) {
@@ -131,6 +150,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
       error: {
         code: 'VALIDATION',
         message: err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join(' ; '),
+        request_id: requestId,
       },
     });
     return;
@@ -145,6 +165,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
         code: domain.sqlstate,
         message: USER_MESSAGES[domain.sqlstate] ?? domain.message,
         description: domain.description,
+        request_id: requestId,
       },
     });
     return;
@@ -155,14 +176,20 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     (err as { code?: string })?.code ??
     /ERROR:\s+(\d{5}):/.exec(err instanceof Error ? err.message : String(err))?.[1];
   if (pgCode === '23505') {
-    res.status(409).json({ error: { code: 'CONFLICT', message: 'Cette valeur existe déjà' } });
+    res.status(409).json({ error: { code: 'CONFLICT', message: 'Cette valeur existe déjà', request_id: requestId } });
     return;
   }
   if (pgCode === '23503') {
-    res.status(409).json({ error: { code: 'IN_USE', message: 'Cette entrée est référencée ailleurs — suppression impossible' } });
+    res
+      .status(409)
+      .json({ error: { code: 'IN_USE', message: 'Cette entrée est référencée ailleurs — suppression impossible', request_id: requestId } });
     return;
   }
-  console.error('✗ unhandled error:', err);
-  res.status(500).json({ error: { code: 'INTERNAL', message: 'Erreur interne du serveur' } });
+  // Truly unexpected (raw SQL/driver/programmer error) — never forward the
+  // raw message/stack to the client (Task 20.1: no raw SQL errors exposed,
+  // no sensitive information leaked); it's fully captured server-side via
+  // reportError() instead, keyed by the same request_id returned here.
+  reportError(err, { request_id: requestId, method: req.method, path: req.path, user_id: req.user?.id ?? null });
+  res.status(500).json({ error: { code: 'INTERNAL', message: 'Erreur interne du serveur', request_id: requestId } });
 }
 

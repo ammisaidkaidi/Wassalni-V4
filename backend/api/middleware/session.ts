@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express';
 import type { AuthService, PublicUser } from '../auth/authService';
 import { ApiError } from './errors';
+import { log } from '../logger';
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -43,7 +44,14 @@ export const requireAuth: RequestHandler = (req, _res, next) => {
 
 export const requireAdmin: RequestHandler = (req, _res, next) => {
   if (!req.user) return next(new ApiError(401, 'UNAUTHORIZED', 'Connexion requise'));
-  if (req.user.role !== 'admin') return next(new ApiError(403, 'FORBIDDEN', 'Accès administrateur requis'));
+  if (req.user.role !== 'admin') {
+    // Task 20.2 — security event logging: a non-admin account trying to
+    // reach an admin-only route is exactly the kind of signal worth being
+    // able to search server logs for later (privilege-escalation attempt,
+    // stale/misconfigured frontend link, etc.).
+    log.warn('security.permission_denied', { user_id: req.user.id, role: req.user.role, path: req.path, reason: 'not_admin' });
+    return next(new ApiError(403, 'FORBIDDEN', 'Accès administrateur requis'));
+  }
   next();
 };
 
@@ -77,6 +85,12 @@ export function requirePermission(permission: string): RequestHandler {
     if (!req.user) return next(new ApiError(401, 'UNAUTHORIZED', 'Connexion requise'));
     if (req.user.role !== 'admin') return next(new ApiError(403, 'FORBIDDEN', 'Accès administrateur requis'));
     if (!hasAdminPermission(req.user.admin_role, permission)) {
+      log.warn('security.permission_denied', {
+        user_id: req.user.id,
+        admin_role: req.user.admin_role,
+        path: req.path,
+        permission_required: permission,
+      });
       return next(new ApiError(403, 'PERMISSION_DENIED', "Votre rôle administrateur ne permet pas cette action"));
     }
     next();

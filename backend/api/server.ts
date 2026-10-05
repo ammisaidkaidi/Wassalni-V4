@@ -8,9 +8,12 @@ import { createMailer } from './auth/email';
 import { ensureAuthSchema } from './authSchema';
 import { loadApiConfig } from './config';
 import { ensureDomainSchema } from './domainSchema';
+import { detailedHealth, publicHealth, recordTick, registerScheduler } from './health';
 import { errorHandler } from './middleware/errors';
 import { rateLimit } from './middleware/rateLimit';
-import { requireAdmin, sessionLoader } from './middleware/session';
+import { requestContext } from './middleware/requestId';
+import { requireAdmin, requirePermission, sessionLoader } from './middleware/session';
+import { log } from './logger';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
 import { driverRoutes } from './routes/driver';
@@ -125,10 +128,24 @@ async function main(): Promise<void> {
   app.use(cors({ origin: cfg.corsOrigin ?? (cfg.isProduction ? false : true), credentials: true }));
   app.use(rateLimit({ windowMs: 60_000, max: 240 }));
 
+  // Task 20.2 — request id + structured access log for every request from here on.
+  app.use(requestContext);
+
   app.use(sessionLoader(auth, cfg.cookieName));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'wassalni-api', db: dbInfo });
+    publicHealth(db)
+      .then((h) => res.status(h.ok ? 200 : 503).json({ service: 'wassalni-api', ...h }))
+      .catch(() => res.status(503).json({ service: 'wassalni-api', ok: false, db: false, uptime_s: Math.round(process.uptime()) }));
+  });
+
+  // Task 20.3 — detailed health (DB latency, scheduler staleness, provider
+  // modes). Admin-only: unlike /api/health above this exposes operational
+  // detail that has no business being public.
+  app.get('/api/admin/health', requireAdmin, requirePermission('view'), (_req, res) => {
+    detailedHealth(db, cfg)
+      .then((h) => res.status(h.ok ? 200 : 503).json(h))
+      .catch((err) => res.status(500).json({ error: { code: 'INTERNAL', message: String(err) } }));
   });
 
   const authLimiter = rateLimit({ windowMs: 60_000, max: 15, message: "Trop de tentatives d'authentification — patientez une minute" });
@@ -160,6 +177,7 @@ async function main(): Promise<void> {
 
   const server = app.listen(cfg.port, '0.0.0.0', () => {
     console.log(`🚀 Wassalni API listening on http://0.0.0.0:${cfg.port}`);
+    log.info('server.started', { port: cfg.port, mode: cfg.isProduction ? 'production' : 'development' });
   });
 
   // Task 7.3 — periodic sweep of pending gateway payment intents whose
@@ -168,13 +186,18 @@ async function main(): Promise<void> {
   // pattern already used elsewhere in this file's sibling services; errors
   // are logged, not fatal, so a single bad tick never takes the API down.
   const expiryIntervalMs = 60_000;
+  registerScheduler('payment_expiry', expiryIntervalMs);
   const expiryTimer = setInterval(() => {
     repo
       .expireStalePaymentIntents()
       .then((n) => {
         if (n > 0) console.log(`⏱ Payment intents expired: ${n}`);
+        recordTick('payment_expiry', { ok: true });
       })
-      .catch((err) => console.error('✗ expire_stale_payment_intents failed:', err));
+      .catch((err) => {
+        console.error('✗ expire_stale_payment_intents failed:', err);
+        recordTick('payment_expiry', { ok: false, error: String(err) });
+      });
   }, expiryIntervalMs);
   expiryTimer.unref();
 
@@ -185,14 +208,19 @@ async function main(): Promise<void> {
   // as the payment-intent sweep above; an admin can also force an
   // out-of-band tick via POST /api/admin/scheduler/run-trip-lifecycle-tick.
   const lifecycleIntervalMs = 60_000;
+  registerScheduler('trip_lifecycle', lifecycleIntervalMs);
   const lifecycleTimer = setInterval(() => {
     repo
       .runTripLifecycleTick()
       .then((r) => {
         const total = Object.values(r).reduce((a, b) => a + b, 0);
         if (total > 0) console.log('⏱ Trip lifecycle tick:', r);
+        recordTick('trip_lifecycle', { ok: true });
       })
-      .catch((err) => console.error('✗ run_trip_lifecycle_tick failed:', err));
+      .catch((err) => {
+        console.error('✗ run_trip_lifecycle_tick failed:', err);
+        recordTick('trip_lifecycle', { ok: false, error: String(err) });
+      });
   }, lifecycleIntervalMs);
   lifecycleTimer.unref();
 
@@ -202,12 +230,17 @@ async function main(): Promise<void> {
   // delivery (stale subscription, push service hiccup) never blocks the
   // others, see api/push.ts.
   const pushIntervalMs = 20_000;
+  registerScheduler('push_dispatch', pushIntervalMs);
   const pushTimer = setInterval(() => {
     dispatchPendingPushNotifications(repo)
       .then((r) => {
         if (r.notifications > 0) console.log(`⏱ Push dispatch: ${r.sent} sent, ${r.pruned} stale subscriptions pruned, ${r.notifications} notifications processed`);
+        recordTick('push_dispatch', { ok: true });
       })
-      .catch((err) => console.error('✗ dispatchPendingPushNotifications failed:', err));
+      .catch((err) => {
+        console.error('✗ dispatchPendingPushNotifications failed:', err);
+        recordTick('push_dispatch', { ok: false, error: String(err) });
+      });
   }, pushIntervalMs);
   pushTimer.unref();
 
@@ -216,14 +249,19 @@ async function main(): Promise<void> {
   // booking/approval/cancellation/reminder/payment event types (see
   // api/smsDispatch.ts's SMS_NOTIFICATION_TYPES allow-list).
   const smsIntervalMs = 20_000;
+  registerScheduler('sms_dispatch', smsIntervalMs);
   const smsTimer = setInterval(() => {
     dispatchPendingSmsNotifications(repo, db, smsSender)
       .then((r) => {
         if (r.notifications > 0) {
           console.log(`⏱ SMS dispatch: ${r.sent} sent, ${r.failed} failed, ${r.skippedNoPhone} skipped (no phone), ${r.notifications} notifications processed`);
         }
+        recordTick('sms_dispatch', { ok: true });
       })
-      .catch((err) => console.error('✗ dispatchPendingSmsNotifications failed:', err));
+      .catch((err) => {
+        console.error('✗ dispatchPendingSmsNotifications failed:', err);
+        recordTick('sms_dispatch', { ok: false, error: String(err) });
+      });
   }, smsIntervalMs);
   smsTimer.unref();
 
@@ -235,6 +273,7 @@ async function main(): Promise<void> {
   let backupTimer: ReturnType<typeof setInterval> | undefined;
   if (cfg.backup.enabled) {
     const backupIntervalMs = 24 * 60 * 60_000;
+    registerScheduler('backup', backupIntervalMs);
     const runBackupTick = (): void => {
       createBackup(db)
         .then(async (manifest) => {
@@ -244,8 +283,12 @@ async function main(): Promise<void> {
             `⏱ Backup: ${manifest.id} created (${manifest.tables.length} tables) — verify ${verify.ok ? 'OK' : 'FAILED: ' + verify.issues.join('; ')} — pruned ${pruned.length} old backup(s)`,
           );
           if (!verify.ok) console.error('✗ Freshly-created backup failed verification — investigate immediately:', verify.issues);
+          recordTick('backup', verify.ok ? { ok: true } : { ok: false, error: verify.issues.join('; ') });
         })
-        .catch((err) => console.error('✗ Scheduled backup failed:', err));
+        .catch((err) => {
+          console.error('✗ Scheduled backup failed:', err);
+          recordTick('backup', { ok: false, error: String(err) });
+        });
     };
     backupTimer = setInterval(runBackupTick, backupIntervalMs);
     backupTimer.unref();
@@ -259,6 +302,7 @@ async function main(): Promise<void> {
   let restoreDrillTimer: ReturnType<typeof setInterval> | undefined;
   if (cfg.backup.enabled) {
     const restoreDrillIntervalMs = 7 * 24 * 60 * 60_000;
+    registerScheduler('restore_drill', restoreDrillIntervalMs);
     const runRestoreDrillTick = (): void => {
       const latest = listBackups()[0];
       if (!latest) return;
@@ -266,8 +310,12 @@ async function main(): Promise<void> {
         .then((result) => {
           console.log(`⏱ Restore drill: ${latest.id} → ${result.ok ? 'OK' : 'FAILED: ' + result.issues.join('; ')} (${result.durationMs}ms)`);
           if (!result.ok) console.error('✗ Restore drill failed — the latest backup may not actually be restorable:', result.issues);
+          recordTick('restore_drill', result.ok ? { ok: true } : { ok: false, error: result.issues.join('; ') });
         })
-        .catch((err) => console.error('✗ Scheduled restore drill failed:', err));
+        .catch((err) => {
+          console.error('✗ Scheduled restore drill failed:', err);
+          recordTick('restore_drill', { ok: false, error: String(err) });
+        });
     };
     restoreDrillTimer = setInterval(runRestoreDrillTick, restoreDrillIntervalMs);
     restoreDrillTimer.unref();
