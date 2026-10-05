@@ -55,6 +55,8 @@ const ar: Dict = {
     logout: 'تسجيل الخروج',
     skipToContent: 'الانتقال إلى المحتوى الرئيسي',
     installApp: 'تثبيت التطبيق',
+    openMenu: 'فتح القائمة',
+    closeMenu: 'إغلاق القائمة',
   },
   footer: {
     text: 'Wassalni — نسخة تجريبية (delivery domain v3 · Supabase)',

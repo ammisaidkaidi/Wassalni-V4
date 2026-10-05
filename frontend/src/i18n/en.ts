@@ -55,6 +55,8 @@ const en: Dict = {
     logout: 'Log out',
     skipToContent: 'Skip to main content',
     installApp: 'Install app',
+    openMenu: 'Open menu',
+    closeMenu: 'Close menu',
   },
   footer: {
     text: 'Wassalni — demo app (delivery domain v3 · Supabase)',

@@ -1,4 +1,5 @@
-import { NavLink, Route, Routes } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './auth';
 import InstallAppButton from './components/InstallAppButton';
 import NotificationBell from './components/NotificationBell';
@@ -19,70 +20,105 @@ export default function App() {
   const { user, logout } = useAuth();
   const { t, lang, setLang } = useI18n();
   const { theme, toggleTheme } = useTheme();
+  const location = useLocation();
+
+  // Task — small-screen nav: the topbar's links + auth controls no longer
+  // fit on one row below ~880px (see .topbar-panel in index.css), so they're
+  // tucked behind this hamburger toggle instead of silently overflowing.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const headerRef = useRef<HTMLElement>(null);
+
+  // Close on outside click…
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (headerRef.current && !headerRef.current.contains(e.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
+  // …and whenever navigation actually happens (clicking a link inside the panel).
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
 
   return (
     <div className="app">
       <a href="#main-content" className="skip-link">
         {t('nav.skipToContent')}
       </a>
-      <header className="topbar">
+      <header className="topbar" ref={headerRef}>
         <NavLink to="/" className="brand">
           🚐 Wassalni
         </NavLink>
-        <nav aria-label={t('nav.search')}>
-          <NavLink to="/" end>
-            {t('nav.search')}
-          </NavLink>
-          {user?.customer_id && <NavLink to="/reservations">{t('nav.myReservations')}</NavLink>}
-          {user?.customer_id && <NavLink to="/wallet">{t('nav.myWallet')}</NavLink>}
-          {user?.customer_id && <NavLink to="/profile">{t('nav.myProfile')}</NavLink>}
-          {user?.role === 'driver' && <NavLink to="/driver">{t('nav.driverSpace')}</NavLink>}
-          {user?.role === 'admin' && <NavLink to="/admin">{t('nav.admin')}</NavLink>}
-        </nav>
-        <div className="auth">
-          <label className="lang-switch">
-            <span className="sr-only">{t('lang.switch')}</span>
-            <select
-              aria-label={t('lang.switch')}
-              value={lang}
-              onChange={(e) => setLang(e.target.value as typeof lang)}
+
+        <button
+          type="button"
+          className="menu-toggle"
+          aria-label={menuOpen ? t('nav.closeMenu') : t('nav.openMenu')}
+          aria-expanded={menuOpen}
+          aria-controls="topbar-panel"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          <span aria-hidden="true">{menuOpen ? '✕' : '☰'}</span>
+        </button>
+
+        <div id="topbar-panel" className={`topbar-panel${menuOpen ? ' open' : ''}`}>
+          <nav aria-label={t('nav.search')}>
+            <NavLink to="/" end>
+              {t('nav.search')}
+            </NavLink>
+            {user?.customer_id && <NavLink to="/reservations">{t('nav.myReservations')}</NavLink>}
+            {user?.customer_id && <NavLink to="/wallet">{t('nav.myWallet')}</NavLink>}
+            {user?.customer_id && <NavLink to="/profile">{t('nav.myProfile')}</NavLink>}
+            {user?.role === 'driver' && <NavLink to="/driver">{t('nav.driverSpace')}</NavLink>}
+            {user?.role === 'admin' && <NavLink to="/admin">{t('nav.admin')}</NavLink>}
+          </nav>
+          <div className="auth">
+            <label className="lang-switch">
+              <span className="sr-only">{t('lang.switch')}</span>
+              <select
+                aria-label={t('lang.switch')}
+                value={lang}
+                onChange={(e) => setLang(e.target.value as typeof lang)}
+              >
+                {LANGS.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <InstallAppButton />
+            <button
+              type="button"
+              className="btn ghost icon-btn"
+              onClick={toggleTheme}
+              aria-pressed={theme === 'dark'}
+              title={t('theme.toggle')}
             >
-              {LANGS.map((l) => (
-                <option key={l.code} value={l.code}>
-                  {l.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <InstallAppButton />
-          <button
-            type="button"
-            className="btn ghost icon-btn"
-            onClick={toggleTheme}
-            aria-pressed={theme === 'dark'}
-            title={t('theme.toggle')}
-          >
-            <span aria-hidden="true">{theme === 'dark' ? '☀️' : '🌙'}</span>
-            <span className="sr-only">{t('theme.toggle')}</span>
-          </button>
-          {user ? (
-            <>
-              <NotificationBell />
-              <span className="who" title={user.email}>
-                {user.full_name}
-              </span>
-              <button className="btn ghost" onClick={() => void logout()}>
-                {t('nav.logout')}
-              </button>
-            </>
-          ) : (
-            <>
-              <NavLink to="/login">{t('nav.login')}</NavLink>
-              <NavLink to="/register" className="btn primary">
-                {t('nav.register')}
-              </NavLink>
-            </>
-          )}
+              <span aria-hidden="true">{theme === 'dark' ? '☀️' : '🌙'}</span>
+              <span className="sr-only">{t('theme.toggle')}</span>
+            </button>
+            {user ? (
+              <>
+                <NotificationBell />
+                <span className="who" title={user.email}>
+                  {user.full_name}
+                </span>
+                <button className="btn ghost" onClick={() => void logout()}>
+                  {t('nav.logout')}
+                </button>
+              </>
+            ) : (
+              <>
+                <NavLink to="/login">{t('nav.login')}</NavLink>
+                <NavLink to="/register" className="btn primary">
+                  {t('nav.register')}
+                </NavLink>
+              </>
+            )}
+          </div>
         </div>
       </header>
 

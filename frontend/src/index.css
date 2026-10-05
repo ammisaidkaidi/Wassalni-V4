@@ -208,6 +208,86 @@ textarea:focus-visible,
   font-weight: 600;
 }
 
+/* Hamburger toggle — hidden by default (desktop shows nav/auth inline);
+   revealed by the @media rule below once the topbar no longer fits on one
+   row. .topbar-panel wraps <nav> + .auth together so both can be hidden
+   behind it as a single dropdown. */
+.menu-toggle {
+  display: none;
+  margin-inline-start: auto;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 10px;
+  color: var(--ink);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.menu-toggle:hover {
+  background: var(--teal-bg);
+}
+
+.topbar-panel {
+  display: contents;
+}
+
+@media (max-width: 880px) {
+  .topbar {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+  }
+
+  .menu-toggle {
+    display: inline-flex;
+  }
+
+  .topbar-panel {
+    display: none;
+    position: absolute;
+    top: 100%;
+    inset-inline: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    padding: 14px 20px 20px;
+  }
+
+  .topbar-panel.open {
+    display: flex;
+  }
+
+  .topbar-panel nav {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .topbar-panel nav a {
+    padding: 10px 12px;
+  }
+
+  .topbar-panel .auth {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .topbar-panel .auth > * {
+    width: 100%;
+  }
+
+  .topbar-panel .lang-switch select {
+    width: 100%;
+  }
+}
+
 /* ── layout ──────────────────────────────────────────────── */
 .container {
   width: 100%;

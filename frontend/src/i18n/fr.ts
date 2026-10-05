@@ -57,6 +57,8 @@ const fr: Dict = {
     logout: 'Déconnexion',
     skipToContent: 'Aller au contenu principal',
     installApp: "Installer l'application",
+    openMenu: 'Ouvrir le menu',
+    closeMenu: 'Fermer le menu',
   },
   footer: {
     text: 'Wassalni — démonstrateur (delivery domain v3 · Supabase)',
