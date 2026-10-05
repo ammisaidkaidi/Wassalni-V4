@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, fileUrl, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
@@ -68,6 +68,44 @@ type Tab =
   | 'sos'
   | 'exports';
 
+/** Task: admin sidebar redesign — the 25 admin tabs used to render as one
+ *  flat, wrapping row of buttons (`.tabs`/`.tab`), which looked chaotic.
+ *  They're now grouped into four fixed categories and rendered as a
+ *  collapsible-accordion sidebar (persistent on desktop, hamburger-toggled
+ *  off-canvas on narrow screens). This type/order is the single source of
+ *  truth for that grouping. */
+type Category = 'operations' | 'finance' | 'trustSafety' | 'system';
+
+const CATEGORY_ORDER: Category[] = ['operations', 'finance', 'trustSafety', 'system'];
+
+const TAB_CATEGORY: Record<Tab, Category> = {
+  trips: 'operations',
+  trajectories: 'operations',
+  drivers: 'operations',
+  vehicles: 'operations',
+  'vehicle-inspections': 'operations',
+  tracking: 'operations',
+  'no-show': 'operations',
+  reservations: 'operations',
+  customers: 'operations',
+  ratings: 'operations',
+  waitlist: 'operations',
+  recurring: 'operations',
+  payments: 'finance',
+  'promo-codes': 'finance',
+  payouts: 'finance',
+  kyc: 'trustSafety',
+  fraud: 'trustSafety',
+  errors: 'trustSafety',
+  sos: 'trustSafety',
+  analytics: 'system',
+  'audit-log': 'system',
+  'import-history': 'system',
+  admins: 'system',
+  settings: 'system',
+  exports: 'system',
+};
+
 export default function AdminPage() {
   const { t } = useI18n();
   const { user, loading } = useAuth();
@@ -77,6 +115,11 @@ export default function AdminPage() {
   const [pendingRefunds, setPendingRefunds] = useState(0);
   // Task 11.5 — open-SOS count badge, same convenience pattern as the refund badge above.
   const [openSos, setOpenSos] = useState(0);
+  // Sidebar redesign: off-canvas open/close state (mobile hamburger) and
+  // which accordion category is currently expanded.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [openCategory, setOpenCategory] = useState<Category | null>(() => TAB_CATEGORY['trips']);
+  const sidebarRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (user?.role !== 'admin') return;
@@ -91,6 +134,19 @@ export default function AdminPage() {
         /* badge is a convenience — silently skip if it fails to load */
       });
   }, [user]);
+
+  // Close the off-canvas sidebar when clicking outside it (mobile only —
+  // harmless no-op on desktop since the sidebar is always visible there).
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    function onClick(e: MouseEvent) {
+      if (sidebarRef.current && !sidebarRef.current.contains(e.target as Node)) {
+        setSidebarOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [sidebarOpen]);
 
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: 'trips', label: t('admin.tabs.trips') },
@@ -120,6 +176,27 @@ export default function AdminPage() {
     { id: 'exports', label: t('admin.tabs.exports') },
   ];
 
+  const CATEGORY_LABEL: Record<Category, string> = {
+    operations: t('admin.categories.operations'),
+    finance: t('admin.categories.finance'),
+    trustSafety: t('admin.categories.trustSafety'),
+    system: t('admin.categories.system'),
+  };
+
+  const grouped = useMemo(() => {
+    const byCategory = new Map<Category, Array<{ id: Tab; label: string }>>();
+    for (const cat of CATEGORY_ORDER) byCategory.set(cat, []);
+    for (const tb of TABS) byCategory.get(TAB_CATEGORY[tb.id])!.push(tb);
+    return byCategory;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t]);
+
+  function selectTab(id: Tab) {
+    setTab(id);
+    setOpenCategory(TAB_CATEGORY[id]);
+    setSidebarOpen(false);
+  }
+
   if (loading) return <p className="empty">{t('admin.loading')}</p>;
   if (user?.role !== 'admin')
     return (
@@ -129,17 +206,69 @@ export default function AdminPage() {
     );
 
   return (
-    <section>
-      <h1>{t('admin.title')}</h1>
-      <div className="tabs">
-        {TABS.map((tb) => (
-          <button key={tb.id} className={`tab${tab === tb.id ? ' active' : ''}`} onClick={() => setTab(tb.id)}>
-            {tb.label}
-            {tb.id === 'payments' && pendingRefunds > 0 && <span className="tab-badge">{pendingRefunds}</span>}
-            {tb.id === 'sos' && openSos > 0 && <span className="tab-badge">{openSos}</span>}
-          </button>
-        ))}
+    <section className="admin-page">
+      <div className="admin-page-head">
+        <button
+          type="button"
+          className="admin-sidebar-toggle"
+          aria-expanded={sidebarOpen}
+          aria-controls="admin-sidebar"
+          aria-label={sidebarOpen ? t('admin.sidebar.close') : t('admin.sidebar.open')}
+          onClick={() => setSidebarOpen((v) => !v)}
+        >
+          {sidebarOpen ? '✕' : '☰'}
+        </button>
+        <h1>{t('admin.title')}</h1>
       </div>
+      <div className="admin-shell">
+        {sidebarOpen && <div className="admin-sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+        <div
+          id="admin-sidebar"
+          ref={sidebarRef}
+          className={`admin-sidebar${sidebarOpen ? ' open' : ''}`}
+        >
+          <nav aria-label={t('admin.title')}>
+            {CATEGORY_ORDER.map((cat) => {
+              const items = grouped.get(cat) ?? [];
+              const expanded = openCategory === cat;
+              return (
+                <div key={cat} className="admin-nav-category">
+                  <button
+                    type="button"
+                    className="admin-nav-category-head"
+                    aria-expanded={expanded}
+                    onClick={() => setOpenCategory(expanded ? null : cat)}
+                  >
+                    <span>{CATEGORY_LABEL[cat]}</span>
+                    <span className={`admin-nav-chevron${expanded ? ' open' : ''}`} aria-hidden="true">
+                      ▾
+                    </span>
+                  </button>
+                  {expanded && (
+                    <ul className="admin-nav-items">
+                      {items.map((tb) => (
+                        <li key={tb.id}>
+                          <button
+                            type="button"
+                            className={`admin-nav-item${tab === tb.id ? ' active' : ''}`}
+                            onClick={() => selectTab(tb.id)}
+                          >
+                            {tb.label}
+                            {tb.id === 'payments' && pendingRefunds > 0 && (
+                              <span className="tab-badge">{pendingRefunds}</span>
+                            )}
+                            {tb.id === 'sos' && openSos > 0 && <span className="tab-badge">{openSos}</span>}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            })}
+          </nav>
+        </div>
+        <div className="admin-content">
       {tab === 'trips' && <TripsTab />}
       {tab === 'trajectories' && <TrajectoriesTab />}
       {tab === 'drivers' && <DriversTab />}
@@ -165,6 +294,8 @@ export default function AdminPage() {
       {tab === 'exports' && <ExportsTab />}
       {tab === 'fraud' && <FraudSignalsTab />}
       {tab === 'errors' && <ErrorsTab />}
+        </div>
+      </div>
     </section>
   );
 }

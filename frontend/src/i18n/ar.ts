@@ -695,6 +695,16 @@ const ar: Dict = {
       settings: 'الإعدادات',
       exports: 'التصدير',
     },
+    categories: {
+      operations: 'العمليات',
+      finance: 'المالية',
+      trustSafety: 'الثقة والأمان',
+      system: 'النظام',
+    },
+    sidebar: {
+      open: 'فتح قائمة الإدارة',
+      close: 'إغلاق قائمة الإدارة',
+    },
     common: {
       name: 'الاسم',
       fullName: 'الاسم الكامل',

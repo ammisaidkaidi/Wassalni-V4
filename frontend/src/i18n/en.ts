@@ -698,6 +698,16 @@ const en: Dict = {
       settings: 'Settings',
       exports: 'Exports',
     },
+    categories: {
+      operations: 'Operations',
+      finance: 'Finance',
+      trustSafety: 'Trust & Safety',
+      system: 'System',
+    },
+    sidebar: {
+      open: 'Open admin menu',
+      close: 'Close admin menu',
+    },
     common: {
       name: 'Name',
       fullName: 'Full name',

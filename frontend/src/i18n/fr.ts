@@ -701,6 +701,16 @@ const fr: Dict = {
       settings: 'Configuration',
       exports: 'Exports',
     },
+    categories: {
+      operations: 'Opérations',
+      finance: 'Finance',
+      trustSafety: 'Confiance & Sécurité',
+      system: 'Système',
+    },
+    sidebar: {
+      open: 'Ouvrir le menu admin',
+      close: 'Fermer le menu admin',
+    },
     common: {
       name: 'Nom',
       fullName: 'Nom complet',

@@ -945,6 +945,186 @@ form .btn {
   vertical-align: middle;
 }
 
+/* ── admin: categorized sidebar ─────────────────────────────
+   Replaces the old flat, wrapping ".tabs" row of 25 buttons (still used
+   elsewhere, e.g. DriverPage) with a sidebar grouped into a few fixed
+   categories (Operations / Finance / Trust & Safety / System), each an
+   independent accordion section. Persistent & docked on desktop; becomes an
+   off-canvas drawer toggled by a hamburger button under the mobile
+   breakpoint. Uses logical properties (inset-inline-start, border-inline-end,
+   margin-inline-start) so it mirrors automatically under the app's RTL
+   (Arabic) mode. */
+
+.admin-page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.admin-page-head h1 {
+  margin: 0;
+}
+
+.admin-sidebar-toggle {
+  display: none;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.admin-sidebar-toggle:hover {
+  background: var(--teal-bg);
+}
+
+.admin-shell {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  position: relative;
+}
+
+.admin-sidebar {
+  flex: 0 0 240px;
+  width: 240px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.admin-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.admin-nav-category + .admin-nav-category {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.admin-nav-category-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 10px 10px;
+  border-radius: 8px;
+  font-weight: 800;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.admin-nav-category-head:hover {
+  background: var(--surface-muted);
+  color: var(--ink);
+}
+
+.admin-nav-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 0.75rem;
+}
+
+.admin-nav-chevron.open {
+  transform: rotate(180deg);
+}
+
+.admin-nav-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 2px 0 8px;
+  padding: 0;
+}
+
+.admin-nav-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  text-align: start;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.admin-nav-item:hover {
+  background: var(--surface-muted);
+}
+
+.admin-nav-item.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.admin-sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 880px) {
+  .admin-sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .admin-shell {
+    display: block;
+  }
+
+  .admin-sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 40;
+  }
+
+  .admin-sidebar {
+    display: none;
+  }
+
+  .admin-sidebar.open {
+    display: block;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    inset-inline-start: 0;
+    width: 82vw;
+    max-width: 300px;
+    max-height: none;
+    border-radius: 0;
+    border-inline-end: 1px solid var(--line);
+    z-index: 41;
+    overflow-y: auto;
+  }
+}
+
 .table-wrap {
   overflow-x: auto;
   margin-top: 16px;
