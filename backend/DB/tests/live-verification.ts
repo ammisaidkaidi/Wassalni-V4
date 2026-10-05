@@ -20,9 +20,9 @@
  *  - Task 2.3: segment-based capacity — two non-overlapping segment
  *    reservations on a capacity=1 trip must BOTH succeed; a third
  *    overlapping one must fail.
- *  - Task 2.4: concurrency races — capacity=1 double-booking, confirm race,
- *    cancel race, payment race. (No expiration race: Task 7.3 — payment
- *    holds/expiry — doesn't exist yet, so there's nothing to race there.)
+ *  - Task 2.4 / Task 19.3: concurrency races — capacity=1 double-booking,
+ *    confirm race, cancel race, payment race, payment-vs-expiration race,
+ *    truly-concurrent duplicate webhook delivery, waitlist promotion race.
  */
 import { Writable } from 'node:stream';
 import { loadDbConfig } from '../config';
@@ -91,6 +91,7 @@ async function main(): Promise<void> {
   const createdPromoCodeIds: string[] = [];
   let originalNoShowThreshold: number | null = null;
   let trajectoryId: string | null = null;
+  let trajectoryId2: string | null = null;
 
   try {
     console.log(`\n=== Setup (tag ${tag}) ===`);
@@ -110,6 +111,16 @@ async function main(): Promise<void> {
       return id;
     };
     const [custA, custB, custC, custD, custE] = await Promise.all([mkCustomer(1), mkCustomer(2), mkCustomer(3), mkCustomer(4), mkCustomer(5)]);
+
+    const mkTestDriver = async (n: number): Promise<string> => {
+      const row = await db.insert<{ id: string }>('driver', {
+        full_name: `TEST Driver ${tag}-${n}`,
+        nin: `${tag}${n}`.padStart(18, '0').slice(-18),
+        phone: `+2136${String(tag).slice(-6)}${n}`,
+      });
+      createdDriverIds.push(row.id);
+      return row.id;
+    };
 
     const mkTrip = async (capacity: number): Promise<string> => {
       const id = await repo.createTrip({
@@ -131,6 +142,115 @@ async function main(): Promise<void> {
       }
       return id;
     };
+
+    // ── Task 19.1: WPoint & trajectory domain rules ────────────────────────
+    // Uses its own throwaway trajectory (trajectoryId2) so it never disturbs
+    // wpA/wpB/wpC's positions/communes, which every later task relies on.
+    console.log('\n=== Task 19.1: WPoint & trajectory domain rules ===');
+    trajectoryId2 = await repo.createTrajectory(`TEST-WP-${tag}`);
+    const wpT1 = await repo.addWpoint(trajectoryId2, 'Alger');
+    const wpT2 = await repo.addWpoint(trajectoryId2, 'Blida');
+    const wpT3 = await repo.addWpoint(trajectoryId2, 'Djelfa');
+    ok('19.1: second throwaway trajectory (Alger->Blida->Djelfa) created for isolated WPoint tests');
+
+    const algerCommuneRow = await db.raw<{ id: number }>(
+      `select c.id from commune c join wilaya w on w.id = c.wilaya_id where w.nom_fr = 'Alger' limit 1`,
+    );
+    const blidaCommuneRow = await db.raw<{ id: number }>(
+      `select c.id from commune c join wilaya w on w.id = c.wilaya_id where w.nom_fr = 'Blida' limit 1`,
+    );
+    const algerCommuneIdWp = algerCommuneRow[0]?.id;
+    const blidaCommuneIdWp = blidaCommuneRow[0]?.id;
+    if (algerCommuneIdWp === undefined || blidaCommuneIdWp === undefined) {
+      bad('19.1 setup', 'could not resolve a commune id for Alger or Blida');
+    } else {
+      // setWpointCommunes throws a plain DomainValidationError('BAD_COMMUNE', ...)
+      // — a JS-side guard, not one of the SQL-raised DZxxx codes — so this
+      // checks the message/code directly rather than via the DZxxx-only
+      // expectErr(expectedCode) path.
+      try {
+        await repo.setWpointCommunes(wpT1, [blidaCommuneIdWp]);
+        bad('19.1: setWpointCommunes rejects a commune from the wrong wilaya (Blida commune on an Alger wpoint)', 'expected failure, call succeeded');
+      } catch (err) {
+        const code = (err as { code?: unknown })?.code;
+        if (code === 'BAD_COMMUNE') {
+          ok('19.1: setWpointCommunes rejects a commune from the wrong wilaya (Blida commune on an Alger wpoint) (BAD_COMMUNE)');
+        } else {
+          bad(
+            '19.1: setWpointCommunes rejects a commune from the wrong wilaya (Blida commune on an Alger wpoint)',
+            `expected BAD_COMMUNE, got ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await expectOk("19.1: setWpointCommunes accepts a commune from the wpoint's own wilaya", () =>
+        repo.setWpointCommunes(wpT1, [algerCommuneIdWp]),
+      );
+      const afterSet = await repo.wpointCommuneIds(wpT1);
+      if (afterSet.length === 1 && afterSet[0] === algerCommuneIdWp) {
+        ok('19.1: wpointCommuneIds reflects the single selected commune');
+      } else {
+        bad('19.1: wpointCommuneIds after set', JSON.stringify(afterSet));
+      }
+      await expectOk('19.1: setWpointCommunes([]) clears the selection back to unrestricted', () => repo.setWpointCommunes(wpT1, []));
+      const afterClear = await repo.wpointCommuneIds(wpT1);
+      if (afterClear.length === 0) ok('19.1: wpointCommuneIds is empty again after clearing');
+      else bad('19.1: wpointCommuneIds after clear', JSON.stringify(afterClear));
+    }
+
+    // reorderWpoints requires the trajectory's *entire* current wpoint set —
+    // no partial list, no duplicates, no omissions.
+    await expectErr(
+      '19.1: reorderWpoints rejects a list missing one of the trajectory\'s wpoints',
+      () => repo.reorderWpoints(trajectoryId2!, [wpT1, wpT2]),
+    );
+    await expectErr(
+      '19.1: reorderWpoints rejects a list with a duplicated id',
+      () => repo.reorderWpoints(trajectoryId2!, [wpT1, wpT1, wpT3]),
+    );
+    await expectOk('19.1: reorderWpoints accepts the full set in a new order', () => repo.reorderWpoints(trajectoryId2!, [wpT3, wpT1, wpT2]));
+    const reorderedPositions = await db.raw<{ id: string; position: number }>('select id, position from wpoint where trajectory_id = $1 order by position', [
+      trajectoryId2,
+    ]);
+    if (reorderedPositions.map((r) => r.id).join(',') === [wpT3, wpT1, wpT2].join(',')) {
+      ok('19.1: wpoint positions now match the requested order (Djelfa, Alger, Blida)');
+    } else {
+      bad('19.1: wpoint order after reorder', JSON.stringify(reorderedPositions));
+    }
+
+    // wpointHasTripStops: false until a trip actually stops there, true once it does.
+    const beforeAnyTrip = await repo.wpointHasTripStops(wpT1);
+    if (beforeAnyTrip === false) ok('19.1: wpointHasTripStops is false for a wpoint no trip has ever stopped at');
+    else bad('19.1: wpointHasTripStops (before)', String(beforeAnyTrip));
+
+    const tripForWpTest = await repo.createTrip({
+      trajectoryId: trajectoryId2,
+      departureAt: new Date(Date.now() + 24 * 3600 * 1000),
+      capacity: 2,
+      seatPrice: 500,
+      driverId,
+    });
+    createdTripIds.push(tripForWpTest);
+    await repo.populateTripStops(tripForWpTest);
+    const stillUnpublished = await repo.wpointHasTripStops(wpT1);
+    if (stillUnpublished === true) {
+      ok('19.1: wpointHasTripStops becomes true once a trip_stop references the wpoint');
+    } else {
+      bad('19.1: wpointHasTripStops (after populateTripStops)', String(stillUnpublished));
+    }
+
+    // deleteWpoint on a wpoint that is NOT referenced by any trip_stop must
+    // succeed cleanly (the caller-side guard above is what protects the
+    // in-use ones — the DB itself allows it via ON DELETE CASCADE).
+    const wpUnused = await repo.addWpoint(trajectoryId2, 'Tiaret');
+    const unusedHasStops = await repo.wpointHasTripStops(wpUnused);
+    if (unusedHasStops === false) {
+      await expectOk('19.1: deleteWpoint succeeds for a wpoint with no trip stops', () => repo.deleteWpoint(trajectoryId2!, wpUnused));
+      const stillThere = await db.raw<{ id: string }>('select id from wpoint where id = $1', [wpUnused]);
+      if (stillThere.length === 0) ok('19.1: deleted wpoint no longer exists');
+      else bad('19.1: deleteWpoint', 'row still present after delete');
+    } else {
+      bad('19.1 setup', 'freshly-added wpoint unexpectedly already has trip stops');
+    }
 
     // ── Task 2.3: segment-based capacity ──────────────────────────────────
     console.log('\n=== Task 2.3: segment-based capacity ===');
@@ -232,7 +352,181 @@ async function main(): Promise<void> {
         else bad('2.4: payment race', `${paidOk} succeeded (expected 1 — second should hit DZ503, over total)`);
       }
     }
-    console.log('\n(No expiration race test: Task 7.3 payment-hold/expiry does not exist yet in this schema.)');
+    // ── Task 19.3: payment-vs-expiration race ──────────────────────────────
+    // A payment intent whose 15-minute window has just lapsed, with a
+    // success webhook arriving at (almost) the same instant the sweep
+    // fires. The two must not both "win" — the final state must be exactly
+    // one of {paid & confirmed} or {expired & cancelled}, never a
+    // contradictory mix (e.g. a webhook-paid payment sitting on top of a
+    // sweep-cancelled reservation).
+    {
+      const raceDriver = await mkTestDriver(90);
+      const raceCustomer = await mkCustomer(90);
+      const tripForExpiryRace = await repo.createTrip({
+        trajectoryId: trajectoryId!,
+        departureAt: new Date(Date.now() + 3 * 3600 * 1000),
+        capacity: 1,
+        seatPrice: 500,
+        driverId: raceDriver,
+      });
+      createdTripIds.push(tripForExpiryRace);
+      await repo.populateTripStops(tripForExpiryRace);
+      await repo.publishTrip(tripForExpiryRace);
+      await repo.setTripPrice({ tripId: tripForExpiryRace, fromWpointId: wpA, toWpointId: wpB, price: 500 });
+      const resForExpiryRace = await repo.reserve({ tripId: tripForExpiryRace, customerId: raceCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+      const paymentForExpiryRace = await repo.createGatewayPaymentIntent({
+        reservationId: resForExpiryRace,
+        amount: 500,
+        method: 'cib',
+        gateway: GATEWAY_NAME,
+        gatewayTransactionId: generateTransactionId(),
+      });
+      // Backdate it past its window, exactly like the 7.3 sweep test above,
+      // then fire the sweep and a success webhook at the same time.
+      await db.raw("update payment set expires_at = now() - interval '1 minute' where id = $1", [paymentForExpiryRace]);
+      const [sweepResult, webhookResult] = await Promise.allSettled([
+        repo.expireStalePaymentIntents(),
+        repo.applyGatewayPaymentEvent({
+          paymentId: paymentForExpiryRace,
+          gateway: GATEWAY_NAME,
+          gatewayEventId: generateEventId(),
+          eventType: 'payment.succeeded',
+          signatureValid: true,
+          rawPayload: { ok: true },
+        }),
+      ]);
+      const finalPayment = await db.raw<{ status: string }>('select status from payment where id = $1', [paymentForExpiryRace]);
+      const finalRes = await db.raw<{ status: string }>('select status from reservation where id = $1', [resForExpiryRace]);
+      const paidAndConfirmed = finalPayment[0]?.status === 'paid' && finalRes[0]?.status === 'confirmed';
+      const expiredAndCancelled = finalPayment[0]?.status === 'expired' && finalRes[0]?.status === 'cancelled';
+      if (paidAndConfirmed || expiredAndCancelled) {
+        ok(`19.3: payment-vs-expiration race resolves to a single consistent outcome (${finalPayment[0]?.status}/${finalRes[0]?.status}) — sweep=${sweepResult.status}, webhook=${webhookResult.status}`);
+      } else {
+        bad('19.3: payment-vs-expiration race', `inconsistent final state: payment=${JSON.stringify(finalPayment[0])}, reservation=${JSON.stringify(finalRes[0])}`);
+      }
+    }
+
+    // ── Task 19.3: truly-concurrent duplicate webhook delivery ─────────────
+    // Task 7.2 above already proves SEQUENTIAL replay is rejected; this
+    // proves the same gateway_event_id arriving twice AT THE SAME INSTANT
+    // (e.g. a flaky gateway retrying a delivery before the first response
+    // is even sent) still only ever applies once — the DB's unique index on
+    // (gateway, gateway_event_id), not request ordering, is what prevents
+    // the double-apply.
+    {
+      const dupDriver = await mkTestDriver(91);
+      const dupCustomer = await mkCustomer(91);
+      const tripForDupWebhook = await repo.createTrip({
+        trajectoryId: trajectoryId!,
+        departureAt: new Date(Date.now() + 3 * 3600 * 1000),
+        capacity: 1,
+        seatPrice: 500,
+        driverId: dupDriver,
+      });
+      createdTripIds.push(tripForDupWebhook);
+      await repo.populateTripStops(tripForDupWebhook);
+      await repo.publishTrip(tripForDupWebhook);
+      await repo.setTripPrice({ tripId: tripForDupWebhook, fromWpointId: wpA, toWpointId: wpB, price: 500 });
+      const resForDupWebhook = await repo.reserve({ tripId: tripForDupWebhook, customerId: dupCustomer, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpB });
+      const paymentForDupWebhook = await repo.createGatewayPaymentIntent({
+        reservationId: resForDupWebhook,
+        amount: 500,
+        method: 'cib',
+        gateway: GATEWAY_NAME,
+        gatewayTransactionId: generateTransactionId(),
+      });
+      const sharedEventId = generateEventId();
+      const makeEvent = () =>
+        repo.applyGatewayPaymentEvent({
+          paymentId: paymentForDupWebhook,
+          gateway: GATEWAY_NAME,
+          gatewayEventId: sharedEventId,
+          eventType: 'payment.succeeded',
+          signatureValid: true,
+          rawPayload: { ok: true },
+        });
+      const [dupA, dupB] = await Promise.allSettled([makeEvent(), makeEvent()]);
+      const results = [dupA, dupB].map((r) => (r.status === 'fulfilled' ? r.value : `rejected: ${r.reason}`));
+      const processedCount = results.filter((r) => r === 'processed').length;
+      if (processedCount === 1) {
+        ok(`19.3: 2 truly-concurrent deliveries of the SAME webhook event id -> exactly 1 processed (other: ${results.find((r) => r !== 'processed')})`);
+      } else {
+        bad('19.3: concurrent duplicate webhook', `${processedCount} processed (expected exactly 1): ${JSON.stringify(results)}`);
+      }
+      const dupEvents = await repo.listPaymentGatewayEvents(paymentForDupWebhook);
+      const sameEventRows = dupEvents.filter((e) => e.gateway_event_id === sharedEventId);
+      if (sameEventRows.length === 1) {
+        ok('19.3: the unique index on (gateway, gateway_event_id) kept exactly one row for the racing pair, not two');
+      } else {
+        bad('19.3: gateway_event_id uniqueness under concurrency', `${sameEventRows.length} row(s) for the same event id`);
+      }
+    }
+
+    // ── Task 19.3: waitlist promotion race ──────────────────────────────────
+    // reservation cancellation already fires promote_waitlist() synchronously
+    // via a DB trigger (see sql.txt, trg on reservation cancel) — so the real
+    // race isn't "call promote_waitlist twice after freeing a seat" (the
+    // trigger already consumes it before a second manual call could), it's
+    // "two cancellations free two seats AT THE SAME TIME", each one's
+    // trigger racing the other's to promote into a shared pool of waiting
+    // entries. promote_waitlist() takes a per-trip advisory lock
+    // (pg_advisory_xact_lock) specifically so this can never double-promote
+    // the same waiting entry twice or exceed capacity: capacity=2, both
+    // seats held, 2 customers waiting — cancelling both holders at once must
+    // promote exactly 2 entries (one each), never 0, 1, 3, or the same
+    // entry twice.
+    {
+      const wlDriver = await mkTestDriver(92);
+      const wlHolder1 = await mkCustomer(92);
+      const wlHolder2 = await mkCustomer(93);
+      const wlWaiterY = await mkCustomer(94);
+      const wlWaiterZ = await mkCustomer(95);
+      const tripForWaitlistRace = await repo.createTrip({
+        trajectoryId: trajectoryId!,
+        departureAt: new Date(Date.now() + 3 * 3600 * 1000),
+        capacity: 2,
+        seatPrice: 500,
+        driverId: wlDriver,
+      });
+      createdTripIds.push(tripForWaitlistRace);
+      await repo.populateTripStops(tripForWaitlistRace);
+      await repo.publishTrip(tripForWaitlistRace);
+      await repo.setTripPrice({ tripId: tripForWaitlistRace, fromWpointId: wpA, toWpointId: wpC, price: 500 });
+      const holderRes1 = await repo.reserve({ tripId: tripForWaitlistRace, customerId: wlHolder1, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpC });
+      const holderRes2 = await repo.reserve({ tripId: tripForWaitlistRace, customerId: wlHolder2, seats: 1, pickupWpointId: wpA, dropoffWpointId: wpC });
+      await repo.confirmReservation(holderRes1);
+      await repo.confirmReservation(holderRes2); // trip now full: 2/2
+      const entryY = await repo.joinWaitlist(tripForWaitlistRace, wlWaiterY, 1, wpA, wpC);
+      const entryZ = await repo.joinWaitlist(tripForWaitlistRace, wlWaiterZ, 1, wpA, wpC);
+      // Cancel both holders AT THE SAME TIME — each cancellation's trigger
+      // fires promote_waitlist() for this trip, racing the other.
+      const [cancel1, cancel2] = await Promise.allSettled([repo.cancelReservation(holderRes1), repo.cancelReservation(holderRes2)]);
+      if (cancel1.status === 'fulfilled' && cancel2.status === 'fulfilled') {
+        ok('19.3: both concurrent cancellations (each auto-triggering promote_waitlist) completed without error');
+      } else {
+        bad('19.3: concurrent cancellations triggering promotion', JSON.stringify([cancel1, cancel2]));
+      }
+      // Belt-and-braces: an explicit extra call once nothing should be left
+      // to promote must be a safe no-op (0), proving it isn't just "last
+      // write wins" by luck.
+      const extraPromote = await repo.promoteWaitlist(tripForWaitlistRace);
+      const entryStatuses = await db.raw<{ id: string; status: string }>('select id, status from waitlist_entry where id in ($1, $2)', [entryY, entryZ]);
+      const promotedEntries = entryStatuses.filter((e) => e.status === 'promoted');
+      if (promotedEntries.length === 2 && extraPromote === 0) {
+        ok('19.3: 2 concurrent cancellations freeing 2 seats for 2 waiters -> both promoted exactly once each, no double-promotion/overbooking, extra call is a no-op');
+      } else {
+        bad('19.3: waitlist promotion race', `entries=${JSON.stringify(entryStatuses)}, extraPromote=${extraPromote} (expected both promoted, extraPromote=0)`);
+      }
+      const finalOccupancy = await db.raw<{ seats: number }>(
+        "select coalesce(sum(seats), 0)::int as seats from reservation where trip_id = $1 and status in ('pending','confirmed')",
+        [tripForWaitlistRace],
+      );
+      if ((finalOccupancy[0]?.seats ?? -1) <= 2) {
+        ok(`19.3: final trip occupancy (${finalOccupancy[0]?.seats}) never exceeded capacity (2) despite the race`);
+      } else {
+        bad('19.3: final occupancy vs capacity', JSON.stringify(finalOccupancy[0]));
+      }
+    }
 
     // ── Task 3.1: commune-level search filter ───────────────────────────────
     console.log('\n=== Task 3.1: commune-level search filter ===');
@@ -321,18 +615,9 @@ async function main(): Promise<void> {
       bad('3.1: search filtered to "Beni Mered"', 'trip was found, expected it to be excluded');
     }
 
-    // ── helper: a throwaway driver, fully cleaned up at the end (never the
-    // shared demo driverId — ETA/no-show/KYC tests mutate driver-scoped
-    // state we don't want to leave behind on a real account) ────────────────
-    const mkTestDriver = async (n: number): Promise<string> => {
-      const row = await db.insert<{ id: string }>('driver', {
-        full_name: `TEST Driver ${tag}-${n}`,
-        nin: `${tag}${n}`.padStart(18, '0').slice(-18),
-        phone: `+2136${String(tag).slice(-6)}${n}`,
-      });
-      createdDriverIds.push(row.id);
-      return row.id;
-    };
+    // (mkTestDriver — a throwaway driver, fully cleaned up at the end, never
+    // the shared demo driverId — is declared above, next to mkCustomer, so
+    // the Task 19.3 race tests earlier in this function can use it too.)
 
     // ── Task 4.3: live ETA ───────────────────────────────────────────────────
     console.log('\n=== Task 4.3: live ETA ===');
@@ -1573,6 +1858,13 @@ async function main(): Promise<void> {
         await db.raw(`delete from wpoint where trajectory_id = '${trajectoryId}'`);
         await db.raw(`delete from trajectory where id = '${trajectoryId}'`);
         console.log('  - removed trajectory + wpoints');
+      }
+      if (trajectoryId2) {
+        await db.raw(`delete from default_trip_price where trajectory_id = '${trajectoryId2}'`);
+        await db.raw(`delete from wpoint_commune where wpoint_id in (select id from wpoint where trajectory_id = '${trajectoryId2}')`);
+        await db.raw(`delete from wpoint where trajectory_id = '${trajectoryId2}'`);
+        await db.raw(`delete from trajectory where id = '${trajectoryId2}'`);
+        console.log('  - removed second (Task 19.1) trajectory + wpoints');
       }
       if (createdCustomerIds.length) {
         // wallet_entry / promo_redemption / referral_reward all cascade on

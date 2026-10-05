@@ -78,8 +78,17 @@ const stmts = splitSqlStatements(script);
 const fnCount = stmts.filter((s) => /create or replace function/i.test(s)).length;
 const procCount = stmts.filter((s) => /create or replace procedure/i.test(s)).length;
 console.log(`\n  sql.txt → ${stmts.length} statements (${fnCount} functions, ${procCount} procedures)\n`);
-check('sql.txt: all 41 functions parsed whole', fnCount === 41);
-check('sql.txt: all 7 procedures parsed whole', procCount === 7);
+// Compare against an independent count straight from the raw source text,
+// rather than a hardcoded literal — a literal count goes stale (and starts
+// silently "failing" for the wrong reason) every time the schema grows a
+// new function/procedure. This instead keeps checking the thing that
+// actually matters: splitSqlStatements() must parse every single
+// `create or replace function/procedure` body as exactly one whole
+// statement, never splitting one in two or merging two together.
+const rawFnCount = (script.match(/create or replace function/gi) ?? []).length;
+const rawProcCount = (script.match(/create or replace procedure/gi) ?? []).length;
+check(`sql.txt: all ${rawFnCount} functions parsed as one whole statement each`, fnCount === rawFnCount);
+check(`sql.txt: all ${rawProcCount} procedures parsed as one whole statement each`, procCount === rawProcCount);
 check('sql.txt: trip table DDL present', stmts.some((s) => s.includes('create table if not exists trip (')));
 check('sql.txt: $sec$ security block is one statement', stmts.some((s) => s.includes('$sec$') && s.includes('security_invoker')));
 check('sql.txt: no stray fragments', !stmts.some((s) => /^\s*(end|exception|then|loop)\b/i.test(s)));

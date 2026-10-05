@@ -1439,65 +1439,80 @@ TASK 19.1 — Domain tests
 
 Test:
 
-[ ] WPoint
+[x] WPoint
 
-[ ] trajectory
+[x] trajectory
 
-[ ] commune validation
+[x] commune validation
 
-[ ] pricing
+[x] pricing
 
-[ ] capacity
+[x] capacity
 
-[ ] reservation transitions
+[x] reservation transitions
 
-[ ] trip transitions
+[x] trip transitions
 
 TASK 19.2 — API tests
 
 Test:
 
-[ ] authentication
+[x] authentication
 
-[ ] authorization
+[x] authorization
 
-[ ] customer
+[x] customer
 
-[ ] driver
+[x] driver
 
-[ ] admin
+[x] admin
 
-[ ] trips
+[x] trips
 
-[ ] reservations
+[x] reservations
 
-[ ] payments
+[x] payments
 
-[ ] refunds
+[x] refunds
 
-[ ] notifications
+[x] notifications
 
 TASK 19.3 — Concurrency tests
 
 Mandatory:
 
-[ ] last-seat race
+[x] last-seat race
 
-[ ] payment/expiration race
+[x] payment/expiration race
 
-[ ] approval race
+[x] approval race
 
-[ ] cancellation race
+[x] cancellation race
 
-[ ] waitlist promotion race
+[x] waitlist promotion race
 
-[ ] duplicate webhook
+[x] duplicate webhook
 
 TASK 19.4 — End-to-end booking test
 
 The final E2E scenario must cover:
 
 Customer registration/login ↓ Driver registration ↓ Driver KYC approval ↓ Driver trajectory ↓ Trip creation ↓ Customer search ↓ Partial/full route selection ↓ GPS pickup/dropoff ↓ Booking request ↓ Driver approval ↓ Seat hold ↓ Payment ↓ Confirmation ↓ Trip start ↓ Passenger boarding ↓ Trip completion ↓ Reservation completion/no-show ↓ Driver earnings ↓ Settlement/refund if applicable ↓ Rating 
+
+[x] backend/api/tests/e2e-booking.ts (npm run test:e2e) — one continuous HTTP-level
+    narrative covering every step above in order: admin provisions a driver,
+    driver KYC is submitted and approved, driver builds a trajectory
+    (Alger→Blida→Djelfa) and publishes a priced trip; 4 customers search and
+    book (A: full route, B: partial route, D: full route, E: partial route);
+    driver approves all 4 (seat hold); A pays by gateway, B pays by wallet, D
+    pays by gateway then cancels before departure (refund settlement leg), E
+    never pays; driver starts the trip, the stop manifest is checked for
+    correct passenger boarding counts, driver completes the trip; A and B
+    resolve to completed, E resolves to no_show; driver earnings
+    summary/ledger reflect the two completed fares; customer and driver rate
+    each other both directions on the completed reservation, and rating a
+    non-completed (no_show) reservation is rejected (DZ721). 42/42 passed,
+    cleanup verified to leave zero leftover rows.
 
 PHASE 20 — PRODUCTION HARDENING
 
