@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { setDbUnavailableHandler } from './api';
 import { useAuth } from './auth';
 import InstallAppButton from './components/InstallAppButton';
 import NotificationBell from './components/NotificationBell';
@@ -7,6 +8,7 @@ import { LANGS, useI18n } from './i18n';
 import AdminPage from './pages/AdminPage';
 import DriverPage from './pages/DriverPage';
 import HomePage from './pages/HomePage';
+import InitDbPage from './pages/InitDbPage';
 import LoginPage from './pages/LoginPage';
 import MyReservationsPage from './pages/MyReservationsPage';
 import ProfilePage from './pages/ProfilePage';
@@ -21,6 +23,25 @@ export default function App() {
   const { t, lang, setLang } = useI18n();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
+  const navigate = useNavigate();
+
+  // Self-healing setup screen: redirect to /init-db whenever the backend
+  // reports its database isn't configured/reachable — either detected
+  // up-front on first load, or mid-session via any api() call that comes
+  // back with the DB_UNAVAILABLE signal (see api.ts / backend degraded mode).
+  useEffect(() => {
+    setDbUnavailableHandler(() => {
+      if (window.location.pathname !== '/init-db') navigate('/init-db');
+    });
+    fetch('/api/init-db/status')
+      .then((r) => r.json())
+      .then((s: { connected?: boolean }) => {
+        if (!s.connected && window.location.pathname !== '/init-db') navigate('/init-db');
+      })
+      .catch(() => undefined);
+    return () => setDbUnavailableHandler(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Task — small-screen nav: the topbar's links + auth controls no longer
   // fit on one row below ~880px (see .topbar-panel in index.css), so they're
@@ -134,6 +155,7 @@ export default function App() {
           <Route path="/driver" element={<DriverPage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/track/:token" element={<ShareTrackingPage />} />
+          <Route path="/init-db" element={<InitDbPage />} />
           <Route path="*" element={<p className="empty">{t('notFound.text')}</p>} />
         </Routes>
       </main>

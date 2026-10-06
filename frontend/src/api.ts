@@ -56,6 +56,17 @@ export async function apiUpload<T = unknown>(path: string, file: File, fields: R
   return data as T;
 }
 
+// Fired whenever any api() call comes back with the backend's "database is
+// not configured/reachable" signal (see backend/api/server.ts degraded
+// mode). App.tsx subscribes to this to auto-redirect to /init-db — the
+// self-service setup screen — instead of leaving every page stuck on a
+// generic error. A plain module-level callback (not context) because api.ts
+// has no React tree of its own to publish an event through.
+let dbUnavailableHandler: (() => void) | null = null;
+export function setDbUnavailableHandler(fn: (() => void) | null): void {
+  dbUnavailableHandler = fn;
+}
+
 /** JSON fetch helper — session sent as a `?sid=` query param, throws ApiError on !ok. */
 export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
   const res = await fetch(withSessionParam(path), {
@@ -66,6 +77,7 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
   });
   const data = (await res.json().catch(() => ({}))) as { error?: { code?: string; message?: string } };
   if (!res.ok) {
+    if (res.status === 503 && data.error?.code === 'DB_UNAVAILABLE') dbUnavailableHandler?.();
     throw new ApiError(data.error?.message ?? `Erreur ${res.status}`, data.error?.code ?? 'UNKNOWN', res.status);
   }
   return data as T;
