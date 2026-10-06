@@ -66,7 +66,11 @@ function requireInitDbAuth(req: Request, res: Response, next: NextFunction): voi
   const expectedUser = env.INIT_DB_USERNAME || 'admin';
   const expectedPass = env.INIT_DB_PASSWORD || 'admin';
   if (!timingSafeEqualStr(user, expectedUser) || !timingSafeEqualStr(pass, expectedPass)) {
-    res.setHeader('WWW-Authenticate', 'Basic realm="wassalni-init-db"');
+    // Deliberately NOT setting a `WWW-Authenticate` response header here:
+    // doing so makes browsers hijack this 401 and pop up their own native
+    // Basic-Auth login dialog instead of letting the React page's own form
+    // show the error inline. The credentials are still checked exactly the
+    // same way — this just keeps the UI in our hands.
     res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Identifiants admin invalides.' } });
     return;
   }

@@ -65,7 +65,7 @@ export default function InitDbPage() {
   const [status, setStatus] = useState<StatusResp | null>(null);
 
   const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('');
+  const [password, setPassword] = useState('admin');
   const [unlocked, setUnlocked] = useState(false);
   const [authError, setAuthError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
