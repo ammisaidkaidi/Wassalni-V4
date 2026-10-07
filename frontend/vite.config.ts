@@ -1,4 +1,4 @@
-import react from '@vitejs/plugin-react';
+import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';
 
 // Dev server (and, identically, the production preview server after `vite
@@ -6,7 +6,7 @@ import { defineConfig } from 'vite';
 // browser only ever talks to this one origin (cookies included, no CORS
 // needed for normal app usage).
 export default defineConfig({
-  plugins: [react()],
+  plugins: [vue()],
   server: {
     host: '0.0.0.0',
     port: 5173,

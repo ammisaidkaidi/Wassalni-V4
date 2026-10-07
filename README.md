@@ -1,10 +1,10 @@
 # 🚐 Wassalni — plateforme de réservation de voyages (Algérie)
 
-Monorepo : **frontend** (React + Vite) ↔ **backend** (Express + TypeScript) ↔ **Supabase PostgreSQL**
+Monorepo : **frontend** (Vue 3 + Vite) ↔ **backend** (Express + TypeScript) ↔ **Supabase PostgreSQL**
 (delivery domain v3 : 69 wilayas / 591 dairas / 1541 communes).
 
 ```
-frontend (React + Vite, :5173)
+frontend (Vue 3 + Vite, :5173)
    │  fetch /api/* (proxy dev → même origine, cookies de session)
    ▼
 backend (Express + TS, :3000)
